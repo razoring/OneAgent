@@ -185,7 +185,7 @@ const ChatInput = () => {
   };
 
   return (
-    <div className="relative w-full rounded-[24px] mac-element transition-all focus-within:ring-2 focus-within:ring-white/20 p-4 flex flex-col gap-3 shadow-lg">
+    <div className="relative w-full rounded-[28px] mac-element transition-all focus-within:ring-2 focus-within:ring-white/20 p-4 flex flex-col gap-3 shadow-lg">
       
       {/* Attachments Preview Row */}
       {attachments.length > 0 && (
@@ -193,7 +193,7 @@ const ChatInput = () => {
           <div className="flex items-center gap-3 flex-wrap">
             {attachments.map(att => (
               <div key={att.id} className="relative group flex flex-col items-center gap-1.5 w-16">
-                <div className="relative w-14 h-14 rounded-2xl mac-element flex items-center justify-center bg-black/20 overflow-hidden">
+                <div className="relative w-14 h-14 rounded-[20px] mac-element flex items-center justify-center bg-black/20 overflow-hidden">
                   {getFileIcon(att.type)}
                   
                   {/* Remove Overlay */}
@@ -215,13 +215,13 @@ const ChatInput = () => {
       {/* Mention Dropdown Menu (Full Width Drop-up) */}
       {isMentionMenuOpen && filteredAttachments.length > 0 && (
         <div className="absolute bottom-full left-0 w-full z-50 mb-3">
-          <div className="mac-element rounded-2xl p-2 flex flex-col shadow-2xl max-h-[200px] overflow-y-auto">
+          <div className="mac-element rounded-[24px] p-2 flex flex-col shadow-2xl max-h-[200px] overflow-y-auto">
             <div className="text-xs font-semibold text-gray-500 px-3 pt-2 pb-2 uppercase tracking-wider">Mentions</div>
             {filteredAttachments.map((att, i) => (
               <button 
                 key={att.id}
                 onClick={() => insertMention(att)}
-                className={`flex items-center gap-3 w-full text-left px-3 py-2 rounded-xl text-sm transition-colors ${
+                className={`flex items-center gap-3 w-full text-left px-3 py-2.5 rounded-2xl text-sm transition-colors ${
                   i === focusedMentionIndex ? 'bg-white/10 text-white' : 'text-gray-300 hover:bg-white/10 hover:text-white'
                 }`}
               >
@@ -251,17 +251,17 @@ const ChatInput = () => {
           {/* Attach Button Drop-up */}
           <div className="relative">
             {isAttachMenuOpen && (
-              <div className="absolute bottom-full left-0 mb-3 w-56 mac-element rounded-[20px] p-2 z-50 flex flex-col shadow-2xl">
-                <button onClick={() => handleAttach(MOCK_FILES[0])} className="flex items-center gap-3 w-full text-left px-3 py-2.5 rounded-xl text-sm text-gray-300 hover:bg-white/10 hover:text-white transition-colors">
+              <div className="absolute bottom-full left-0 mb-3 w-56 mac-element rounded-[24px] p-2 z-50 flex flex-col shadow-2xl">
+                <button onClick={() => handleAttach(MOCK_FILES[0])} className="flex items-center gap-3 w-full text-left px-3 py-2.5 rounded-2xl text-sm text-gray-300 hover:bg-white/10 hover:text-white transition-colors">
                   <FileText size={18} className="text-red-400" />
                   Attach PDF Report
                 </button>
-                <button onClick={() => handleAttach(MOCK_FILES[1])} className="flex items-center gap-3 w-full text-left px-3 py-2.5 rounded-xl text-sm text-gray-300 hover:bg-white/10 hover:text-white transition-colors">
+                <button onClick={() => handleAttach(MOCK_FILES[1])} className="flex items-center gap-3 w-full text-left px-3 py-2.5 rounded-2xl text-sm text-gray-300 hover:bg-white/10 hover:text-white transition-colors">
                   <ImageIcon size={18} className="text-blue-400" />
                   Attach Image
                 </button>
                 <div className="h-px bg-white/10 my-1 mx-2"></div>
-                <button onClick={() => handleAttach(MOCK_FILES[2])} className="flex items-center gap-3 w-full text-left px-3 py-2.5 rounded-xl text-sm text-gray-300 hover:bg-white/10 hover:text-white transition-colors">
+                <button onClick={() => handleAttach(MOCK_FILES[2])} className="flex items-center gap-3 w-full text-left px-3 py-2.5 rounded-2xl text-sm text-gray-300 hover:bg-white/10 hover:text-white transition-colors">
                   <Folder size={18} className="text-yellow-400" />
                   Upload Folder
                 </button>
@@ -269,7 +269,7 @@ const ChatInput = () => {
             )}
             <button 
               onClick={() => setIsAttachMenuOpen(!isAttachMenuOpen)}
-              className="p-2 text-gray-400 hover:text-white rounded-xl hover:bg-white/10 transition-all" 
+              className="p-2 text-gray-400 hover:text-white rounded-full hover:bg-white/10 transition-all" 
               title="Attach file"
             >
               <Plus size={20} className={`transition-transform duration-200 ${isAttachMenuOpen ? 'rotate-45' : ''}`} />
@@ -279,7 +279,7 @@ const ChatInput = () => {
           {/* Model Selector Drop-up */}
           <div className="relative">
             {isModelMenuOpen && (
-              <div className="absolute bottom-full left-0 mb-3 w-64 mac-element rounded-[20px] p-2 z-50 flex flex-col shadow-2xl">
+              <div className="absolute bottom-full left-0 mb-3 w-64 mac-element rounded-[24px] p-2 z-50 flex flex-col shadow-2xl">
                 
                 <div className="text-xs font-semibold text-gray-500 px-3 pt-3 pb-2 uppercase tracking-wider">Recent Models</div>
                 {RECENT_MODELS.map((model) => (
@@ -294,7 +294,7 @@ const ChatInput = () => {
                 <div className="h-px bg-white/10 my-2 mx-2"></div>
 
                 <div className="text-xs font-semibold text-gray-500 px-3 pt-2 pb-2 uppercase tracking-wider">All Models</div>
-                {ALL_MODELS.map((model) => (
+                {ALL_MODELS.filter(m => !RECENT_MODELS.some(r => r.id === m.id)).map((model) => (
                   <ModelItem 
                     key={`all-${model.id}`} 
                     model={model} 
@@ -307,7 +307,7 @@ const ChatInput = () => {
             
             <button 
               onClick={() => setIsModelMenuOpen(!isModelMenuOpen)}
-              className="flex items-center gap-2.5 px-3.5 py-2 rounded-xl mac-element mac-element-hover text-gray-200 font-medium text-sm transition-all"
+              className="flex items-center gap-2.5 px-3.5 py-2 rounded-2xl mac-element mac-element-hover text-gray-200 font-medium text-sm transition-all"
             >
               <img 
                 src={PROVIDER_ICONS[selectedModel.provider] || PROVIDER_ICONS['ollama']} 
@@ -323,7 +323,7 @@ const ChatInput = () => {
         </div>
 
         {/* Right Action: Send Button */}
-        <button className="p-2 bg-white text-black rounded-xl hover:bg-gray-200 transition-colors disabled:opacity-50" title="Send message">
+        <button className="p-2 bg-white text-black rounded-full hover:bg-gray-200 transition-colors disabled:opacity-50" title="Send message">
           <ArrowUp size={20} strokeWidth={3} />
         </button>
         
