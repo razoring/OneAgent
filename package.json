@@ -14,11 +14,13 @@
     "lucide-react": "^1.32.0",
     "react": "^19.2.8",
     "react-dom": "^19.2.8",
+    "react-mentions": "^4.4.10",
     "tailwind-merge": "^3.6.0"
   },
   "devDependencies": {
     "@types/react": "^19.2.18",
     "@types/react-dom": "^19.2.4",
+    "@types/react-mentions": "^4.4.1",
     "@vitejs/plugin-react": "^6.0.5",
     "autoprefixer": "^10.5.4",
     "concurrently": "^10.0.5",

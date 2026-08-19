@@ -5,13 +5,7 @@ import { ChevronDown } from 'lucide-react';
 const ChatArea = () => {
   return (
     <div className="flex-1 flex flex-col bg-[#212121] relative">
-      {/* Top Bar (Model Selector) */}
-      <div className="absolute top-0 w-full h-14 flex items-center justify-center pointer-events-none z-10">
-        <button className="pointer-events-auto flex items-center gap-2 px-3 py-1.5 rounded-lg hover:bg-[#2f2f2f] text-gray-200 font-medium text-lg transition-colors">
-          llama3.1:latest
-          <ChevronDown size={18} className="text-gray-400" />
-        </button>
-      </div>
+
 
       {/* Main Content */}
       <div className="flex-1 flex flex-col items-center justify-center px-4 overflow-y-auto">

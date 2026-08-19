@@ -17,6 +17,11 @@ const createWindow = () => {
 
   mainWindow.setMenu(null);
 
+  // Log renderer console messages to the terminal
+  mainWindow.webContents.on('console-message', (event, level, message, line, sourceId) => {
+    console.log(`[Renderer Console]: ${message} (line ${line})`);
+  });
+
   // Load the React app
   if (!app.isPackaged) {
     mainWindow.loadURL('http://localhost:5173');
