@@ -48,6 +48,7 @@ const MarkdownComponents: any = {
 };
 
 export interface ChatMessage {
+  id: string;
   role: 'user' | 'assistant' | 'system';
   content: string;
   thinking?: string;
@@ -55,10 +56,35 @@ export interface ChatMessage {
   isGenerating?: boolean;
 }
 
+const BlockToolbar = ({ onEdit, onRegenerate, onDelete }: { onEdit?: () => void, onRegenerate?: () => void, onDelete?: () => void }) => {
+  return (
+    <div className="absolute top-2 right-2 flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity bg-[#1e1e1e]/80 backdrop-blur-sm p-1 rounded-md border border-white/10 z-10">
+      {onEdit && (
+        <button onClick={onEdit} className="p-1 text-gray-400 hover:text-white hover:bg-white/10 rounded" title="Edit">
+          <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/><path d="m15 5 4 4"/></svg>
+        </button>
+      )}
+      {onRegenerate && (
+        <button onClick={onRegenerate} className="p-1 text-gray-400 hover:text-white hover:bg-white/10 rounded" title="Regenerate">
+          <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/></svg>
+        </button>
+      )}
+      {onDelete && (
+        <button onClick={onDelete} className="p-1 text-gray-400 hover:text-red-400 hover:bg-white/10 rounded" title="Delete">
+          <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M3 6h18"/><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/><line x1="10" x2="10" y1="11" y2="17"/><line x1="14" x2="14" y1="11" y2="17"/></svg>
+        </button>
+      )}
+    </div>
+  );
+};
+
 const ChatArea = () => {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [isGenerating, setIsGenerating] = useState(false);
   
+  // Edit mode tracking
+  const [editingBlock, setEditingBlock] = useState<{ id: string, type: 'user' | 'thinking' | 'response' } | null>(null);
+
   const autoScrollEnabled = useRef(true);
   const bottomRef = useRef<HTMLDivElement>(null);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
@@ -92,8 +118,14 @@ const ChatArea = () => {
 
   const formatMentions = (text: string) => {
     if (!text) return text;
-    // Match code blocks, inline code, or mentions to strictly avoid replacing within code
-    const regex = /(```[\s\S]*?```|`[^`]+`)|(?<![a-zA-Z0-9])@([a-zA-Z0-9_.-]+)/g;
+    if (allAttachments.length === 0) return text;
+    
+    // Match code blocks, inline code, or exact attachment names to strictly avoid replacing within code
+    // Dynamically build regex based on actual attachment names to support spaces
+    const attachmentNames = allAttachments.map(a => a.display.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+    const namesRegex = attachmentNames.join('|');
+    const regex = new RegExp(`(\`\`\`[\\s\\S]*?\`\`\`|\`[^\`]+\`)|(?<![a-zA-Z0-9])@(${namesRegex})`, 'g');
+    
     return text.replace(regex, (match, codeBlock, mention) => {
       if (codeBlock) return codeBlock;
       if (mention) {
@@ -120,7 +152,7 @@ const ChatArea = () => {
       if (mentionFile) {
         let att = allAttachments.find(a => a.display === mentionFile);
         let icon = null;
-        if (att?.thumbnail) {
+        if (att?.thumbnail && att?.type === 'image') {
           icon = <img src={att.thumbnail} style={{width: 14, height: 14, objectFit: 'contain'}} />;
         } else {
           let type = att?.type || 'file';
@@ -133,7 +165,14 @@ const ChatArea = () => {
         }
 
         return (
-          <span className="mention inline-flex items-center gap-1.5 bg-white/10 border border-white/5 text-blue-400 px-2 h-[24px] rounded-md mx-1 align-middle select-none">
+          <span 
+            className="mention inline-flex items-center gap-1.5 bg-white/10 border border-white/5 text-blue-400 px-2 h-[24px] rounded-md mx-1 align-middle select-none cursor-pointer hover:underline"
+            onClick={() => {
+              if (att?.path) {
+                (window as any).electronAPI.openPath(att.path);
+              }
+            }}
+          >
             <span className="flex items-center text-current" style={{ width: 14, height: 14 }}>
               {icon}
             </span>
@@ -145,29 +184,50 @@ const ChatArea = () => {
     }
   };
 
+  const [lastUsedModel, setLastUsedModel] = useState<LLMModel | null>(null);
+
   const handleSendMessage = async (text: string, attachments: any[], model: LLMModel) => {
     if (!text.trim() && attachments.length === 0) return;
+    setLastUsedModel(model);
 
     // Build the user message
     const userMsg: ChatMessage = {
+      id: Math.random().toString(36).substring(7),
       role: 'user',
       content: text,
       attachments: attachments.length > 0 ? attachments : undefined
     };
 
-    setMessages(prev => [...prev, userMsg]);
+    const newMsgs = [...messages, userMsg];
+    setMessages(newMsgs);
+    
+    await triggerGeneration(newMsgs, model);
+  };
+
+  const triggerGeneration = async (currentMessages: ChatMessage[], model: LLMModel, prefillThinking: string = '') => {
     setIsGenerating(true);
     abortControllerRef.current = new AbortController();
 
-    // Re-enable autoscroll when user sends a message
+    // Re-enable autoscroll when generation starts
     autoScrollEnabled.current = true;
     setTimeout(() => {
       bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
     }, 50);
 
+    const assistantMsgId = Math.random().toString(36).substring(7);
+
+    // Add temporary loading message for assistant
+    setMessages([...currentMessages, { 
+      id: assistantMsgId,
+      role: 'assistant', 
+      content: '', 
+      thinking: prefillThinking, 
+      isGenerating: true 
+    }]);
+
     try {
       // Format payload for OpenAI-compatible API
-      const formattedMessages = [];
+      const formattedMessages: any[] = [];
       
       // System prompt for multi-attachment focus weighting
       formattedMessages.push({
@@ -175,7 +235,7 @@ const ChatArea = () => {
         content: DEFAULT_SYSTEM_PROMPT
       });
 
-      for (const msg of [...messages, userMsg]) {
+      for (const msg of currentMessages) {
         let textContent = msg.content || '';
 
         // If this is a previous assistant turn with thinking, preserve it in the context!
@@ -198,9 +258,10 @@ const ChatArea = () => {
                 
                 let fileText = parsedDoc.text;
                 // Perform RAG if document has chunks and user provided a query
-                if (parsedDoc.chunks && parsedDoc.chunkEmbeddings && text.trim() && (window as any).electronAPI.ragSearch) {
+                // Note: user query might not be available directly here if not last msg, but we can pass textContent
+                if (parsedDoc.chunks && parsedDoc.chunkEmbeddings && textContent.trim() && (window as any).electronAPI.ragSearch) {
                   try {
-                    const queryEmbedRes = await (window as any).electronAPI.embedTexts([text]);
+                    const queryEmbedRes = await (window as any).electronAPI.embedTexts([textContent]);
                     if (queryEmbedRes.success && queryEmbedRes.embeddings.length > 0) {
                       const searchRes = await (window as any).electronAPI.ragSearch({
                         queryEmbedding: queryEmbedRes.embeddings[0],
@@ -239,7 +300,6 @@ const ChatArea = () => {
             content.unshift({ type: 'text', text: textContent });
           }
           
-          //only send array content if there are images, otherwise send raw text
           if (content.length === 1 && content[0].type === 'text') {
             formattedMessages.push({ role: msg.role, content: textContent });
           } else {
@@ -250,28 +310,31 @@ const ChatArea = () => {
         }
       }
 
-      // Add temporary loading message for assistant
-      setMessages(prev => [
-        ...prev,
-        { role: 'assistant', content: '', thinking: '', isGenerating: true }
-      ]);
+      if (prefillThinking) {
+        formattedMessages.push({
+          role: 'assistant',
+          content: `<think>\n${prefillThinking}\n</think>\n\n`
+        });
+      }
 
       // Stream chat completion
       await generateChatStream(model, formattedMessages, update => {
         setMessages(prev => {
           const newMsgs = [...prev];
-          const lastIdx = newMsgs.length - 1;
-          if (lastIdx >= 0 && newMsgs[lastIdx].role === 'assistant') {
-            newMsgs[lastIdx] = {
-              role: 'assistant',
+          const targetIdx = newMsgs.findIndex(m => m.id === assistantMsgId);
+          if (targetIdx !== -1) {
+            newMsgs[targetIdx] = {
+              ...newMsgs[targetIdx],
               content: update.content,
-              thinking: update.thinking,
-              isGenerating: update.isGenerating,
+              thinking: prefillThinking ? prefillThinking : update.thinking,
+              isGenerating: update.isGenerating
             };
           }
           return newMsgs;
         });
       }, abortControllerRef.current.signal);
+
+
 
     } catch (e: any) {
       if (e.name === 'AbortError') {
@@ -308,6 +371,72 @@ const ChatArea = () => {
     }
   };
 
+  const handleSaveEdit = (id: string, type: 'user' | 'thinking' | 'response', text: string, attachments: any[]) => {
+    setMessages(prev => {
+      const newMsgs = [...prev];
+      const idx = newMsgs.findIndex(m => m.id === id);
+      if (idx !== -1) {
+        if (type === 'user' || type === 'response') {
+          newMsgs[idx] = { ...newMsgs[idx], content: text, attachments: attachments.length > 0 ? attachments : undefined };
+        } else if (type === 'thinking') {
+          newMsgs[idx] = { ...newMsgs[idx], thinking: text };
+        }
+      }
+      return newMsgs;
+    });
+    setEditingBlock(null);
+  };
+
+  const handleDelete = (id: string, type: 'user' | 'thinking' | 'response') => {
+    setMessages(prev => {
+      const newMsgs = [...prev];
+      const idx = newMsgs.findIndex(m => m.id === id);
+      if (idx === -1) return prev;
+      
+      if (type === 'user') {
+        newMsgs.splice(idx, 1);
+      } else if (type === 'thinking') {
+        newMsgs[idx] = { ...newMsgs[idx], thinking: '' };
+        if (!newMsgs[idx].content) newMsgs.splice(idx, 1);
+      } else if (type === 'response') {
+        newMsgs[idx] = { ...newMsgs[idx], content: '' };
+        if (!newMsgs[idx].thinking) newMsgs.splice(idx, 1);
+      }
+      return newMsgs;
+    });
+    if (editingBlock?.id === id && editingBlock?.type === type) {
+      setEditingBlock(null);
+    }
+  };
+
+  const handleRegenerate = async (id: string, type: 'user' | 'thinking' | 'response') => {
+    if (!lastUsedModel) return;
+    const msgIdx = messages.findIndex(m => m.id === id);
+    if (msgIdx === -1) return;
+    const msg = messages[msgIdx];
+    
+    if (type === 'user' || type === 'thinking') {
+      const contextMsgs = messages.slice(0, msgIdx);
+      setMessages(contextMsgs);
+      
+      // If we are regenerating a user prompt, wait, if type is 'user', the msgIdx points to the user prompt itself!
+      // We need to re-add the user prompt and generate.
+      if (type === 'user') {
+        const newMsgs = [...contextMsgs, { ...msg }];
+        setMessages(newMsgs);
+        triggerGeneration(newMsgs, lastUsedModel);
+      } else {
+        // If type is 'thinking', msgIdx points to the assistant message. We just regenerate it.
+        triggerGeneration(contextMsgs, lastUsedModel);
+      }
+    } else if (type === 'response') {
+      const contextMsgs = messages.slice(0, msgIdx);
+      setMessages(contextMsgs);
+      triggerGeneration(contextMsgs, lastUsedModel, msg.thinking || '');
+    }
+    setEditingBlock(null);
+  };
+
   return (
     <div className="flex-1 flex flex-col bg-[#212121] relative">
       
@@ -324,26 +453,36 @@ const ChatArea = () => {
           </div>
         ) : (
           <div className="w-full max-w-3xl flex flex-col gap-6 py-10 px-4">
-            {messages.map((msg, i) => (
-              <div key={i} className="flex flex-col w-full text-gray-100 gap-2 mb-4">
+            {messages.map((msg, idx) => {
+              const isEditingUser = editingBlock?.id === msg.id && editingBlock?.type === 'user';
+              const isEditingThinking = editingBlock?.id === msg.id && editingBlock?.type === 'thinking';
+              const isEditingResponse = editingBlock?.id === msg.id && editingBlock?.type === 'response';
+              
+              return (
+              <div key={msg.id || idx} className="flex flex-col w-full text-gray-100 gap-2 mb-4">
                 <div className="font-semibold text-sm text-gray-300">
                   {msg.role === 'user' ? 'You' : 'Assistant'}
                 </div>
-                {msg.role === 'user' ? (
-                  <div className="w-full text-gray-100">
+                {msg.role === 'user' && (
+                  <div className={`w-full group relative ${isEditingUser ? 'ring-2 ring-blue-500 rounded-lg p-2' : ''}`}>
+                    <BlockToolbar 
+                      onEdit={() => setEditingBlock({ id: msg.id, type: 'user' })} 
+                      onRegenerate={() => handleRegenerate(msg.id, 'user')} 
+                      onDelete={() => handleDelete(msg.id, 'user')} 
+                    />
                     <div className="focus:outline-none [&_.mention]:inline-flex [&_.mention]:items-center [&_.mention]:gap-1.5 [&_.mention]:bg-white/10 [&_.mention]:border [&_.mention]:border-white/5 [&_.mention]:text-blue-400 [&_.mention]:px-2 [&_.mention]:h-[24px] [&_.mention]:rounded-md [&_.mention]:mx-1 [&_.mention]:align-middle [&_.mention]:select-none">
-                        <ReactMarkdown 
-                          remarkPlugins={[remarkGfm, remarkMath]} 
-                          rehypePlugins={[rehypeRaw, rehypeKatex]} 
-                          components={chatComponents}
-                        >
+                      <ReactMarkdown 
+                        remarkPlugins={[remarkGfm, remarkMath]} 
+                        rehypePlugins={[rehypeRaw, rehypeKatex]} 
+                        components={chatComponents}
+                      >
                         {formatMentions(msg.content)}
                       </ReactMarkdown>
                     </div>
-                    {msg.attachments && (
+                    {msg.attachments && msg.attachments.length > 0 && (
                       <div className="flex gap-2 mt-3 flex-wrap">
-                        {msg.attachments.map(att => (
-                          <div key={att.id} className="relative w-16 h-16 rounded-lg overflow-hidden border border-white/10">
+                        {msg.attachments.map((att: any, aIdx: number) => (
+                          <div key={aIdx} className="relative w-16 h-16 rounded-lg overflow-hidden border border-white/10 group/att">
                             {att.type === 'image' && att.url ? (
                               <img src={att.url} alt="attached" className="w-full h-full object-cover" />
                             ) : att.thumbnail ? (
@@ -356,35 +495,43 @@ const ChatArea = () => {
                       </div>
                     )}
                   </div>
-                ) : (
-                  <div className="w-full text-gray-300">
-                    {/* Collapsible Thinking Process Block */}
-                    {(msg.thinking || (msg.isGenerating && !msg.content)) && (
-                      <ThinkingBlock thinking={msg.thinking || ''} isGenerating={msg.isGenerating} />
-                    )}
+                )}
 
-                    {/* Assistant Message Content */}
-                    <div className="[&_.mention]:inline-flex [&_.mention]:items-center [&_.mention]:gap-1.5 [&_.mention]:bg-white/10 [&_.mention]:border [&_.mention]:border-white/5 [&_.mention]:text-blue-400 [&_.mention]:px-2 [&_.mention]:h-[24px] [&_.mention]:rounded-md [&_.mention]:mx-1 [&_.mention]:align-middle [&_.mention]:select-none">
-                      {msg.content ? (
-                        <ReactMarkdown 
-                          remarkPlugins={[remarkGfm, remarkMath]} 
-                          rehypePlugins={[rehypeRaw, rehypeKatex]} 
-                          components={chatComponents}
-                        >
-                          {formatMentions(msg.content)}
-                        </ReactMarkdown>
-                      ) : msg.isGenerating && !msg.thinking ? (
-                        <div className="flex items-center gap-2 text-gray-400 text-sm h-6">
-                          <div className="w-1.5 h-1.5 rounded-full bg-gray-400 animate-pulse"></div>
-                          <div className="w-1.5 h-1.5 rounded-full bg-gray-400 animate-pulse delay-75"></div>
-                          <div className="w-1.5 h-1.5 rounded-full bg-gray-400 animate-pulse delay-150"></div>
+                {msg.role === 'assistant' && (
+                  <div className="w-full text-gray-300 flex flex-col gap-2">
+                    {(msg.thinking || (msg.isGenerating && !msg.content)) && (
+                      <div className={`w-full group relative ${isEditingThinking ? 'ring-2 ring-blue-500 rounded-lg p-2' : ''}`}>
+                        <BlockToolbar 
+                          onEdit={() => setEditingBlock({ id: msg.id, type: 'thinking' })} 
+                          onRegenerate={() => handleRegenerate(msg.id, 'thinking')} 
+                          onDelete={() => handleDelete(msg.id, 'thinking')} 
+                        />
+                        <ThinkingBlock thinking={msg.thinking || ''} isGenerating={msg.isGenerating && !msg.content} />
+                      </div>
+                    )}
+                    
+                    {(msg.content || (msg.isGenerating && !msg.thinking)) && (
+                      <div className={`w-full group relative ${isEditingResponse ? 'ring-2 ring-blue-500 rounded-lg p-2' : ''}`}>
+                        <BlockToolbar 
+                          onEdit={() => setEditingBlock({ id: msg.id, type: 'response' })} 
+                          onRegenerate={() => handleRegenerate(msg.id, 'response')} 
+                          onDelete={() => handleDelete(msg.id, 'response')} 
+                        />
+                        <div className="[&_.mention]:inline-flex [&_.mention]:items-center [&_.mention]:gap-1.5 [&_.mention]:bg-white/10 [&_.mention]:border [&_.mention]:border-white/5 [&_.mention]:text-blue-400 [&_.mention]:px-2 [&_.mention]:h-[24px] [&_.mention]:rounded-md [&_.mention]:mx-1 [&_.mention]:align-middle [&_.mention]:select-none">
+                          <ReactMarkdown 
+                            remarkPlugins={[remarkGfm, remarkMath]} 
+                            rehypePlugins={[rehypeRaw, rehypeKatex]} 
+                            components={chatComponents}
+                          >
+                            {formatMentions(msg.content) + (msg.isGenerating ? ' ⬤' : '')}
+                          </ReactMarkdown>
                         </div>
-                      ) : null}
-                    </div>
+                      </div>
+                    )}
                   </div>
                 )}
               </div>
-            ))}
+            )})}
             <div ref={bottomRef} />
           </div>
         )}
@@ -393,7 +540,15 @@ const ChatArea = () => {
       {/* Input Area */}
       <div className="w-full flex justify-center p-4 bg-gradient-to-t from-[#212121] via-[#212121] to-transparent pt-10">
         <div className="max-w-3xl w-full">
-          <ChatInput onSend={handleSendMessage} onStop={handleStop} disabled={isGenerating} />
+          <ChatInput 
+            onSend={handleSendMessage} 
+            onStop={handleStop} 
+            disabled={isGenerating} 
+            editingBlock={editingBlock}
+            onSaveEdit={handleSaveEdit}
+            onCancelEdit={() => setEditingBlock(null)}
+            messages={messages}
+          />
           <div className="text-center text-xs text-gray-500 mt-3">
             AI models can make mistakes. Verify important information.
           </div>

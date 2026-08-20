@@ -150,7 +150,12 @@ export interface ParsedDocument {
 // Robust document parser that extracts clean text from Office, PDF, HTML, MHTML, and code files
 export const parseAttachmentDocument = async (file: File): Promise<ParsedDocument> => {
   const ext = file.name.toLowerCase().split('.').pop() || '';
-  const filePath = (file as any).path;
+  let filePath = '';
+  if ((window as any).electronAPI?.getPathForFile) {
+    filePath = (window as any).electronAPI.getPathForFile(file);
+  } else {
+    filePath = (file as any).path || '';
+  }
 
   // Try backend extraction via Electron IPC first (for PDF, DOCX, PPTX, XLSX, HTML, MHTML, etc.)
   if ((window as any).electronAPI?.parseDocument) {
@@ -160,7 +165,7 @@ export const parseAttachmentDocument = async (file: File): Promise<ParsedDocumen
         fileBuffer = await file.arrayBuffer();
       }
       const res = await (window as any).electronAPI.parseDocument({
-        filePath,
+        filePath: filePath || undefined,
         fileBuffer: fileBuffer ? Array.from(new Uint8Array(fileBuffer)) : undefined,
         fileName: file.name
       });

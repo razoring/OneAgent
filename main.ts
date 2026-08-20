@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, nativeImage } from 'electron';
+import { app, BrowserWindow, ipcMain, nativeImage, shell } from 'electron';
 import * as path from 'path';
 import * as fs from 'fs';
 import * as officeParser from 'officeparser';
@@ -49,6 +49,18 @@ ipcMain.on('window-maximize', () => {
 
 ipcMain.on('window-close', () => {
   BrowserWindow.getFocusedWindow()?.close();
+});
+
+ipcMain.on('open-path', async (event, filePath) => {
+  console.log('[open-path] Opening:', filePath);
+  if (!filePath) {
+    console.warn('[open-path] No filePath provided');
+    return;
+  }
+  const err = await shell.openPath(filePath);
+  if (err) {
+    console.error('[open-path] Failed to open path:', err);
+  }
 });
 
 ipcMain.handle('fetch-models', async (event, config) => {
@@ -377,7 +389,7 @@ ipcMain.handle('rag-search', async (event, { queryEmbedding, chunks, chunkEmbedd
 ipcMain.handle('get-file-thumbnail', async (event, filePath) => {
   try {
     // Generates a thumbnail image from the file (like in Windows Explorer)
-    const thumb = await nativeImage.createThumbnailFromPath(filePath, { width: 64, height: 64 });
+    const thumb = await nativeImage.createThumbnailFromPath(filePath, { width: 256, height: 256 });
     if (!thumb.isEmpty()) {
       return thumb.toDataURL();
     }

@@ -1,4 +1,4 @@
-const { ipcRenderer } = require('electron');
+const { ipcRenderer, webUtils } = require('electron');
 
 (window as any).electronAPI = {
   minimize: () => ipcRenderer.send('window-minimize'),
@@ -27,4 +27,13 @@ const { ipcRenderer } = require('electron');
   embedTexts: (texts: string[]) => ipcRenderer.invoke('embed-texts', texts),
   ragSearch: (options: any) => ipcRenderer.invoke('rag-search', options),
   getFileThumbnail: (filePath: string) => ipcRenderer.invoke('get-file-thumbnail', filePath),
+  openPath: (filePath: string) => ipcRenderer.send('open-path', filePath),
+  getPathForFile: (file: File) => {
+    try {
+      if (webUtils && typeof webUtils.getPathForFile === 'function') {
+        return webUtils.getPathForFile(file);
+      }
+    } catch (e) {}
+    return (file as any).path || '';
+  },
 };

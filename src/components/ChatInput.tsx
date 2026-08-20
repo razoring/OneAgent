@@ -38,8 +38,12 @@ const ModelItem = ({ model, isSelected, onClick }: { model: any, isSelected: boo
 
 interface ChatInputProps {
   onSend: (text: string, attachments: any[], model: LLMModel) => void;
-  onStop?: () => void;
-  disabled?: boolean;
+  onStop: () => void;
+  disabled: boolean;
+  editingBlock?: { id: string, type: 'user' | 'thinking' | 'response' } | null;
+  onSaveEdit?: (id: string, type: 'user' | 'thinking' | 'response', text: string, attachments: any[]) => void;
+  onCancelEdit?: () => void;
+  messages?: any[];
 }
 
 class MentionWidget extends WidgetType {
@@ -57,7 +61,7 @@ class MentionWidget extends WidgetType {
     iconSpan.className = 'flex items-center text-current';
     iconSpan.style.width = '14px';
     iconSpan.style.height = '14px';
-    if (this.attachment?.thumbnail) {
+    if (this.attachment?.thumbnail && this.attachment?.type === 'image') {
       iconSpan.innerHTML = `<img src="${this.attachment.thumbnail}" style="width:14px; height:14px; object-fit:contain;" />`;
     } else {
       const type = this.attachment?.type || 'file';
@@ -74,15 +78,15 @@ class MentionWidget extends WidgetType {
 
     if (this.attachment) {
       span.onclick = () => {
-        if (this.attachment.type === 'link' || (!this.attachment.file && this.attachment.url && this.attachment.url.startsWith('http'))) {
+        if (this.attachment.path) {
+          (window as any).electronAPI.openPath(this.attachment.path);
+        } else if (this.attachment.url && this.attachment.url.startsWith('http')) {
           if ((window as any).require) {
             const { shell } = (window as any).require('electron');
             shell.openExternal(this.attachment.url);
           } else {
             window.open(this.attachment.url, '_blank');
           }
-        } else {
-          span.dispatchEvent(new CustomEvent('preview-attachment', { detail: this.attachment.id, bubbles: true }));
         }
       };
     }
@@ -93,7 +97,7 @@ class MentionWidget extends WidgetType {
 export function createMentionPlugin(getAttachments: () => any[]) {
   const mentionDecoration = (match: RegExpExecArray, attachments: any[]) => {
     const text = match[0];
-    const filename = text.substring(1);
+    const filename = match[1]; // match[1] has the captured name
     const attachment = attachments.find(a => a.display === filename);
     if (attachment) {
       return Decoration.replace({
@@ -116,9 +120,12 @@ export function createMentionPlugin(getAttachments: () => any[]) {
       const attachments = getAttachments();
       if (attachments.length === 0) return builder.finish();
 
+      const attachmentNames = attachments.map(a => a.display.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+      const namesRegex = attachmentNames.join('|');
+      const regex = new RegExp(`@(${namesRegex})`, 'g');
+
       for (let { from, to } of view.visibleRanges) {
         const text = view.state.doc.sliceString(from, to);
-        const regex = /@([^\s]+)/g;
         let match;
         while ((match = regex.exec(text))) {
           const dec = mentionDecoration(match, attachments);
@@ -167,7 +174,7 @@ const editorTheme = EditorView.theme({
   }
 }, { dark: true });
 
-const ChatInput: React.FC<ChatInputProps> = ({ onSend, onStop, disabled }) => {
+const ChatInput: React.FC<ChatInputProps> = ({ onSend, onStop, disabled, editingBlock, onSaveEdit, onCancelEdit, messages }) => {
   const [value, setValue] = useState('');
   const [isModelMenuOpen, setIsModelMenuOpen] = useState(false);
   const [allModels, setAllModels] = useState<LLMModel[]>([]);
@@ -177,11 +184,26 @@ const ChatInput: React.FC<ChatInputProps> = ({ onSend, onStop, disabled }) => {
   const [isAttachMenuOpen, setIsAttachMenuOpen] = useState(false);
   const [attachments, setAttachments] = useState<any[]>([]);
   const [isDragging, setIsDragging] = useState(false);
-  const [previewAttachment, setPreviewAttachment] = useState<any | null>(null);
   const [attachmentToRemove, setAttachmentToRemove] = useState<string | null>(null);
 
   const cmRef = useRef<ReactCodeMirrorRef>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const [hasUnsentChanges, setHasUnsentChanges] = useState(false);
+
+  useEffect(() => {
+    if (editingBlock && messages) {
+      const msg = messages.find((m: any) => m.id === editingBlock.id);
+      if (msg) {
+        if (editingBlock.type === 'user' || editingBlock.type === 'response') {
+          setValue(msg.content || '');
+          setAttachments(msg.attachments || []);
+        } else if (editingBlock.type === 'thinking') {
+          setValue(msg.thinking || '');
+          setAttachments([]);
+        }
+      }
+    }
+  }, [editingBlock]);
   const attachmentsRef = useRef(attachments);
 
   useEffect(() => {
@@ -213,15 +235,6 @@ const ChatInput: React.FC<ChatInputProps> = ({ onSend, onStop, disabled }) => {
     loadModels();
     window.addEventListener('providers-updated', loadModels);
     return () => window.removeEventListener('providers-updated', loadModels);
-  }, []);
-
-  useEffect(() => {
-    const handlePreview = (e: any) => {
-      const att = attachmentsRef.current.find(a => a.id === e.detail);
-      if (att) setPreviewAttachment(att);
-    };
-    document.addEventListener('preview-attachment', handlePreview);
-    return () => document.removeEventListener('preview-attachment', handlePreview);
   }, []);
 
   // Mentions State
@@ -267,12 +280,20 @@ const ChatInput: React.FC<ChatInputProps> = ({ onSend, onStop, disabled }) => {
     setIsMentionMenuOpen(false);
   }, []);
 
-  const handleSend = useCallback(() => {
-    if (disabled || !selectedModel || (!value.trim() && attachmentsRef.current.length === 0)) return;
-    onSend(value, attachmentsRef.current, selectedModel);
-    setValue('');
-    setAttachments([]);
-  }, [disabled, selectedModel, value, onSend]);
+  const handleSend = () => {
+    if ((!value.trim() && attachments.length === 0) || !selectedModel || disabled) return;
+    
+    if (editingBlock && onSaveEdit) {
+      onSaveEdit(editingBlock.id, editingBlock.type, value, attachments);
+      setValue('');
+      setAttachments([]);
+      if (onCancelEdit) onCancelEdit();
+    } else {
+      onSend(value, attachments, selectedModel);
+      setValue('');
+      setAttachments([]);
+    }
+  };
 
   const customKeymap = keymap.of([
     {
@@ -331,7 +352,7 @@ const ChatInput: React.FC<ChatInputProps> = ({ onSend, onStop, disabled }) => {
       const pos = selection.head;
       const line = state.doc.lineAt(pos);
       const textBefore = line.text.slice(0, pos - line.from);
-      const match = textBefore.match(/(?:^|\s)@([^\s]*)$/);
+      const match = textBefore.match(/(?:^|\s)@([^@]{0,50})$/);
       if (match && attachmentsRef.current.length > 0) {
         const newQuery = match[1].toLowerCase();
         const newFrom = pos - match[1].length - 1;
@@ -363,20 +384,89 @@ const ChatInput: React.FC<ChatInputProps> = ({ onSend, onStop, disabled }) => {
   const processFiles = async (files: File[]) => {
     const newAttachments = await Promise.all(files.map(async file => {
       const isImage = file.type.startsWith('image/') || /\.(png|jpe?g|gif|webp|bmp|svg)$/i.test(file.name);
+      const isVideo = file.type.startsWith('video/') || /\.(mp4|webm|ogg|mov)$/i.test(file.name);
+      const isPdf = file.type === 'application/pdf' || /\.pdf$/i.test(file.name);
+      
+      let filePath = '';
+      if ((window as any).electronAPI?.getPathForFile) {
+        filePath = (window as any).electronAPI.getPathForFile(file);
+      } else {
+        filePath = (file as any).path || '';
+      }
+
       let thumbnail = null;
-      if ((file as any).path && (window as any).electronAPI?.getFileThumbnail) {
+      const objectUrl = URL.createObjectURL(file);
+      
+      if (isPdf) {
         try {
-          thumbnail = await (window as any).electronAPI.getFileThumbnail((file as any).path);
+          const pdfjsLib = await import('pdfjs-dist');
+          pdfjsLib.GlobalWorkerOptions.workerSrc = `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/${pdfjsLib.version}/pdf.worker.min.mjs`;
+          
+          const loadingTask = pdfjsLib.getDocument({ url: objectUrl });
+          const pdfDocument = await loadingTask.promise;
+          const page = await pdfDocument.getPage(1);
+          
+          const viewport = page.getViewport({ scale: 1.0 });
+          const canvas = document.createElement('canvas');
+          const context = canvas.getContext('2d');
+          
+          if (context) {
+            // target max 256px dimension
+            const scale = Math.min(256 / viewport.width, 256 / viewport.height, 1);
+            const scaledViewport = page.getViewport({ scale });
+            canvas.width = scaledViewport.width;
+            canvas.height = scaledViewport.height;
+            
+            await page.render({ canvasContext: context, viewport: scaledViewport }).promise;
+            thumbnail = canvas.toDataURL('image/jpeg', 0.8);
+          }
+        } catch (e) {
+          console.error('Failed to generate PDF thumbnail', e);
+        }
+      } else if (isVideo) {
+        try {
+          thumbnail = await new Promise((resolve) => {
+            const video = document.createElement('video');
+            video.src = objectUrl;
+            video.crossOrigin = 'anonymous';
+            video.currentTime = 1.0; // Seek to 1 second
+            
+            video.onloadeddata = () => {
+              const canvas = document.createElement('canvas');
+              const ctx = canvas.getContext('2d');
+              if (ctx) {
+                const scale = Math.min(256 / video.videoWidth, 256 / video.videoHeight, 1);
+                canvas.width = video.videoWidth * scale;
+                canvas.height = video.videoHeight * scale;
+                ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+                resolve(canvas.toDataURL('image/jpeg', 0.8));
+              } else {
+                resolve(null);
+              }
+            };
+            video.onerror = () => resolve(null);
+          });
+        } catch (e) {
+          console.error('Failed to generate Video thumbnail', e);
+        }
+      }
+      
+      // Fallback to electron getFileThumbnail for others
+      if (!thumbnail && !isImage && filePath && (window as any).electronAPI?.getFileThumbnail) {
+        try {
+          thumbnail = await (window as any).electronAPI.getFileThumbnail(filePath);
         } catch (e) {
           console.error('Failed to get thumbnail for', file.name, e);
         }
       }
+      
       return {
         id: Math.random().toString(36).substring(7),
         display: file.name,
-        type: isImage ? 'image' : 'file',
+        type: isImage ? 'image' : isVideo ? 'video' : 'file',
         file: file,
-        url: URL.createObjectURL(file),
+        path: filePath,
+        url: objectUrl,
         thumbnail
       };
     }));
@@ -524,29 +614,7 @@ const ChatInput: React.FC<ChatInputProps> = ({ onSend, onStop, disabled }) => {
         </div>
       )}
 
-      {/* Preview Modal */}
-      {previewAttachment && (
-        <div className="fixed inset-0 z-[100] bg-black/80 flex items-center justify-center p-8 backdrop-blur-sm" onClick={() => setPreviewAttachment(null)}>
-          <div className="relative w-full h-full max-w-5xl bg-[#1e1e1e] rounded-2xl overflow-hidden shadow-2xl border border-white/10 flex flex-col" onClick={e => e.stopPropagation()}>
-            <div className="flex items-center justify-between p-4 border-b border-white/10 bg-black/40">
-              <div className="flex items-center gap-3 text-white">
-                {getFileIcon(previewAttachment.type)}
-                <span className="font-medium">{previewAttachment.display}</span>
-              </div>
-              <button onClick={() => setPreviewAttachment(null)} className="p-2 hover:bg-white/10 rounded-full transition-colors text-white">
-                <X size={20} />
-              </button>
-            </div>
-            <div className="flex-1 overflow-hidden flex items-center justify-center bg-black/20">
-              {previewAttachment.type === 'image' ? (
-                <img src={previewAttachment.url} alt={previewAttachment.display} className="max-w-full max-h-full object-contain" />
-              ) : (
-                <iframe src={previewAttachment.url} className="w-full h-full bg-white" title="Preview" />
-              )}
-            </div>
-          </div>
-        </div>
-      )}
+
 
       {/* Attachments Preview Row */}
       {attachments.length > 0 && (
@@ -669,8 +737,27 @@ const ChatInput: React.FC<ChatInputProps> = ({ onSend, onStop, disabled }) => {
             </button>
           </div>
 
+          {editingBlock && (
+            <div className="flex items-center gap-2 mr-auto px-3 py-1.5 bg-blue-500/10 border border-blue-500/20 rounded-lg">
+              <span className="text-xs font-medium text-blue-400 flex items-center gap-1.5">
+                <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/><path d="m15 5 4 4"/></svg>
+                Editing {editingBlock.type === 'user' ? 'Prompt' : editingBlock.type === 'thinking' ? 'Thinking' : 'Response'}
+              </span>
+              <button 
+                onClick={() => {
+                  setValue('');
+                  setAttachments([]);
+                  if (onCancelEdit) onCancelEdit();
+                }} 
+                className="text-gray-400 hover:text-white p-0.5 rounded-md hover:bg-white/10"
+              >
+                <X size={12} />
+              </button>
+            </div>
+          )}
+
           {/* Model Selector Drop-up */}
-          <div className="relative">
+          <div className="relative ml-auto">
             {isModelMenuOpen && (
               <div className="absolute bottom-full left-0 mb-3 w-64 mac-element rounded-[24px] p-2 z-50 flex flex-col shadow-2xl">
 

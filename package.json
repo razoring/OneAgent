@@ -22,6 +22,7 @@
     "mammoth": "^1.12.1",
     "officeparser": "^7.8.0",
     "pdf-parse": "^1.1.1",
+    "pdfjs-dist": "^6.2.108",
     "react": "^19.2.8",
     "react-dom": "^19.2.8",
     "react-markdown": "^10.1.0",
