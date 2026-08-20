@@ -5,3 +5,5 @@ show thinking duration
 change finished thinking icon
 chat history
 mcp servers
+STRICT inline chips in the thinking and WYSIWYG for files and images
+Images get treated as another turn in the context and prompt should reflect that to ensure that additional images can be added and be used in the context.
