@@ -1,7 +1,10 @@
-import React from 'react';
+import React, { useState } from 'react';
 import { MessageSquarePlus, Settings, LayoutGrid } from 'lucide-react';
+import SettingsModal from './SettingsModal';
 
 const Sidebar = () => {
+  const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+
   return (
     <div className="w-[280px] bg-[#171717] flex flex-col h-full border-r border-white/10 text-sm">
       {/* Top Section */}
@@ -37,11 +40,18 @@ const Sidebar = () => {
           <LayoutGrid size={18} />
           Models
         </button>
-        <button className="flex items-center gap-3 w-full hover:bg-[#2f2f2f] transition-colors rounded-2xl p-3 text-left text-gray-300">
+        <button 
+          onClick={() => setIsSettingsOpen(true)}
+          className="flex items-center gap-3 w-full hover:bg-[#2f2f2f] transition-colors rounded-2xl p-3 text-left text-gray-300"
+        >
           <Settings size={18} />
           Settings
         </button>
       </div>
+
+      {isSettingsOpen && (
+        <SettingsModal onClose={() => setIsSettingsOpen(false)} />
+      )}
     </div>
   );
 };

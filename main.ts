@@ -9,7 +9,7 @@ const createWindow = () => {
     height: 800,
     autoHideMenuBar: true,
     webPreferences: {
-      preload: path.join(import.meta.dirname, '../preload.js'),
+      preload: path.join(import.meta.dirname, 'preload.js'),
       nodeIntegration: true,
       contextIsolation: false,
     },
@@ -47,6 +47,57 @@ ipcMain.on('window-maximize', () => {
 
 ipcMain.on('window-close', () => {
   BrowserWindow.getFocusedWindow()?.close();
+});
+
+ipcMain.handle('fetch-models', async (event, config) => {
+  try {
+    const { endpoint, apiKey } = config;
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+    };
+    if (apiKey) {
+      headers['Authorization'] = `Bearer ${apiKey}`;
+    }
+    const url = endpoint.endsWith('/') ? `${endpoint}models` : `${endpoint}/models`;
+    const response = await fetch(url, { headers });
+    if (!response.ok) {
+      throw new Error(`HTTP error! status: ${response.status}`);
+    }
+    const data = await response.json();
+    return { success: true, data };
+  } catch (error: any) {
+    return { success: false, error: error.message };
+  }
+});
+
+ipcMain.handle('chat-complete', async (event, config) => {
+  try {
+    const { endpoint, apiKey, payload } = config;
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+    };
+    if (apiKey) {
+      headers['Authorization'] = `Bearer ${apiKey}`;
+    }
+    // OpenRouter requires HTTP referer headers usually, but it will work without them (as a fallback).
+    headers['HTTP-Referer'] = 'http://localhost:5173';
+    headers['X-Title'] = 'OneAgent';
+
+    const url = endpoint.endsWith('/') ? `${endpoint}chat/completions` : `${endpoint}/chat/completions`;
+    const response = await fetch(url, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(payload),
+    });
+    if (!response.ok) {
+      const errText = await response.text();
+      throw new Error(`HTTP error! status: ${response.status} - ${errText}`);
+    }
+    const data = await response.json();
+    return { success: true, data };
+  } catch (error: any) {
+    return { success: false, error: error.message };
+  }
 });
 
 app.on('ready', createWindow);

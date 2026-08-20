@@ -1,30 +1,22 @@
-import React, { useState, useRef, useEffect } from 'react';
-import { ArrowUp, ChevronUp, Plus, FileText, Image as ImageIcon, Folder, X } from 'lucide-react';
+import React, { useState, useRef, useEffect, useCallback } from 'react';
+import { ArrowUp, ChevronUp, Plus, FileText, Image as ImageIcon, Folder, X, FileSpreadsheet, MonitorPlay, AlertTriangle } from 'lucide-react';
+import CodeMirror, { ReactCodeMirrorRef } from '@uiw/react-codemirror';
+import { markdown } from '@codemirror/lang-markdown';
+import { EditorView, Decoration, DecorationSet, WidgetType, ViewPlugin, ViewUpdate, keymap } from '@codemirror/view';
+import { RangeSetBuilder, StateEffect } from '@codemirror/state';
 
 const PROVIDER_ICONS: Record<string, string> = {
   ollama: 'https://ollama.com/public/icon-64x64.png',
   lmstudio: 'https://lmstudio.ai/favicon.ico',
   openrouter: 'https://openrouter.ai/favicon.ico',
-  openai: 'https://upload.wikimedia.org/wikipedia/commons/0/04/ChatGPT_logo.svg'
+  openai: 'https://upload.wikimedia.org/wikipedia/commons/0/04/ChatGPT_logo.svg',
+  gemini: 'https://www.gstatic.com/lamda/images/gemini_sparkle_v002_d4735304ff6292a690345.svg',
+  groq: 'https://groq.com/favicon.ico',
+  together: 'https://www.together.ai/favicon.ico',
+  anthropic: 'https://www.anthropic.com/favicon.ico'
 };
 
-const RECENT_MODELS = [
-  { id: 'llama3.1:latest', name: 'llama3.1:latest', provider: 'ollama' },
-  { id: 'gpt-4o', name: 'GPT-4o', provider: 'openai' },
-];
-
-const ALL_MODELS = [
-  { id: 'llama3.1:latest', name: 'llama3.1:latest', provider: 'ollama' },
-  { id: 'gpt-4o', name: 'GPT-4o', provider: 'openai' },
-  { id: 'claude-3.5-sonnet', name: 'Claude 3.5 Sonnet', provider: 'openrouter' },
-  { id: 'mixtral-8x7b', name: 'mixtral-8x7b', provider: 'lmstudio' },
-];
-
-const MOCK_FILES = [
-  { id: '1', display: 'financial_report_Q3.pdf', type: 'file' },
-  { id: '2', display: 'architecture_diagram.png', type: 'image' },
-  { id: '3', display: 'src_folder', type: 'folder' }
-];
+import { LLMModel, fetchModels } from '../utils/llm';
 
 const ModelItem = ({ model, isSelected, onClick }: { model: any, isSelected: boolean, onClick: () => void }) => (
   <button 
@@ -45,35 +37,403 @@ const ModelItem = ({ model, isSelected, onClick }: { model: any, isSelected: boo
   </button>
 );
 
-const ChatInput = () => {
+interface ChatInputProps {
+  onSend: (text: string, attachments: any[], model: LLMModel) => void;
+  disabled?: boolean;
+}
+
+class MentionWidget extends WidgetType {
+  constructor(public text: string, public attachment: any) {
+    super();
+  }
+  eq(other: MentionWidget) {
+    return this.text === other.text && this.attachment?.id === other.attachment?.id;
+  }
+  toDOM() {
+    const span = document.createElement('span');
+    span.className = 'inline-flex items-center gap-1.5 bg-white/10 border border-white/5 text-blue-400 px-2 h-[24px] rounded-md mx-1 align-middle select-none shadow-sm cursor-pointer hover:underline -my-2';
+    
+    const iconSpan = document.createElement('span');
+    iconSpan.className = 'flex items-center text-current';
+    iconSpan.style.width = '14px';
+    iconSpan.style.height = '14px';
+    const type = this.attachment?.type || 'file';
+    iconSpan.innerHTML = type === 'image' ? `<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="18" x="3" y="3" rx="2" ry="2"/><circle cx="9" cy="9" r="2"/><path d="m21 15-3.086-3.086a2 2 0 0 0-2.828 0L6 21"/></svg>` : 
+                         type === 'folder' ? `<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13c0 1.1.9 2 2 2Z"/></svg>` :
+                         `<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/><path d="M14 2v4a2 2 0 0 0 2 2h4"/><path d="M10 9H8"/><path d="M16 13H8"/><path d="M16 17H8"/></svg>`;
+    span.appendChild(iconSpan);
+    
+    const textSpan = document.createElement('span');
+    textSpan.className = 'text-[13px] font-medium leading-none';
+    textSpan.textContent = this.text.substring(1); // remove @
+    span.appendChild(textSpan);
+    
+    if (this.attachment) {
+      span.onclick = () => {
+        if (this.attachment.type === 'link' || (!this.attachment.file && this.attachment.url && this.attachment.url.startsWith('http'))) {
+          if ((window as any).require) {
+            const { shell } = (window as any).require('electron');
+            shell.openExternal(this.attachment.url);
+          } else {
+            window.open(this.attachment.url, '_blank');
+          }
+        } else {
+          span.dispatchEvent(new CustomEvent('preview-attachment', { detail: this.attachment.id, bubbles: true }));
+        }
+      };
+    }
+    return span;
+  }
+}
+
+export function createMentionPlugin(getAttachments: () => any[]) {
+  const mentionDecoration = (match: RegExpExecArray, attachments: any[]) => {
+    const text = match[0];
+    const filename = text.substring(1);
+    const attachment = attachments.find(a => a.display === filename);
+    if (attachment) {
+      return Decoration.replace({
+        widget: new MentionWidget(text, attachment)
+      });
+    }
+    return null;
+  };
+
+  return ViewPlugin.fromClass(class {
+    decorations: DecorationSet;
+    constructor(view: EditorView) {
+      this.decorations = this.buildDecorations(view);
+    }
+    update(update: ViewUpdate) {
+      this.decorations = this.buildDecorations(update.view);
+    }
+    buildDecorations(view: EditorView) {
+      const builder = new RangeSetBuilder<Decoration>();
+      const attachments = getAttachments();
+      if (attachments.length === 0) return builder.finish();
+
+      for (let {from, to} of view.visibleRanges) {
+        const text = view.state.doc.sliceString(from, to);
+        const regex = /@([^\s]+)/g;
+        let match;
+        while ((match = regex.exec(text))) {
+          const dec = mentionDecoration(match, attachments);
+          if (dec) {
+            builder.add(from + match.index, from + match.index + match[0].length, dec);
+          }
+        }
+      }
+      return builder.finish();
+    }
+  }, {
+    decorations: v => v.decorations
+  });
+}
+
+const editorTheme = EditorView.theme({
+  "&": {
+    color: "#f3f4f6", // gray-100
+    backgroundColor: "transparent",
+    fontSize: "15px",
+    lineHeight: "2rem",
+    width: "100%",
+  },
+  ".cm-content": {
+    fontFamily: "ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif",
+    padding: "0",
+  },
+  "&.cm-focused": {
+    outline: "none"
+  },
+  ".cm-cursor": {
+    borderLeftColor: "#f3f4f6"
+  },
+  ".cm-placeholder": {
+    color: "#6b7280" // gray-500
+  },
+  ".cm-scroller": {
+    fontFamily: "ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif",
+    overflow: "hidden"
+  }
+});
+
+const ChatInput: React.FC<ChatInputProps> = ({ onSend, disabled }) => {
+  const [value, setValue] = useState('');
   const [isModelMenuOpen, setIsModelMenuOpen] = useState(false);
-  const [selectedModel, setSelectedModel] = useState(RECENT_MODELS[0]);
+  const [allModels, setAllModels] = useState<LLMModel[]>([]);
+  const [selectedModel, setSelectedModel] = useState<LLMModel | null>(null);
+  const [isLoadingModels, setIsLoadingModels] = useState(false);
   
   const [isAttachMenuOpen, setIsAttachMenuOpen] = useState(false);
-  const [attachments, setAttachments] = useState<any[]>(MOCK_FILES); // Pre-load for testing
+  const [attachments, setAttachments] = useState<any[]>([]);
+  const [isDragging, setIsDragging] = useState(false);
+  const [previewAttachment, setPreviewAttachment] = useState<any | null>(null);
+  const [attachmentToRemove, setAttachmentToRemove] = useState<string | null>(null);
 
-  const editorRef = useRef<HTMLDivElement>(null);
+  const cmRef = useRef<ReactCodeMirrorRef>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const attachmentsRef = useRef(attachments);
+
+  useEffect(() => {
+    attachmentsRef.current = attachments;
+    if (cmRef.current?.view) {
+      cmRef.current.view.dispatch({
+        effects: StateEffect.appendConfig.of([]) // force re-render of decorations
+      });
+    }
+  }, [attachments]);
+
+  const loadModels = async () => {
+    setIsLoadingModels(true);
+    try {
+      const models = await fetchModels();
+      setAllModels(models);
+      if (models.length > 0) {
+        setSelectedModel(prev => prev && models.some(m => m.id === prev.id) ? prev : models[0]);
+      } else {
+        setSelectedModel(null);
+      }
+    } finally {
+      setIsLoadingModels(false);
+    }
+  };
+
+  useEffect(() => {
+    loadModels();
+    window.addEventListener('providers-updated', loadModels);
+    return () => window.removeEventListener('providers-updated', loadModels);
+  }, []);
+
+  useEffect(() => {
+    const handlePreview = (e: any) => {
+      const att = attachmentsRef.current.find(a => a.id === e.detail);
+      if (att) setPreviewAttachment(att);
+    };
+    document.addEventListener('preview-attachment', handlePreview);
+    return () => document.removeEventListener('preview-attachment', handlePreview);
+  }, []);
   
   // Mentions State
   const [isMentionMenuOpen, setIsMentionMenuOpen] = useState(false);
   const [mentionQuery, setMentionQuery] = useState('');
-  const [mentionRange, setMentionRange] = useState<Range | null>(null);
+  const [mentionRange, setMentionRange] = useState<{from: number, to: number} | null>(null);
   const [focusedMentionIndex, setFocusedMentionIndex] = useState(0);
 
   useEffect(() => {
     setFocusedMentionIndex(0);
   }, [mentionQuery, isMentionMenuOpen]);
 
-  const handleAttach = (file: any) => {
-    if (!attachments.find(a => a.id === file.id)) {
-      setAttachments([...attachments, file]);
+  const filteredAttachments = attachments.filter(a => a.display.toLowerCase().includes(mentionQuery));
+
+  // Refs for keymap closures
+  const isMentionMenuOpenRef = useRef(isMentionMenuOpen);
+  useEffect(() => { isMentionMenuOpenRef.current = isMentionMenuOpen; }, [isMentionMenuOpen]);
+  
+  const focusedMentionIndexRef = useRef(focusedMentionIndex);
+  useEffect(() => { focusedMentionIndexRef.current = focusedMentionIndex; }, [focusedMentionIndex]);
+
+  const filteredAttachmentsRef = useRef(filteredAttachments);
+  useEffect(() => { filteredAttachmentsRef.current = filteredAttachments; }, [filteredAttachments]);
+
+  const mentionRangeRef = useRef(mentionRange);
+  useEffect(() => { mentionRangeRef.current = mentionRange; }, [mentionRange]);
+
+  const insertMention = useCallback((att: any) => {
+    if (!mentionRangeRef.current) return;
+    const view = cmRef.current?.view;
+    if (view) {
+      const insertText = `@${att.display} `;
+      view.dispatch({
+        changes: {
+          from: mentionRangeRef.current.from,
+          to: mentionRangeRef.current.to,
+          insert: insertText
+        },
+        selection: { anchor: mentionRangeRef.current.from + insertText.length }
+      });
+      view.focus();
     }
+    setIsMentionMenuOpen(false);
+  }, []);
+
+  const handleSend = useCallback(() => {
+    if (disabled || !selectedModel || !value.trim()) return;
+    onSend(value, attachmentsRef.current, selectedModel);
+    setValue('');
+    setAttachments([]);
+  }, [disabled, selectedModel, value, onSend]);
+
+  const customKeymap = keymap.of([
+    {
+      key: 'ArrowDown',
+      run: () => {
+        if (isMentionMenuOpenRef.current && filteredAttachmentsRef.current.length > 0) {
+          setFocusedMentionIndex(prev => (prev + 1) % filteredAttachmentsRef.current.length);
+          return true;
+        }
+        return false;
+      }
+    },
+    {
+      key: 'ArrowUp',
+      run: () => {
+        if (isMentionMenuOpenRef.current && filteredAttachmentsRef.current.length > 0) {
+          setFocusedMentionIndex(prev => (prev - 1 + filteredAttachmentsRef.current.length) % filteredAttachmentsRef.current.length);
+          return true;
+        }
+        return false;
+      }
+    },
+    {
+      key: 'Escape',
+      run: () => {
+        if (isMentionMenuOpenRef.current) {
+          setIsMentionMenuOpen(false);
+          return true;
+        }
+        return false;
+      }
+    },
+    {
+      key: 'Enter',
+      run: () => {
+        if (isMentionMenuOpenRef.current && filteredAttachmentsRef.current.length > 0) {
+          insertMention(filteredAttachmentsRef.current[focusedMentionIndexRef.current]);
+          return true;
+        } else if (!isMentionMenuOpenRef.current) {
+          handleSend();
+          return true;
+        }
+        return false;
+      },
+      shift: () => false // allow newline
+    }
+  ]);
+
+  const handleUpdate = useCallback((update: ViewUpdate) => {
+    if (update.docChanged) {
+      setValue(update.state.doc.toString());
+    }
+    const state = update.state;
+    const selection = state.selection.main;
+    if (selection.empty) {
+      const pos = selection.head;
+      const line = state.doc.lineAt(pos);
+      const textBefore = line.text.slice(0, pos - line.from);
+      const match = textBefore.match(/(?:^|\s)@([^\s]*)$/);
+      if (match && attachmentsRef.current.length > 0) {
+        setMentionQuery(match[1].toLowerCase());
+        setMentionRange({ from: pos - match[1].length - 1, to: pos });
+        setIsMentionMenuOpen(true);
+      } else {
+        setIsMentionMenuOpen(false);
+      }
+    } else {
+      setIsMentionMenuOpen(false);
+    }
+  }, []);
+
+  const handleDragOver = (e: React.DragEvent) => {
+    e.preventDefault();
+    setIsDragging(true);
+  };
+  
+  const handleDragLeave = (e: React.DragEvent) => {
+    e.preventDefault();
+    if (!e.currentTarget.contains(e.relatedTarget as Node)) {
+      setIsDragging(false);
+    }
+  };
+  
+  const handleDrop = (e: React.DragEvent) => {
+    e.preventDefault();
+    setIsDragging(false);
+    const files = Array.from(e.dataTransfer.files);
+    const newAttachments = files.map(file => {
+      const isImage = file.type.startsWith('image/') || /\.(png|jpe?g|gif|webp|bmp|svg)$/i.test(file.name);
+      return {
+        id: Math.random().toString(36).substring(7),
+        display: file.name,
+        type: isImage ? 'image' : 'file',
+        file: file,
+        url: URL.createObjectURL(file)
+      };
+    });
+    setAttachments(prev => [...prev, ...newAttachments]);
+  };
+
+  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(e.target.files || []);
+    const newAttachments = files.map(file => {
+      const isImage = file.type.startsWith('image/') || /\.(png|jpe?g|gif|webp|bmp|svg)$/i.test(file.name);
+      return {
+        id: Math.random().toString(36).substring(7),
+        display: file.name,
+        type: isImage ? 'image' : 'file',
+        file: file,
+        url: URL.createObjectURL(file)
+      };
+    });
+    setAttachments(prev => [...prev, ...newAttachments]);
+    setIsAttachMenuOpen(false);
+    e.target.value = '';
+  };
+
+  const handleAttachClick = () => {
+    fileInputRef.current?.click();
     setIsAttachMenuOpen(false);
   };
 
-  const removeAttachment = (id: string) => {
-    setAttachments(attachments.filter(a => a.id !== id));
+  const confirmRemoveAttachment = (id: string) => {
+    const att = attachmentsRef.current.find(a => a.id === id);
+    setAttachments(prev => prev.filter(a => a.id !== id));
+    
+    if (att && cmRef.current?.view) {
+      const view = cmRef.current.view;
+      const text = view.state.doc.toString();
+      const escapedDisplay = att.display.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const regex = new RegExp(`@${escapedDisplay}\\b`, 'g');
+      const changes = [];
+      let match;
+      while ((match = regex.exec(text))) {
+        changes.push({ from: match.index, to: match.index + match[0].length, insert: '' });
+      }
+      if (changes.length > 0) {
+        view.dispatch({ changes });
+      }
+    }
+    setAttachmentToRemove(null);
   };
+
+  const removeAttachment = (id: string) => {
+    const att = attachmentsRef.current.find(a => a.id === id);
+    if (!att) return;
+    const text = value;
+    const hasMentions = text.includes(`@${att.display}`);
+    if (hasMentions) {
+      setAttachmentToRemove(id);
+    } else {
+      confirmRemoveAttachment(id);
+    }
+  };
+
+  useEffect(() => {
+    const handleGlobalKeyDown = (e: KeyboardEvent) => {
+      if (attachmentToRemove) {
+        if (e.key === 'Escape') {
+          e.preventDefault();
+          setAttachmentToRemove(null);
+        } else if (e.key === 'Enter') {
+          e.preventDefault();
+          confirmRemoveAttachment(attachmentToRemove);
+        }
+      }
+    };
+    if (attachmentToRemove) {
+      window.addEventListener('keydown', handleGlobalKeyDown);
+      return () => window.removeEventListener('keydown', handleGlobalKeyDown);
+    }
+  }, [attachmentToRemove]);
 
   const getFileIcon = (type: string) => {
     switch (type) {
@@ -91,102 +451,85 @@ const ChatInput = () => {
     }
   };
 
-  const handleInput = () => {
-    const selection = window.getSelection();
-    if (!selection || selection.rangeCount === 0) return;
-
-    const range = selection.getRangeAt(0);
-    const textBeforeCaret = range.startContainer.textContent?.slice(0, range.startOffset) || '';
-
-    // Match @ followed by characters at the end
-    const match = textBeforeCaret.match(/(?:^|\s)@([^\s]*)$/);
-
-    if (match && attachments.length > 0) {
-      setMentionQuery(match[1].toLowerCase());
-      setMentionRange(range.cloneRange());
-      setIsMentionMenuOpen(true);
-    } else {
-      setIsMentionMenuOpen(false);
-    }
-  };
-
-  const filteredAttachments = attachments.filter(a => a.display.toLowerCase().includes(mentionQuery));
-
-  const handleKeyDown = (e: React.KeyboardEvent) => {
-    if (isMentionMenuOpen && filteredAttachments.length > 0) {
-      if (e.key === 'ArrowDown') {
-        e.preventDefault();
-        setFocusedMentionIndex((prev) => (prev + 1) % filteredAttachments.length);
-      } else if (e.key === 'ArrowUp') {
-        e.preventDefault();
-        setFocusedMentionIndex((prev) => (prev - 1 + filteredAttachments.length) % filteredAttachments.length);
-      } else if (e.key === 'Enter') {
-        e.preventDefault();
-        insertMention(filteredAttachments[focusedMentionIndex]);
-      } else if (e.key === 'Escape') {
-        e.preventDefault();
-        setIsMentionMenuOpen(false);
-      }
-    }
-  };
-
-  const insertMention = (att: any) => {
-    if (!mentionRange) return;
-
-    const selection = window.getSelection();
-    if (!selection) return;
-
-    // Calculate how many characters to delete ("@" + query)
-    const charsToDelete = mentionQuery.length + 1;
-    
-    // Adjust the range to encompass the "@query" text
-    mentionRange.setStart(mentionRange.startContainer, Math.max(0, mentionRange.startOffset - charsToDelete));
-    mentionRange.deleteContents();
-
-    // Create the immutable chip element
-    const chip = document.createElement('span');
-    chip.contentEditable = 'false';
-    chip.className = 'inline-flex items-center gap-1.5 bg-white/10 border border-white/5 text-blue-400 px-2 h-[24px] rounded-md mx-1 align-middle select-none shadow-sm cursor-pointer hover:underline -my-2';
-    chip.dataset.id = att.id;
-    chip.onclick = () => {
-      // Placeholder for opening or previewing the attachment
-      console.log('Preview attachment:', att.display);
-    };
-    
-    // Convert React lucide icon to static SVG string or simple text for the DOM element
-    const iconSpan = document.createElement('span');
-    iconSpan.className = 'flex items-center';
-    iconSpan.innerHTML = att.type === 'image' ? '🖼️' : att.type === 'folder' ? '📁' : '📄';
-    chip.appendChild(iconSpan);
-    
-    const textSpan = document.createElement('span');
-    textSpan.className = 'text-[13px] font-medium leading-none';
-    textSpan.textContent = att.display;
-    chip.appendChild(textSpan);
-
-    // Insert the chip
-    mentionRange.insertNode(chip);
-    
-    // Insert a non-breaking space after the chip so the user can keep typing
-    const space = document.createTextNode('\u00A0');
-    chip.parentNode?.insertBefore(space, chip.nextSibling);
-
-    // Move caret after the space
-    mentionRange.setStartAfter(space);
-    mentionRange.collapse(true);
-    
-    selection.removeAllRanges();
-    selection.addRange(mentionRange);
-
-    setIsMentionMenuOpen(false);
-    
-    // Refocus editor
-    editorRef.current?.focus();
-  };
-
   return (
-    <div className="relative w-full rounded-[28px] mac-element transition-all focus-within:ring-2 focus-within:ring-white/20 p-4 flex flex-col gap-3 shadow-lg">
+    <div 
+      className="relative w-full rounded-[28px] mac-element transition-all focus-within:ring-2 focus-within:ring-white/20 p-4 flex flex-col gap-3 shadow-lg"
+      onDragOver={handleDragOver}
+      onDragLeave={handleDragLeave}
+      onDrop={handleDrop}
+    >
       
+      {/* Removal Confirmation Prompt */}
+      {attachmentToRemove && (
+        <div className="fixed inset-0 z-[200] bg-black/60 flex items-center justify-center p-4 backdrop-blur-sm" onClick={() => setAttachmentToRemove(null)}>
+          <div className="mac-element rounded-2xl p-6 max-w-sm w-full flex flex-col gap-4 shadow-2xl border border-white/10" onClick={e => e.stopPropagation()}>
+            <h3 className="text-white font-medium text-lg">Remove Attachment?</h3>
+            <p className="text-gray-300 text-sm">
+              This attachment is currently referenced in your message. Removing it will also remove all mentions. Are you sure?
+            </p>
+            <div className="flex justify-end gap-3 mt-2">
+              <button 
+                onClick={() => setAttachmentToRemove(null)}
+                className="px-4 py-2 rounded-xl text-sm font-medium text-gray-300 hover:bg-white/10 transition-colors"
+              >
+                Cancel (Esc)
+              </button>
+              <button 
+                onClick={() => confirmRemoveAttachment(attachmentToRemove)}
+                className="px-4 py-2 rounded-xl text-sm font-medium bg-red-500/20 text-red-400 hover:bg-red-500/30 transition-colors"
+              >
+                Remove (Enter)
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Drag & Drop Overlay */}
+      {isDragging && (
+        <div className="absolute inset-0 z-50 bg-black/60 rounded-[28px] backdrop-blur-sm flex items-center justify-center p-3 pointer-events-none">
+          <div className="w-full h-full border-2 border-dashed border-blue-400/50 rounded-[20px] bg-blue-500/10 flex flex-col items-center justify-center p-4">
+            <div className="flex flex-col items-center gap-1 w-full px-2">
+              <div className="text-white font-medium text-lg text-center w-full">Drop anything here</div>
+              <div className="text-gray-400 text-xs text-center w-full break-words">
+                Images, Documents, Spreadsheets, Presentations, Folders
+              </div>
+            </div>
+            <div className="flex items-center gap-4 mt-4">
+              <ImageIcon size={24} className="text-blue-400" />
+              <FileText size={24} className="text-blue-400" />
+              <FileSpreadsheet size={24} className="text-blue-400" />
+              <MonitorPlay size={24} className="text-blue-400" />
+              <Folder size={24} className="text-blue-400" />
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Preview Modal */}
+      {previewAttachment && (
+        <div className="fixed inset-0 z-[100] bg-black/80 flex items-center justify-center p-8 backdrop-blur-sm" onClick={() => setPreviewAttachment(null)}>
+          <div className="relative w-full h-full max-w-5xl bg-[#1e1e1e] rounded-2xl overflow-hidden shadow-2xl border border-white/10 flex flex-col" onClick={e => e.stopPropagation()}>
+            <div className="flex items-center justify-between p-4 border-b border-white/10 bg-black/40">
+              <div className="flex items-center gap-3 text-white">
+                {getFileIcon(previewAttachment.type)}
+                <span className="font-medium">{previewAttachment.display}</span>
+              </div>
+              <button onClick={() => setPreviewAttachment(null)} className="p-2 hover:bg-white/10 rounded-full transition-colors text-white">
+                <X size={20} />
+              </button>
+            </div>
+            <div className="flex-1 overflow-hidden flex items-center justify-center bg-black/20">
+              {previewAttachment.type === 'image' ? (
+                <img src={previewAttachment.url} alt={previewAttachment.display} className="max-w-full max-h-full object-contain" />
+              ) : (
+                <iframe src={previewAttachment.url} className="w-full h-full bg-white" title="Preview" />
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Attachments Preview Row */}
       {attachments.length > 0 && (
         <div className="flex flex-col gap-3">
@@ -194,7 +537,11 @@ const ChatInput = () => {
             {attachments.map(att => (
               <div key={att.id} className="relative group flex flex-col items-center gap-1.5 w-16">
                 <div className="relative w-14 h-14 rounded-[20px] mac-element flex items-center justify-center bg-black/20 overflow-hidden">
-                  {getFileIcon(att.type)}
+                  {att.type === 'image' && att.url ? (
+                    <img src={att.url} alt={att.display} className="w-full h-full object-cover" />
+                  ) : (
+                    getFileIcon(att.type)
+                  )}
                   
                   {/* Remove Overlay */}
                   <button 
@@ -233,14 +580,38 @@ const ChatInput = () => {
         </div>
       )}
 
-      {/* Custom ContentEditable Input */}
-      <div 
-        ref={editorRef}
-        contentEditable
-        onInput={handleInput}
-        onKeyDown={handleKeyDown}
-        className="w-full min-h-[44px] max-h-[240px] overflow-y-auto px-2 py-1 relative z-10 text-[15px] leading-8 text-gray-100 outline-none cursor-text empty:before:content-['Message...'] empty:before:text-gray-500"
-      />
+      {/* CodeMirror Input Area */}
+      <div className="w-full min-h-[44px] max-h-[240px] overflow-y-auto px-2 py-1 relative z-10 flex flex-col justify-center">
+        <CodeMirror
+          ref={cmRef}
+          value={value}
+          placeholder="Message..."
+          extensions={[
+            markdown(),
+            editorTheme,
+            customKeymap,
+            EditorView.lineWrapping,
+            createMentionPlugin(() => attachmentsRef.current)
+          ]}
+          onUpdate={handleUpdate}
+          basicSetup={{
+            lineNumbers: false,
+            foldGutter: false,
+            highlightActiveLine: false,
+            highlightActiveLineGutter: false,
+            bracketMatching: true,
+            syntaxHighlighting: true,
+            defaultKeymap: false,
+            searchKeymap: false,
+            historyKeymap: false,
+            lintKeymap: false,
+            completionKeymap: false,
+            crosshairCursor: false,
+            autocompletion: false,
+          }}
+          className="w-full h-full !outline-none"
+        />
+      </div>
       
       {/* Bottom Toolbar Row */}
       <div className="flex items-center justify-between mt-1 px-1">
@@ -250,20 +621,18 @@ const ChatInput = () => {
           
           {/* Attach Button Drop-up */}
           <div className="relative">
+            <input 
+              type="file" 
+              multiple 
+              className="hidden" 
+              ref={fileInputRef}
+              onChange={handleFileChange}
+            />
             {isAttachMenuOpen && (
-              <div className="absolute bottom-full left-0 mb-3 w-56 mac-element rounded-[24px] p-2 z-50 flex flex-col shadow-2xl">
-                <button onClick={() => handleAttach(MOCK_FILES[0])} className="flex items-center gap-3 w-full text-left px-3 py-2.5 rounded-2xl text-sm text-gray-300 hover:bg-white/10 hover:text-white transition-colors">
-                  <FileText size={18} className="text-red-400" />
-                  Attach PDF Report
-                </button>
-                <button onClick={() => handleAttach(MOCK_FILES[1])} className="flex items-center gap-3 w-full text-left px-3 py-2.5 rounded-2xl text-sm text-gray-300 hover:bg-white/10 hover:text-white transition-colors">
-                  <ImageIcon size={18} className="text-blue-400" />
-                  Attach Image
-                </button>
-                <div className="h-px bg-white/10 my-1 mx-2"></div>
-                <button onClick={() => handleAttach(MOCK_FILES[2])} className="flex items-center gap-3 w-full text-left px-3 py-2.5 rounded-2xl text-sm text-gray-300 hover:bg-white/10 hover:text-white transition-colors">
-                  <Folder size={18} className="text-yellow-400" />
-                  Upload Folder
+              <div className="absolute bottom-full left-0 mb-3 w-40 mac-element rounded-[24px] p-2 z-50 flex flex-col shadow-2xl">
+                <button onClick={handleAttachClick} className="flex items-center gap-3 w-full text-left px-3 py-2.5 rounded-2xl text-sm text-gray-300 hover:bg-white/10 hover:text-white transition-colors">
+                  <FileText size={18} className="text-gray-400" />
+                  Attach Files
                 </button>
               </div>
             )}
@@ -281,27 +650,21 @@ const ChatInput = () => {
             {isModelMenuOpen && (
               <div className="absolute bottom-full left-0 mb-3 w-64 mac-element rounded-[24px] p-2 z-50 flex flex-col shadow-2xl">
                 
-                <div className="text-xs font-semibold text-gray-500 px-3 pt-3 pb-2 uppercase tracking-wider">Recent Models</div>
-                {RECENT_MODELS.map((model) => (
-                  <ModelItem 
-                    key={`recent-${model.id}`} 
-                    model={model} 
-                    isSelected={selectedModel.id === model.id} 
-                    onClick={() => { setSelectedModel(model); setIsModelMenuOpen(false); }} 
-                  />
-                ))}
-
-                <div className="h-px bg-white/10 my-2 mx-2"></div>
-
-                <div className="text-xs font-semibold text-gray-500 px-3 pt-2 pb-2 uppercase tracking-wider">All Models</div>
-                {ALL_MODELS.filter(m => !RECENT_MODELS.some(r => r.id === m.id)).map((model) => (
-                  <ModelItem 
-                    key={`all-${model.id}`} 
-                    model={model} 
-                    isSelected={selectedModel.id === model.id} 
-                    onClick={() => { setSelectedModel(model); setIsModelMenuOpen(false); }} 
-                  />
-                ))}
+                <div className="text-xs font-semibold text-gray-500 px-3 pt-3 pb-2 uppercase tracking-wider">Models</div>
+                {isLoadingModels ? (
+                  <div className="px-3 py-2 text-sm text-gray-400">Loading...</div>
+                ) : allModels.length > 0 ? (
+                  allModels.map((model) => (
+                    <ModelItem 
+                      key={`all-${model.id}`} 
+                      model={model} 
+                      isSelected={selectedModel?.id === model.id} 
+                      onClick={() => { setSelectedModel(model); setIsModelMenuOpen(false); }} 
+                    />
+                  ))
+                ) : (
+                  <div className="px-3 py-2 text-sm text-gray-400">No models found</div>
+                )}
               </div>
             )}
             
@@ -309,13 +672,22 @@ const ChatInput = () => {
               onClick={() => setIsModelMenuOpen(!isModelMenuOpen)}
               className="flex items-center gap-2.5 px-3.5 py-2 rounded-2xl mac-element mac-element-hover text-gray-200 font-medium text-sm transition-all"
             >
-              <img 
-                src={PROVIDER_ICONS[selectedModel.provider] || PROVIDER_ICONS['ollama']} 
-                alt={selectedModel.provider} 
-                className="w-4 h-4 rounded-sm object-contain" 
-                onError={(e) => e.currentTarget.style.display = 'none'} 
-              />
-              {selectedModel.name}
+              {selectedModel ? (
+                <>
+                  <img 
+                    src={PROVIDER_ICONS[selectedModel.provider] || PROVIDER_ICONS['ollama']} 
+                    alt={selectedModel.provider} 
+                    className="w-4 h-4 rounded-sm object-contain" 
+                    onError={(e) => e.currentTarget.style.display = 'none'} 
+                  />
+                  <span className="truncate max-w-[150px]">{selectedModel.name}</span>
+                </>
+              ) : (
+                <>
+                  <AlertTriangle size={16} className="text-yellow-500" />
+                  <span className="truncate max-w-[150px]">{isLoadingModels ? 'Loading...' : 'No Models Found'}</span>
+                </>
+              )}
               <ChevronUp size={16} className={`transition-transform ml-1 ${isModelMenuOpen ? 'rotate-180' : ''}`} />
             </button>
           </div>
@@ -323,7 +695,12 @@ const ChatInput = () => {
         </div>
 
         {/* Right Action: Send Button */}
-        <button className="p-2 bg-white text-black rounded-full hover:bg-gray-200 transition-colors disabled:opacity-50" title="Send message">
+        <button 
+          onClick={handleSend}
+          disabled={disabled || !selectedModel || !value.trim()}
+          className="p-2 bg-white text-black rounded-full hover:bg-gray-200 transition-colors disabled:opacity-50 disabled:bg-white/20 disabled:text-white/40" 
+          title="Send message"
+        >
           <ArrowUp size={20} strokeWidth={3} />
         </button>
         
