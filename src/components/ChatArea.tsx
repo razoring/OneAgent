@@ -1,11 +1,14 @@
 import React, { useState, useRef, useEffect } from 'react';
 import ChatInput from './ChatInput';
 import ThinkingBlock from './ThinkingBlock';
-import { generateChatStream, LLMModel, fileToBase64, parseAttachmentText } from '../utils/llm';
+import { generateChatStream, LLMModel, fileToBase64, parseAttachmentDocument } from '../utils/llm';
 import DEFAULT_SYSTEM_PROMPT from '../utils/systemPrompt.md?raw';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import rehypeRaw from 'rehype-raw';
+import remarkMath from 'remark-math';
+import rehypeKatex from 'rehype-katex';
+import 'katex/dist/katex.min.css';
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
 import { vscDarkPlus } from 'react-syntax-highlighter/dist/esm/styles/prism';
 
@@ -136,7 +139,40 @@ const ChatArea = () => {
             } else if (att.file) {
               try {
                 // Parse document (Office, PDF, HTML, MHTML, Code, Text) cleanly
-                const fileText = await parseAttachmentText(att.file);
+                const parsedDoc = await parseAttachmentDocument(att.file);
+                
+                let fileText = parsedDoc.text;
+                // Perform RAG if document has chunks and user provided a query
+                if (parsedDoc.chunks && parsedDoc.chunkEmbeddings && text.trim() && (window as any).electronAPI.ragSearch) {
+                  try {
+                    const queryEmbedRes = await (window as any).electronAPI.embedTexts([text]);
+                    if (queryEmbedRes.success && queryEmbedRes.embeddings.length > 0) {
+                      const searchRes = await (window as any).electronAPI.ragSearch({
+                        queryEmbedding: queryEmbedRes.embeddings[0],
+                        chunks: parsedDoc.chunks,
+                        chunkEmbeddings: parsedDoc.chunkEmbeddings,
+                        topK: 15
+                      });
+                      
+                      if (searchRes.success && searchRes.topChunks) {
+                        const topChunks = searchRes.topChunks;
+                        const contextString = topChunks.map((c: any) => {
+                          const meta = [];
+                          if (c.metadata.page !== undefined) meta.push(`Page: ${c.metadata.page}`);
+                          if (c.metadata.slide !== undefined) meta.push(`Slide: ${c.metadata.slide}`);
+                          const metaStr = meta.length > 0 ? ` | ${meta.join(', ')}` : '';
+                          return `[Source: ${c.metadata.source}${metaStr}]\n${c.text}`;
+                        }).join('\n\n');
+                        
+                        fileText = `[RAG Retrieved Context - Showing most relevant excerpts from ${att.display}]\n\n${contextString}`;
+                        console.log(`[RAG] Retrieved ${topChunks.length} chunks for ${att.display}`);
+                      }
+                    }
+                  } catch (ragError) {
+                    console.error('[RAG Search] Failed:', ragError);
+                  }
+                }
+                
                 textContent += `\n\n--- Attachment: ${att.display} ---\n${fileText}\n--- End Attachment ---`;
               } catch (err) {
                 console.error("Could not read file", err);
@@ -242,8 +278,8 @@ const ChatArea = () => {
                   <div className="w-full text-gray-100">
                     <div className="focus:outline-none [&_.mention]:inline-flex [&_.mention]:items-center [&_.mention]:gap-1.5 [&_.mention]:bg-white/10 [&_.mention]:border [&_.mention]:border-white/5 [&_.mention]:text-blue-400 [&_.mention]:px-2 [&_.mention]:h-[24px] [&_.mention]:rounded-md [&_.mention]:mx-1 [&_.mention]:align-middle [&_.mention]:select-none">
                       <ReactMarkdown 
-                        remarkPlugins={[remarkGfm]} 
-                        rehypePlugins={[rehypeRaw]} 
+                        remarkPlugins={[remarkGfm, remarkMath]} 
+                        rehypePlugins={[rehypeRaw, rehypeKatex]} 
                         components={MarkdownComponents}
                       >
                         {formatMentions(msg.content)}
@@ -276,8 +312,8 @@ const ChatArea = () => {
                     <div className="[&_.mention]:inline-flex [&_.mention]:items-center [&_.mention]:gap-1.5 [&_.mention]:bg-white/10 [&_.mention]:border [&_.mention]:border-white/5 [&_.mention]:text-blue-400 [&_.mention]:px-2 [&_.mention]:h-[24px] [&_.mention]:rounded-md [&_.mention]:mx-1 [&_.mention]:align-middle [&_.mention]:select-none">
                       {msg.content ? (
                         <ReactMarkdown 
-                          remarkPlugins={[remarkGfm]} 
-                          rehypePlugins={[rehypeRaw]} 
+                          remarkPlugins={[remarkGfm, remarkMath]} 
+                          rehypePlugins={[rehypeRaw, rehypeKatex]} 
                           components={MarkdownComponents}
                         >
                           {formatMentions(msg.content)}

@@ -5,7 +5,8 @@
     "moduleResolution": "NodeNext",
     "outDir": "./dist-electron",
     "skipLibCheck": true,
-    "strict": true
+    "strict": true,
+    "esModuleInterop": true
   },
-  "include": ["main.ts", "preload.ts"]
+  "include": ["main.ts", "preload.ts", "rag.ts"]
 }

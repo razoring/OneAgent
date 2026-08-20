@@ -19,19 +19,18 @@ const PROVIDER_ICONS: Record<string, string> = {
 import { LLMModel, fetchModels } from '../utils/llm';
 
 const ModelItem = ({ model, isSelected, onClick }: { model: any, isSelected: boolean, onClick: () => void }) => (
-  <button 
+  <button
     onClick={onClick}
-    className={`flex items-center gap-3 w-full text-left px-4 py-2.5 rounded-xl text-sm transition-colors ${
-      isSelected 
-        ? 'bg-white/10 text-white font-medium' 
+    className={`flex items-center gap-3 w-full text-left px-4 py-2.5 rounded-xl text-sm transition-colors ${isSelected
+        ? 'bg-white/10 text-white font-medium'
         : 'text-gray-300 hover:bg-white/5 hover:text-white'
-    }`}
+      }`}
   >
-    <img 
-      src={PROVIDER_ICONS[model.provider] || PROVIDER_ICONS['ollama']} 
-      alt={model.provider} 
-      className="w-5 h-5 rounded object-contain bg-white/10 p-0.5" 
-      onError={(e) => e.currentTarget.style.display = 'none'} 
+    <img
+      src={PROVIDER_ICONS[model.provider] || PROVIDER_ICONS['ollama']}
+      alt={model.provider}
+      className="w-5 h-5 rounded object-contain bg-white/10 p-0.5"
+      onError={(e) => e.currentTarget.style.display = 'none'}
     />
     <span className="truncate">{model.name}</span>
   </button>
@@ -53,7 +52,7 @@ class MentionWidget extends WidgetType {
   toDOM() {
     const span = document.createElement('span');
     span.className = 'inline-flex items-center gap-1.5 bg-white/10 border border-white/5 text-blue-400 px-2 h-[24px] rounded-md mx-1 align-middle select-none shadow-sm cursor-pointer hover:underline -my-2';
-    
+
     const iconSpan = document.createElement('span');
     iconSpan.className = 'flex items-center text-current';
     iconSpan.style.width = '14px';
@@ -62,17 +61,17 @@ class MentionWidget extends WidgetType {
       iconSpan.innerHTML = `<img src="${this.attachment.thumbnail}" style="width:14px; height:14px; object-fit:contain;" />`;
     } else {
       const type = this.attachment?.type || 'file';
-      iconSpan.innerHTML = type === 'image' ? `<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="18" x="3" y="3" rx="2" ry="2"/><circle cx="9" cy="9" r="2"/><path d="m21 15-3.086-3.086a2 2 0 0 0-2.828 0L6 21"/></svg>` : 
-                           type === 'folder' ? `<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13c0 1.1.9 2 2 2Z"/></svg>` :
-                           `<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/><path d="M14 2v4a2 2 0 0 0 2 2h4"/><path d="M10 9H8"/><path d="M16 13H8"/><path d="M16 17H8"/></svg>`;
+      iconSpan.innerHTML = type === 'image' ? `<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="18" x="3" y="3" rx="2" ry="2"/><circle cx="9" cy="9" r="2"/><path d="m21 15-3.086-3.086a2 2 0 0 0-2.828 0L6 21"/></svg>` :
+        type === 'folder' ? `<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13c0 1.1.9 2 2 2Z"/></svg>` :
+          `<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/><path d="M14 2v4a2 2 0 0 0 2 2h4"/><path d="M10 9H8"/><path d="M16 13H8"/><path d="M16 17H8"/></svg>`;
     }
     span.appendChild(iconSpan);
-    
+
     const textSpan = document.createElement('span');
     textSpan.className = 'text-[13px] font-medium leading-none';
     textSpan.textContent = this.text.substring(1); // remove @
     span.appendChild(textSpan);
-    
+
     if (this.attachment) {
       span.onclick = () => {
         if (this.attachment.type === 'link' || (!this.attachment.file && this.attachment.url && this.attachment.url.startsWith('http'))) {
@@ -117,7 +116,7 @@ export function createMentionPlugin(getAttachments: () => any[]) {
       const attachments = getAttachments();
       if (attachments.length === 0) return builder.finish();
 
-      for (let {from, to} of view.visibleRanges) {
+      for (let { from, to } of view.visibleRanges) {
         const text = view.state.doc.sliceString(from, to);
         const regex = /@([^\s]+)/g;
         let match;
@@ -174,7 +173,7 @@ const ChatInput: React.FC<ChatInputProps> = ({ onSend, onStop, disabled }) => {
   const [allModels, setAllModels] = useState<LLMModel[]>([]);
   const [selectedModel, setSelectedModel] = useState<LLMModel | null>(null);
   const [isLoadingModels, setIsLoadingModels] = useState(false);
-  
+
   const [isAttachMenuOpen, setIsAttachMenuOpen] = useState(false);
   const [attachments, setAttachments] = useState<any[]>([]);
   const [isDragging, setIsDragging] = useState(false);
@@ -224,11 +223,11 @@ const ChatInput: React.FC<ChatInputProps> = ({ onSend, onStop, disabled }) => {
     document.addEventListener('preview-attachment', handlePreview);
     return () => document.removeEventListener('preview-attachment', handlePreview);
   }, []);
-  
+
   // Mentions State
   const [isMentionMenuOpen, setIsMentionMenuOpen] = useState(false);
   const [mentionQuery, setMentionQuery] = useState('');
-  const [mentionRange, setMentionRange] = useState<{from: number, to: number} | null>(null);
+  const [mentionRange, setMentionRange] = useState<{ from: number, to: number } | null>(null);
   const [focusedMentionIndex, setFocusedMentionIndex] = useState(0);
 
   useEffect(() => {
@@ -240,7 +239,7 @@ const ChatInput: React.FC<ChatInputProps> = ({ onSend, onStop, disabled }) => {
   // Refs for keymap closures
   const isMentionMenuOpenRef = useRef(isMentionMenuOpen);
   useEffect(() => { isMentionMenuOpenRef.current = isMentionMenuOpen; }, [isMentionMenuOpen]);
-  
+
   const focusedMentionIndexRef = useRef(focusedMentionIndex);
   useEffect(() => { focusedMentionIndexRef.current = focusedMentionIndex; }, [focusedMentionIndex]);
 
@@ -353,14 +352,14 @@ const ChatInput: React.FC<ChatInputProps> = ({ onSend, onStop, disabled }) => {
     e.preventDefault();
     setIsDragging(true);
   };
-  
+
   const handleDragLeave = (e: React.DragEvent) => {
     e.preventDefault();
     if (!e.currentTarget.contains(e.relatedTarget as Node)) {
       setIsDragging(false);
     }
   };
-  
+
   const processFiles = async (files: File[]) => {
     const newAttachments = await Promise.all(files.map(async file => {
       const isImage = file.type.startsWith('image/') || /\.(png|jpe?g|gif|webp|bmp|svg)$/i.test(file.name);
@@ -406,7 +405,7 @@ const ChatInput: React.FC<ChatInputProps> = ({ onSend, onStop, disabled }) => {
   const confirmRemoveAttachment = (id: string) => {
     const att = attachmentsRef.current.find(a => a.id === id);
     setAttachments(prev => prev.filter(a => a.id !== id));
-    
+
     if (att && cmRef.current?.view) {
       const view = cmRef.current.view;
       const text = view.state.doc.toString();
@@ -471,13 +470,13 @@ const ChatInput: React.FC<ChatInputProps> = ({ onSend, onStop, disabled }) => {
   };
 
   return (
-    <div 
+    <div
       className="relative w-full rounded-[28px] mac-element transition-all focus-within:ring-2 focus-within:ring-white/20 p-4 flex flex-col gap-3 shadow-lg"
       onDragOver={handleDragOver}
       onDragLeave={handleDragLeave}
       onDrop={handleDrop}
     >
-      
+
       {/* Removal Confirmation Prompt */}
       {attachmentToRemove && (
         <div className="fixed inset-0 z-[200] bg-black/60 flex items-center justify-center p-4 backdrop-blur-sm" onClick={() => setAttachmentToRemove(null)}>
@@ -487,13 +486,13 @@ const ChatInput: React.FC<ChatInputProps> = ({ onSend, onStop, disabled }) => {
               This attachment is currently referenced in your message. Removing it will also remove all mentions. Are you sure?
             </p>
             <div className="flex justify-end gap-3 mt-2">
-              <button 
+              <button
                 onClick={() => setAttachmentToRemove(null)}
                 className="px-4 py-2 rounded-xl text-sm font-medium text-gray-300 hover:bg-white/10 transition-colors"
               >
                 Cancel (Esc)
               </button>
-              <button 
+              <button
                 onClick={() => confirmRemoveAttachment(attachmentToRemove)}
                 className="px-4 py-2 rounded-xl text-sm font-medium bg-red-500/20 text-red-400 hover:bg-red-500/30 transition-colors"
               >
@@ -563,9 +562,9 @@ const ChatInput: React.FC<ChatInputProps> = ({ onSend, onStop, disabled }) => {
                   ) : (
                     getFileIcon(att.type)
                   )}
-                  
+
                   {/* Remove Overlay */}
-                  <button 
+                  <button
                     onClick={() => removeAttachment(att.id)}
                     className="absolute inset-0 bg-black/60 opacity-0 group-hover:opacity-100 flex items-center justify-center transition-opacity text-white"
                   >
@@ -586,12 +585,11 @@ const ChatInput: React.FC<ChatInputProps> = ({ onSend, onStop, disabled }) => {
           <div className="mac-element rounded-[24px] p-2 flex flex-col shadow-2xl max-h-[200px] overflow-y-auto">
             <div className="text-xs font-semibold text-gray-500 px-3 pt-2 pb-2 uppercase tracking-wider">Mentions</div>
             {filteredAttachments.map((att, i) => (
-              <button 
+              <button
                 key={att.id}
                 onClick={() => insertMention(att)}
-                className={`flex items-center gap-3 w-full text-left px-3 py-2.5 rounded-2xl text-sm transition-colors ${
-                  i === focusedMentionIndex ? 'bg-white/10 text-white' : 'text-gray-300 hover:bg-white/10 hover:text-white'
-                }`}
+                className={`flex items-center gap-3 w-full text-left px-3 py-2.5 rounded-2xl text-sm transition-colors ${i === focusedMentionIndex ? 'bg-white/10 text-white' : 'text-gray-300 hover:bg-white/10 hover:text-white'
+                  }`}
               >
                 {att.thumbnail ? (
                   <img src={att.thumbnail} className="w-3.5 h-3.5 object-contain" />
@@ -611,7 +609,7 @@ const ChatInput: React.FC<ChatInputProps> = ({ onSend, onStop, disabled }) => {
           ref={cmRef}
           value={value}
           theme="dark"
-          placeholder="Message..."
+          placeholder="Ask anything, @ to mention"
           extensions={[
             markdown(),
             editorTheme,
@@ -638,19 +636,19 @@ const ChatInput: React.FC<ChatInputProps> = ({ onSend, onStop, disabled }) => {
           className="w-full h-full !outline-none"
         />
       </div>
-      
+
       {/* Bottom Toolbar Row */}
       <div className="flex items-center justify-between mt-1 px-1">
-        
+
         {/* Left Actions: Attach & Model Selector */}
         <div className="flex items-center gap-3 relative">
-          
+
           {/* Attach Button Drop-up */}
           <div className="relative">
-            <input 
-              type="file" 
-              multiple 
-              className="hidden" 
+            <input
+              type="file"
+              multiple
+              className="hidden"
               ref={fileInputRef}
               onChange={handleFileChange}
             />
@@ -662,30 +660,30 @@ const ChatInput: React.FC<ChatInputProps> = ({ onSend, onStop, disabled }) => {
                 </button>
               </div>
             )}
-            <button 
+            <button
               onClick={() => setIsAttachMenuOpen(!isAttachMenuOpen)}
-              className="p-2 text-gray-400 hover:text-white rounded-full hover:bg-white/10 transition-all" 
+              className="p-2 text-gray-400 hover:text-white rounded-full hover:bg-white/10 transition-all"
               title="Attach file"
             >
               <Plus size={20} className={`transition-transform duration-200 ${isAttachMenuOpen ? 'rotate-45' : ''}`} />
             </button>
           </div>
-          
+
           {/* Model Selector Drop-up */}
           <div className="relative">
             {isModelMenuOpen && (
               <div className="absolute bottom-full left-0 mb-3 w-64 mac-element rounded-[24px] p-2 z-50 flex flex-col shadow-2xl">
-                
+
                 <div className="text-xs font-semibold text-gray-500 px-3 pt-3 pb-2 uppercase tracking-wider">Models</div>
                 {isLoadingModels ? (
                   <div className="px-3 py-2 text-sm text-gray-400">Loading...</div>
                 ) : allModels.length > 0 ? (
                   allModels.map((model) => (
-                    <ModelItem 
-                      key={`all-${model.id}`} 
-                      model={model} 
-                      isSelected={selectedModel?.id === model.id} 
-                      onClick={() => { setSelectedModel(model); setIsModelMenuOpen(false); }} 
+                    <ModelItem
+                      key={`all-${model.id}`}
+                      model={model}
+                      isSelected={selectedModel?.id === model.id}
+                      onClick={() => { setSelectedModel(model); setIsModelMenuOpen(false); }}
                     />
                   ))
                 ) : (
@@ -693,18 +691,18 @@ const ChatInput: React.FC<ChatInputProps> = ({ onSend, onStop, disabled }) => {
                 )}
               </div>
             )}
-            
-            <button 
+
+            <button
               onClick={() => setIsModelMenuOpen(!isModelMenuOpen)}
               className="flex items-center gap-2.5 px-3.5 py-2 rounded-2xl mac-element mac-element-hover text-gray-200 font-medium text-sm transition-all"
             >
               {selectedModel ? (
                 <>
-                  <img 
-                    src={PROVIDER_ICONS[selectedModel.provider] || PROVIDER_ICONS['ollama']} 
-                    alt={selectedModel.provider} 
-                    className="w-4 h-4 rounded-sm object-contain" 
-                    onError={(e) => e.currentTarget.style.display = 'none'} 
+                  <img
+                    src={PROVIDER_ICONS[selectedModel.provider] || PROVIDER_ICONS['ollama']}
+                    alt={selectedModel.provider}
+                    className="w-4 h-4 rounded-sm object-contain"
+                    onError={(e) => e.currentTarget.style.display = 'none'}
                   />
                   <span className="truncate max-w-[150px]">{selectedModel.name}</span>
                 </>
@@ -726,24 +724,24 @@ const ChatInput: React.FC<ChatInputProps> = ({ onSend, onStop, disabled }) => {
 
         {/* Right Action: Send/Stop Button */}
         {disabled && onStop ? (
-          <button 
+          <button
             onClick={onStop}
-            className="p-2 bg-white text-black rounded-full hover:bg-gray-200 transition-colors" 
+            className="p-2 bg-white text-black rounded-full hover:bg-gray-200 transition-colors"
             title="Stop generating"
           >
             <Square fill="currentColor" size={20} strokeWidth={3} />
           </button>
         ) : (
-          <button 
+          <button
             onClick={handleSend}
             disabled={!selectedModel || (!value.trim() && attachments.length === 0)}
-            className="p-2 bg-white text-black rounded-full hover:bg-gray-200 transition-colors disabled:opacity-50 disabled:bg-white/20 disabled:text-white/40" 
+            className="p-2 bg-white text-black rounded-full hover:bg-gray-200 transition-colors disabled:opacity-50 disabled:bg-white/20 disabled:text-white/40"
             title="Send message"
           >
             <ArrowUp size={20} strokeWidth={3} />
           </button>
         )}
-        
+
       </div>
     </div>
   );

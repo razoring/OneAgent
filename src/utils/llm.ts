@@ -131,8 +131,24 @@ export const fileToBase64 = (file: File): Promise<string> => {
   });
 };
 
+export interface DocumentChunk {
+  text: string;
+  metadata: {
+    source: string;
+    page?: number;
+    slide?: number;
+    chunkIndex: number;
+  };
+}
+
+export interface ParsedDocument {
+  text: string;
+  chunks?: DocumentChunk[];
+  chunkEmbeddings?: number[][];
+}
+
 // Robust document parser that extracts clean text from Office, PDF, HTML, MHTML, and code files
-export const parseAttachmentText = async (file: File): Promise<string> => {
+export const parseAttachmentDocument = async (file: File): Promise<ParsedDocument> => {
   const ext = file.name.toLowerCase().split('.').pop() || '';
   const filePath = (file as any).path;
 
@@ -149,26 +165,39 @@ export const parseAttachmentText = async (file: File): Promise<string> => {
         fileName: file.name
       });
       if (res.success && typeof res.text === 'string') {
-        return res.text;
+        let chunkEmbeddings;
+        if (res.chunks && res.chunks.length > 0 && (window as any).electronAPI.embedTexts) {
+          try {
+            const embedRes = await (window as any).electronAPI.embedTexts(res.chunks.map((c: any) => c.text));
+            if (embedRes.success) {
+              chunkEmbeddings = embedRes.embeddings;
+            }
+          } catch (embedError) {
+            console.error('[parseAttachmentDocument] Failed to generate embeddings for chunks:', embedError);
+          }
+        }
+        return { text: res.text, chunks: res.chunks, chunkEmbeddings };
       }
     } catch (e) {
-      console.error('[parseAttachmentText] IPC extraction failed, falling back:', e);
+      console.error('[parseAttachmentDocument] IPC extraction failed, falling back:', e);
     }
   }
 
   // Client-side fallback for text / HTML / MHTML
   try {
     const raw = await file.text();
+    let text = raw;
     if (ext === 'html' || ext === 'htm') {
-      return cleanHtml(raw);
+      text = cleanHtml(raw);
+    } else if (ext === 'mhtml' || ext === 'mht') {
+      text = parseMhtml(raw);
+    } else {
+      text = sanitizeText(raw);
     }
-    if (ext === 'mhtml' || ext === 'mht') {
-      return parseMhtml(raw);
-    }
-    return sanitizeText(raw);
+    return { text };
   } catch (e) {
-    console.error('[parseAttachmentText] Text extraction failed:', e);
-    return `[Unable to extract text from ${file.name}]`;
+    console.error('[parseAttachmentDocument] Text extraction failed:', e);
+    return { text: `[Unable to extract text from ${file.name}]` };
   }
 };
 

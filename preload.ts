@@ -24,5 +24,7 @@ const { ipcRenderer } = require('electron');
     return () => ipcRenderer.removeListener('chat-stream-error', handler);
   },
   parseDocument: (options: any) => ipcRenderer.invoke('parse-document', options),
+  embedTexts: (texts: string[]) => ipcRenderer.invoke('embed-texts', texts),
+  ragSearch: (options: any) => ipcRenderer.invoke('rag-search', options),
   getFileThumbnail: (filePath: string) => ipcRenderer.invoke('get-file-thumbnail', filePath),
 };

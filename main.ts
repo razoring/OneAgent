@@ -285,69 +285,97 @@ function parseMhtmlText(mhtml: string): string {
 
 ipcMain.handle('parse-document', async (event, { filePath, fileBuffer, fileName }) => {
   try {
-    const fs = require('fs');
+    const { chunkText, parsePdfToChunks, parsePptxToChunks } = await import('./rag.js');
     const ext = (fileName || filePath || '').toLowerCase().split('.').pop() || '';
+    const source = fileName || (filePath ? path.basename(filePath) : 'unknown');
+    
+    let buffer: Buffer | null = null;
+    if (fileBuffer) {
+      buffer = Buffer.from(fileBuffer);
+    } else if (filePath && fs.existsSync(filePath)) {
+      buffer = fs.readFileSync(filePath);
+    }
 
-    // 1. Office & PDF formats
-    if (['docx', 'pptx', 'xlsx', 'pdf', 'odt', 'odp', 'ods', 'rtf', 'epub'].includes(ext)) {
+    // 1. PDF
+    if (ext === 'pdf' && buffer) {
+      const chunks = await parsePdfToChunks(buffer, source);
+      return { success: true, chunks, text: chunks.map((c: any) => c.text).join('\n\n') };
+    }
+    
+    // 2. PPTX
+    if (ext === 'pptx' && buffer) {
+      const chunks = await parsePptxToChunks(buffer, source);
+      return { success: true, chunks, text: chunks.map((c: any) => c.text).join('\n\n') };
+    }
+
+    // 3. Office & other formats
+    if (['docx', 'xlsx', 'odt', 'odp', 'ods', 'rtf', 'epub'].includes(ext)) {
       try {
-        const officeParser = require('officeparser');
         let input: any = filePath;
-        if ((!input || !fs.existsSync(input)) && fileBuffer) {
-          input = Buffer.from(fileBuffer);
+        if ((!input || !fs.existsSync(input)) && buffer) {
+          input = buffer;
         }
         if (input) {
           const parsed = await officeParser.parseOffice(input, {
             outputErrorToConsole: false,
             fileType: ext
           });
-          const text = typeof parsed.toText === 'function' ? parsed.toText() : String(parsed);
-          return { success: true, text: sanitizeExtractedText(text) };
+          const text = sanitizeExtractedText(typeof parsed.toText === 'function' ? parsed.toText() : String(parsed));
+          return { success: true, chunks: chunkText(text, source), text };
         }
       } catch (err: any) {
         console.error('[parse-document] officeparser failed, fallback:', err);
       }
     }
 
-    // 2. HTML
+    // 4. HTML
     if (['html', 'htm'].includes(ext)) {
-      let rawHtml = '';
-      if (filePath && fs.existsSync(filePath)) {
-        rawHtml = fs.readFileSync(filePath, 'utf-8');
-      } else if (fileBuffer) {
-        rawHtml = Buffer.from(fileBuffer).toString('utf-8');
-      }
-      return { success: true, text: cleanHtmlText(rawHtml) };
+      let rawHtml = buffer ? buffer.toString('utf-8') : '';
+      const text = cleanHtmlText(rawHtml);
+      return { success: true, chunks: chunkText(text, source), text };
     }
 
-    // 3. MHTML
+    // 5. MHTML
     if (['mhtml', 'mht'].includes(ext)) {
-      let rawMhtml = '';
-      if (filePath && fs.existsSync(filePath)) {
-        rawMhtml = fs.readFileSync(filePath, 'utf-8');
-      } else if (fileBuffer) {
-        rawMhtml = Buffer.from(fileBuffer).toString('utf-8');
-      }
-      return { success: true, text: parseMhtmlText(rawMhtml) };
+      let rawMhtml = buffer ? buffer.toString('utf-8') : '';
+      const text = parseMhtmlText(rawMhtml);
+      return { success: true, chunks: chunkText(text, source), text };
     }
 
-    // 4. Standard text / code / CSV / JSON / Markdown
-    let rawText = '';
-    if (filePath && fs.existsSync(filePath)) {
-      rawText = fs.readFileSync(filePath, 'utf-8');
-    } else if (fileBuffer) {
-      rawText = Buffer.from(fileBuffer).toString('utf-8');
-    }
-    return { success: true, text: sanitizeExtractedText(rawText) };
+    // 6. Standard text / code / CSV / JSON / Markdown
+    let rawText = buffer ? buffer.toString('utf-8') : '';
+    const text = sanitizeExtractedText(rawText);
+    return { success: true, chunks: chunkText(text, source), text };
   } catch (err: any) {
     console.error('[parse-document] Error:', err);
     return { success: false, error: err.message || 'Failed to parse document' };
   }
 });
 
+ipcMain.handle('embed-texts', async (event, texts: string[]) => {
+  try {
+    const { embedTexts } = await import('./rag.js');
+    const embeddings = await embedTexts(texts);
+    return { success: true, embeddings };
+  } catch (err: any) {
+    console.error('[embed-texts] Error:', err);
+    return { success: false, error: err.message };
+  }
+});
+
+ipcMain.handle('rag-search', async (event, { queryEmbedding, chunks, chunkEmbeddings, topK }) => {
+  try {
+    const { searchChunks } = await import('./rag.js');
+    const topChunks = searchChunks(queryEmbedding, chunks, chunkEmbeddings, topK);
+    return { success: true, topChunks };
+  } catch (err: any) {
+    console.error('[rag-search] Error:', err);
+    return { success: false, error: err.message };
+  }
+});
+
 ipcMain.handle('get-file-thumbnail', async (event, filePath) => {
   try {
-    const { nativeImage } = require('electron');
     // Generates a thumbnail image from the file (like in Windows Explorer)
     const thumb = await nativeImage.createThumbnailFromPath(filePath, { width: 64, height: 64 });
     if (!thumb.isEmpty()) {
@@ -359,7 +387,6 @@ ipcMain.handle('get-file-thumbnail', async (event, filePath) => {
   
   // Fallback to getting the basic file icon if thumbnail is not available
   try {
-    const { app } = require('electron');
     const icon = await app.getFileIcon(filePath, { size: 'normal' });
     if (!icon.isEmpty()) {
       return icon.toDataURL();
