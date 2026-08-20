@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react';
-import { ArrowUp, ChevronUp, ChevronRight, Plus, FileText, Image as ImageIcon, Folder, X, FileSpreadsheet, MonitorPlay, AlertTriangle, Square, Check } from 'lucide-react';
+import { ArrowUp, ChevronUp, ChevronRight, Plus, FileText, Image as ImageIcon, Folder, X, FileSpreadsheet, MonitorPlay, AlertTriangle, Square, Check, RefreshCw, Settings2 } from 'lucide-react';
 import CodeMirror, { ReactCodeMirrorRef } from '@uiw/react-codemirror';
 import { markdown } from '@codemirror/lang-markdown';
 import { EditorView, Decoration, DecorationSet, WidgetType, ViewPlugin, ViewUpdate, keymap } from '@codemirror/view';
@@ -16,7 +16,8 @@ const PROVIDER_ICONS: Record<string, string> = {
   anthropic: 'https://www.anthropic.com/favicon.ico'
 };
 
-import { LLMModel, fetchModels } from '../utils/llm';
+import { LLMModel, fetchModels, ModelSettings, getModelSettings, saveModelSettings } from '../utils/llm';
+import DEFAULT_SYSTEM_PROMPT from '../utils/systemPrompt.md?raw';
 
 const ModelItem = ({ model, isSelected, onClick }: { model: any, isSelected: boolean, onClick: () => void }) => (
   <button
@@ -185,6 +186,9 @@ const ChatInput: React.FC<ChatInputProps> = ({ onSend, onStop, disabled, editing
   const [isLoadingModels, setIsLoadingModels] = useState(false);
 
   const [isAttachMenuOpen, setIsAttachMenuOpen] = useState(false);
+  const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  const [modelSettings, setModelSettings] = useState<ModelSettings>(() => getModelSettings());
+  const [estimatedTokens, setEstimatedTokens] = useState<{ total: number; prompt: number; history: number; system: number } | null>(null);
   const [attachments, setAttachments] = useState<any[]>([]);
   const [isDragging, setIsDragging] = useState(false);
   const [attachmentToRemove, setAttachmentToRemove] = useState<string | null>(null);
@@ -192,6 +196,49 @@ const ChatInput: React.FC<ChatInputProps> = ({ onSend, onStop, disabled, editing
   const cmRef = useRef<ReactCodeMirrorRef>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [hasUnsentChanges, setHasUnsentChanges] = useState(false);
+
+  const updateSettings = (partial: Partial<ModelSettings>) => {
+    const updated = { ...modelSettings, ...partial };
+    setModelSettings(updated);
+    saveModelSettings(updated);
+  };
+
+  useEffect(() => {
+    //only calculate tokens when settings panel is open
+    if (!isSettingsOpen) return;
+
+    const systemTokens = Math.ceil(DEFAULT_SYSTEM_PROMPT.length / 3.8);
+
+    let historyChars = 0;
+    if (messages) {
+      for (const m of messages) {
+        if (typeof m.content === 'string') {
+          historyChars += m.content.length;
+        }
+        if (m.thinking) {
+          historyChars += m.thinking.length;
+        }
+      }
+    }
+    const historyTokens = Math.ceil(historyChars / 3.8);
+
+    let promptChars = value.length;
+    for (const a of attachments) {
+      if (a.rawContent) {
+        promptChars += a.rawContent.length;
+      } else if (a.display) {
+        promptChars += a.display.length + 50;
+      }
+    }
+    const promptTokens = Math.ceil(promptChars / 3.8);
+
+    setEstimatedTokens({
+      system: systemTokens,
+      history: historyTokens,
+      prompt: promptTokens,
+      total: systemTokens + historyTokens + promptTokens,
+    });
+  }, [isSettingsOpen, messages, value, attachments]);
   
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const [canScrollRight, setCanScrollRight] = useState(false);
@@ -799,11 +846,149 @@ const ChatInput: React.FC<ChatInputProps> = ({ onSend, onStop, disabled, editing
               </div>
             )}
             <button
-              onClick={() => setIsAttachMenuOpen(!isAttachMenuOpen)}
+              onClick={() => {
+                setIsAttachMenuOpen(!isAttachMenuOpen);
+                setIsSettingsOpen(false);
+                setIsModelMenuOpen(false);
+              }}
               className="p-2 text-gray-400 hover:text-white rounded-full hover:bg-white/10 transition-all"
               title="Attach file"
             >
               <Plus size={20} className={`transition-transform duration-200 ${isAttachMenuOpen ? 'rotate-45' : ''}`} />
+            </button>
+          </div>
+
+          {/* Settings-2 Model Adjustments Drop-up */}
+          <div className="relative">
+            {isSettingsOpen && (
+              <div className="absolute bottom-full left-0 mb-3 w-80 mac-element rounded-[24px] p-4 z-50 flex flex-col shadow-2xl gap-3.5 border border-white/10 text-gray-200">
+                {/* Live Token Count at Top */}
+                <div className="flex items-center justify-between pb-2 border-b border-white/10">
+                  <span className="text-xs font-semibold text-gray-400 uppercase tracking-wider">Model Parameters</span>
+                  <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-white/5 border border-white/10 text-xs">
+                    <span className="text-gray-400">Tokens:</span>
+                    <span className="font-semibold text-blue-400 font-mono">
+                      ~{estimatedTokens?.total.toLocaleString() || '0'}
+                    </span>
+                  </div>
+                </div>
+
+                <div className="flex items-center justify-between text-[11px] text-gray-400 px-0.5 -mt-1.5">
+                  <span>Prompt: ~{estimatedTokens?.prompt.toLocaleString() || '0'}</span>
+                  <span>History: ~{estimatedTokens?.history.toLocaleString() || '0'}</span>
+                  <span>System: ~{estimatedTokens?.system.toLocaleString() || '0'}</span>
+                </div>
+
+                {/* Thinking Level */}
+                <div className="flex flex-col gap-1.5">
+                  <div className="flex justify-between items-center text-xs">
+                    <span className="text-gray-300 font-medium">Thinking Level</span>
+                    <span className="text-gray-400 font-mono text-[11px] capitalize">{modelSettings.thinkingLevel}</span>
+                  </div>
+                  <div className="grid grid-cols-4 gap-1 p-1 bg-black/30 rounded-xl border border-white/5">
+                    {(['off', 'low', 'medium', 'high'] as const).map(level => (
+                      <button
+                        key={level}
+                        type="button"
+                        onClick={() => updateSettings({ thinkingLevel: level })}
+                        className={`py-1 text-xs rounded-lg capitalize transition-colors ${
+                          modelSettings.thinkingLevel === level
+                            ? 'bg-white/20 text-white font-medium shadow-sm'
+                            : 'text-gray-400 hover:text-gray-200'
+                        }`}
+                      >
+                        {level}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Thinking Timeout */}
+                <div className="flex flex-col gap-1.5">
+                  <div className="flex justify-between items-center text-xs">
+                    <span className="text-gray-300 font-medium">Thinking Timeout</span>
+                    <span className="text-gray-400 font-mono text-[11px]">
+                      {modelSettings.thinkingTimeout === 0 ? 'No timeout' : `${modelSettings.thinkingTimeout}s`}
+                    </span>
+                  </div>
+                  <input
+                    type="range"
+                    min={0}
+                    max={300}
+                    step={10}
+                    value={modelSettings.thinkingTimeout}
+                    onChange={(e) => updateSettings({ thinkingTimeout: Number(e.target.value) })}
+                    className="w-full accent-blue-500 bg-white/10 h-1.5 rounded-lg cursor-pointer"
+                  />
+                </div>
+
+                {/* Model Temperature */}
+                <div className="flex flex-col gap-1.5">
+                  <div className="flex justify-between items-center text-xs">
+                    <span className="text-gray-300 font-medium">Model Temperature</span>
+                    <span className="text-gray-400 font-mono text-[11px]">{modelSettings.temperature.toFixed(2)}</span>
+                  </div>
+                  <input
+                    type="range"
+                    min={0}
+                    max={2}
+                    step={0.05}
+                    value={modelSettings.temperature}
+                    onChange={(e) => updateSettings({ temperature: Number(e.target.value) })}
+                    className="w-full accent-blue-500 bg-white/10 h-1.5 rounded-lg cursor-pointer"
+                  />
+                </div>
+
+                {/* Top-P */}
+                <div className="flex flex-col gap-1.5">
+                  <div className="flex justify-between items-center text-xs">
+                    <span className="text-gray-300 font-medium">Top-P</span>
+                    <span className="text-gray-400 font-mono text-[11px]">{modelSettings.topP.toFixed(2)}</span>
+                  </div>
+                  <input
+                    type="range"
+                    min={0}
+                    max={1}
+                    step={0.05}
+                    value={modelSettings.topP}
+                    onChange={(e) => updateSettings({ topP: Number(e.target.value) })}
+                    className="w-full accent-blue-500 bg-white/10 h-1.5 rounded-lg cursor-pointer"
+                  />
+                </div>
+
+                {/* Max Output Length */}
+                <div className="flex flex-col gap-1.5">
+                  <div className="flex justify-between items-center text-xs">
+                    <span className="text-gray-300 font-medium">Max Output Length</span>
+                    <span className="text-gray-400 font-mono text-[11px]">
+                      {modelSettings.maxOutputLength ? `${modelSettings.maxOutputLength.toLocaleString()} tokens` : 'Default'}
+                    </span>
+                  </div>
+                  <input
+                    type="range"
+                    min={256}
+                    max={32768}
+                    step={256}
+                    value={modelSettings.maxOutputLength || 4096}
+                    onChange={(e) => updateSettings({ maxOutputLength: Number(e.target.value) })}
+                    className="w-full accent-blue-500 bg-white/10 h-1.5 rounded-lg cursor-pointer"
+                  />
+                </div>
+              </div>
+            )}
+            <button
+              onClick={() => {
+                const next = !isSettingsOpen;
+                setIsSettingsOpen(next);
+                if (next) {
+                  setIsAttachMenuOpen(false);
+                  setIsModelMenuOpen(false);
+                }
+              }}
+              className="p-2 text-gray-400 hover:text-white rounded-full hover:bg-white/10 transition-all"
+              title="Model settings"
+            >
+              <Settings2 size={20} className={`transition-transform duration-200 ${isSettingsOpen ? 'text-white rotate-45' : ''}`} />
             </button>
           </div>
 
@@ -831,7 +1016,17 @@ const ChatInput: React.FC<ChatInputProps> = ({ onSend, onStop, disabled, editing
             {isModelMenuOpen && (
               <div className="absolute bottom-full left-0 mb-3 w-64 mac-element rounded-[24px] p-2 z-50 flex flex-col shadow-2xl">
 
-                <div className="text-xs font-semibold text-gray-500 px-3 pt-3 pb-2 uppercase tracking-wider">Models</div>
+                <div className="flex items-center justify-between px-3 pt-3 pb-2">
+                  <span className="text-xs font-semibold text-gray-500 uppercase tracking-wider">Models</span>
+                  <button
+                    onClick={loadModels}
+                    disabled={isLoadingModels}
+                    className="p-1 text-gray-500 hover:text-white rounded-md hover:bg-white/10 transition-colors disabled:opacity-50"
+                    title="Refresh models"
+                  >
+                    <RefreshCw size={12} className={isLoadingModels ? 'animate-spin' : ''} />
+                  </button>
+                </div>
                 {isLoadingModels ? (
                   <div className="px-3 py-2 text-sm text-gray-400">Loading...</div>
                 ) : allModels.length > 0 ? (
@@ -853,7 +1048,13 @@ const ChatInput: React.FC<ChatInputProps> = ({ onSend, onStop, disabled, editing
             )}
 
             <button
-              onClick={() => !disabled && setIsModelMenuOpen(!isModelMenuOpen)}
+              onClick={() => {
+                if (!disabled) {
+                  setIsModelMenuOpen(!isModelMenuOpen);
+                  setIsAttachMenuOpen(false);
+                  setIsSettingsOpen(false);
+                }
+              }}
               disabled={disabled}
               className="flex items-center gap-2.5 px-3.5 py-2 rounded-2xl mac-element mac-element-hover text-gray-200 font-medium text-sm transition-all"
             >

@@ -41,6 +41,38 @@ export const saveProviders = (providers: LLMProvider[]) => {
   window.dispatchEvent(new Event('providers-updated'));
 };
 
+export interface ModelSettings {
+  thinkingLevel: 'off' | 'low' | 'medium' | 'high';
+  thinkingTimeout: number;
+  temperature: number;
+  topP: number;
+  maxOutputLength: number;
+}
+
+export const DEFAULT_MODEL_SETTINGS: ModelSettings = {
+  thinkingLevel: 'medium',
+  thinkingTimeout: 0,
+  temperature: 0.7,
+  topP: 0.95,
+  maxOutputLength: 4096,
+};
+
+export const getModelSettings = (): ModelSettings => {
+  const stored = localStorage.getItem('model_settings');
+  if (stored) {
+    try {
+      return { ...DEFAULT_MODEL_SETTINGS, ...JSON.parse(stored) };
+    } catch (e) {
+      console.error('Failed to parse model settings', e);
+    }
+  }
+  return DEFAULT_MODEL_SETTINGS;
+};
+
+export const saveModelSettings = (settings: ModelSettings) => {
+  localStorage.setItem('model_settings', JSON.stringify(settings));
+};
+
 export interface LLMModel {
   id: string;
   name: string;
@@ -217,12 +249,14 @@ export const generateChatStream = async (
   model: LLMModel,
   messages: any[],
   onUpdate: (update: StreamUpdate) => void,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  settings?: ModelSettings
 ): Promise<{ content: string; thinking: string }> => {
   const providers = getProviders();
   const provider = providers.find(p => p.id === model.provider);
   if (!provider) throw new Error('Provider not found');
 
+  const modelSettings = settings || getModelSettings();
   const streamId = Math.random().toString(36).substring(7);
   let accumulatedContent = '';
   let accumulatedReasoning = '';
@@ -245,12 +279,29 @@ export const generateChatStream = async (
       let cleanupDelta: (() => void) | undefined;
       let cleanupEnd: (() => void) | undefined;
       let cleanupError: (() => void) | undefined;
+      let timeoutTimer: any = null;
 
       const cleanup = () => {
+        if (timeoutTimer) clearTimeout(timeoutTimer);
         if (cleanupDelta) cleanupDelta();
         if (cleanupEnd) cleanupEnd();
         if (cleanupError) cleanupError();
       };
+
+      if (modelSettings.thinkingTimeout > 0) {
+        timeoutTimer = setTimeout(() => {
+          (window as any).electronAPI?.abortChatStream(streamId);
+          cleanup();
+          const parsed = extractThinkingAndContent(accumulatedContent);
+          const combinedThinking = [accumulatedReasoning, parsed.thinking, `[Thinking timeout (${modelSettings.thinkingTimeout}s) reached]`].filter(Boolean).join('\n\n').trim();
+          onUpdate({
+            content: parsed.content,
+            thinking: combinedThinking,
+            isGenerating: false,
+          });
+          resolve({ content: parsed.content, thinking: combinedThinking });
+        }, modelSettings.thinkingTimeout * 1000);
+      }
 
       if (signal) {
         signal.addEventListener('abort', () => {
@@ -294,10 +345,23 @@ export const generateChatStream = async (
         reject(new Error(data.error || 'Streaming error occurred'));
       });
 
-      const payload = {
+      const payload: any = {
         model: model.id,
         messages,
       };
+
+      if (typeof modelSettings.temperature === 'number') {
+        payload.temperature = modelSettings.temperature;
+      }
+      if (typeof modelSettings.topP === 'number') {
+        payload.top_p = modelSettings.topP;
+      }
+      if (modelSettings.maxOutputLength && modelSettings.maxOutputLength > 0) {
+        payload.max_tokens = modelSettings.maxOutputLength;
+      }
+      if (modelSettings.thinkingLevel && modelSettings.thinkingLevel !== 'off') {
+        payload.reasoning_effort = modelSettings.thinkingLevel;
+      }
 
       (window as any).electronAPI.chatStream({
         endpoint: provider.endpoint,
@@ -312,7 +376,7 @@ export const generateChatStream = async (
   }
 
   // Fallback to non-streaming if chatStream IPC is unavailable
-  const responseText = await generateChatResponse(model, messages);
+  const responseText = await generateChatResponse(model, messages, modelSettings);
   const parsed = extractThinkingAndContent(responseText);
   onUpdate({
     content: parsed.content,
@@ -324,16 +388,31 @@ export const generateChatStream = async (
 
 export const generateChatResponse = async (
   model: LLMModel,
-  messages: any[]
+  messages: any[],
+  settings?: ModelSettings
 ): Promise<string> => {
   const providers = getProviders();
   const provider = providers.find(p => p.id === model.provider);
   if (!provider) throw new Error('Provider not found');
 
-  const payload = {
+  const modelSettings = settings || getModelSettings();
+  const payload: any = {
     model: model.id,
     messages,
   };
+
+  if (typeof modelSettings.temperature === 'number') {
+    payload.temperature = modelSettings.temperature;
+  }
+  if (typeof modelSettings.topP === 'number') {
+    payload.top_p = modelSettings.topP;
+  }
+  if (modelSettings.maxOutputLength && modelSettings.maxOutputLength > 0) {
+    payload.max_tokens = modelSettings.maxOutputLength;
+  }
+  if (modelSettings.thinkingLevel && modelSettings.thinkingLevel !== 'off') {
+    payload.reasoning_effort = modelSettings.thinkingLevel;
+  }
 
   const response = await (window as any).electronAPI.chatComplete({
     endpoint: provider.endpoint,
