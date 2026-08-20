@@ -88,10 +88,61 @@ const ChatArea = () => {
     setIsGenerating(false);
   };
 
+  const allAttachments = messages.flatMap(m => m.attachments || []);
+
   const formatMentions = (text: string) => {
     if (!text) return text;
-    // Replace @filename.ext with a span for styling
-    return text.replace(/@([a-zA-Z0-9_.-]+)/g, '<span class="mention">@$1</span>');
+    // Match code blocks, inline code, or mentions to strictly avoid replacing within code
+    const regex = /(```[\s\S]*?```|`[^`]+`)|(?<![a-zA-Z0-9])@([a-zA-Z0-9_.-]+)/g;
+    return text.replace(regex, (match, codeBlock, mention) => {
+      if (codeBlock) return codeBlock;
+      if (mention) {
+        return `<span data-mention="${mention}"></span>`;
+      }
+      return match;
+    });
+  };
+
+  const getFileIcon = (type: string) => {
+    if (type === 'image') {
+      return <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect width="18" height="18" x="3" y="3" rx="2" ry="2"/><circle cx="9" cy="9" r="2"/><path d="m21 15-3.086-3.086a2 2 0 0 0-2.828 0L6 21"/></svg>;
+    } else if (type === 'folder') {
+      return <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13c0 1.1.9 2 2 2Z"/></svg>;
+    } else {
+      return <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/><path d="M14 2v4a2 2 0 0 0 2 2h4"/><path d="M10 9H8"/><path d="M16 13H8"/><path d="M16 17H8"/></svg>;
+    }
+  };
+
+  const chatComponents = {
+    ...MarkdownComponents,
+    span: ({node, className, ...props}: any) => {
+      const mentionFile = props['data-mention'];
+      if (mentionFile) {
+        let att = allAttachments.find(a => a.display === mentionFile);
+        let icon = null;
+        if (att?.thumbnail) {
+          icon = <img src={att.thumbnail} style={{width: 14, height: 14, objectFit: 'contain'}} />;
+        } else {
+          let type = att?.type || 'file';
+          if (!att) {
+            const ext = mentionFile.split('.').pop()?.toLowerCase();
+            if (['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'bmp'].includes(ext || '')) type = 'image';
+            else type = 'file';
+          }
+          icon = getFileIcon(type);
+        }
+
+        return (
+          <span className="mention inline-flex items-center gap-1.5 bg-white/10 border border-white/5 text-blue-400 px-2 h-[24px] rounded-md mx-1 align-middle select-none">
+            <span className="flex items-center text-current" style={{ width: 14, height: 14 }}>
+              {icon}
+            </span>
+            <span className="text-[13px] font-medium leading-none">{mentionFile}</span>
+          </span>
+        );
+      }
+      return <span className={className} {...props} />;
+    }
   };
 
   const handleSendMessage = async (text: string, attachments: any[], model: LLMModel) => {
@@ -138,7 +189,7 @@ const ChatArea = () => {
           for (const att of msg.attachments) {
             if (att.type === 'image' && att.file) {
               const b64 = await fileToBase64(att.file);
-              content.push({ type: 'text', text: `[Image Attachment: ${att.display}]` });
+              content.push({ type: 'text', text: `[Image Attachment: @${att.display}]` });
               content.push({ type: 'image_url', image_url: { url: b64 } });
             } else if (att.file) {
               try {
@@ -168,7 +219,7 @@ const ChatArea = () => {
                           return `[Source: ${c.metadata.source}${metaStr}]\n${c.text}`;
                         }).join('\n\n');
                         
-                        fileText = `[RAG Retrieved Context - Showing most relevant excerpts from ${att.display}]\n\n${contextString}`;
+                        fileText = `[RAG Retrieved Context - Showing most relevant excerpts from @${att.display}]\n\n${contextString}`;
                         console.log(`[RAG] Retrieved ${topChunks.length} chunks for ${att.display}`);
                       }
                     }
@@ -177,7 +228,7 @@ const ChatArea = () => {
                   }
                 }
                 
-                textContent += `\n\n--- Attachment: ${att.display} ---\n${fileText}\n--- End Attachment ---`;
+                textContent += `\n\n--- Attachment: @${att.display} ---\n${fileText}\n--- End Attachment ---`;
               } catch (err) {
                 console.error("Could not read file", err);
               }
@@ -281,11 +332,11 @@ const ChatArea = () => {
                 {msg.role === 'user' ? (
                   <div className="w-full text-gray-100">
                     <div className="focus:outline-none [&_.mention]:inline-flex [&_.mention]:items-center [&_.mention]:gap-1.5 [&_.mention]:bg-white/10 [&_.mention]:border [&_.mention]:border-white/5 [&_.mention]:text-blue-400 [&_.mention]:px-2 [&_.mention]:h-[24px] [&_.mention]:rounded-md [&_.mention]:mx-1 [&_.mention]:align-middle [&_.mention]:select-none">
-                      <ReactMarkdown 
-                        remarkPlugins={[remarkGfm, remarkMath]} 
-                        rehypePlugins={[rehypeRaw, rehypeKatex]} 
-                        components={MarkdownComponents}
-                      >
+                        <ReactMarkdown 
+                          remarkPlugins={[remarkGfm, remarkMath]} 
+                          rehypePlugins={[rehypeRaw, rehypeKatex]} 
+                          components={chatComponents}
+                        >
                         {formatMentions(msg.content)}
                       </ReactMarkdown>
                     </div>
@@ -318,7 +369,7 @@ const ChatArea = () => {
                         <ReactMarkdown 
                           remarkPlugins={[remarkGfm, remarkMath]} 
                           rehypePlugins={[rehypeRaw, rehypeKatex]} 
-                          components={MarkdownComponents}
+                          components={chatComponents}
                         >
                           {formatMentions(msg.content)}
                         </ReactMarkdown>
