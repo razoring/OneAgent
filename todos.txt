@@ -1,0 +1,7 @@
+implement AI Studio style deletion
+hotmodel swapping with tab
+auto load model when swapped with estimated TTFT label
+show thinking duration
+change finished thinking icon
+chat history
+mcp servers
