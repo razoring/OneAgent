@@ -58,8 +58,8 @@ export interface ChatMessage {
 const ChatArea = () => {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [isGenerating, setIsGenerating] = useState(false);
-  const [autoScrollEnabled, setAutoScrollEnabled] = useState(true);
   
+  const autoScrollEnabled = useRef(true);
   const bottomRef = useRef<HTMLDivElement>(null);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
@@ -67,16 +67,18 @@ const ChatArea = () => {
   const handleScroll = () => {
     if (!scrollContainerRef.current) return;
     const { scrollTop, scrollHeight, clientHeight } = scrollContainerRef.current;
-    const isNearBottom = scrollHeight - scrollTop - clientHeight < 150;
-    setAutoScrollEnabled(isNearBottom);
+    // Tighter tolerance (30px) so deviating slightly detaches the lock smoothly
+    const isNearBottom = scrollHeight - scrollTop - clientHeight <= 30;
+    autoScrollEnabled.current = isNearBottom;
   };
 
   // Auto-scroll when messages change or generation updates
   useEffect(() => {
-    if (autoScrollEnabled) {
+    if (autoScrollEnabled.current) {
+      // Use behavior: 'auto' so it doesn't tween constantly on every token, causing jitter
       bottomRef.current?.scrollIntoView({ behavior: 'auto' });
     }
-  }, [messages, autoScrollEnabled]);
+  }, [messages]);
 
   const handleStop = () => {
     if (abortControllerRef.current) {
@@ -106,6 +108,8 @@ const ChatArea = () => {
     setIsGenerating(true);
     abortControllerRef.current = new AbortController();
 
+    // Re-enable autoscroll when user sends a message
+    autoScrollEnabled.current = true;
     setTimeout(() => {
       bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
     }, 50);
