@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect, useCallback } from 'react';
+import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import { ArrowUp, ChevronUp, Plus, FileText, Image as ImageIcon, Folder, X, FileSpreadsheet, MonitorPlay, AlertTriangle, Square, Check } from 'lucide-react';
 import CodeMirror, { ReactCodeMirrorRef } from '@uiw/react-codemirror';
 import { markdown } from '@codemirror/lang-markdown';
@@ -38,7 +38,7 @@ const ModelItem = ({ model, isSelected, onClick }: { model: any, isSelected: boo
 
 interface ChatInputProps {
   onSend: (text: string, attachments: any[], model: LLMModel) => void;
-  onStop: () => void;
+  onStop?: () => void;
   disabled: boolean;
   editingBlock?: { id: string, type: 'user' | 'thinking' | 'response' } | null;
   onSaveEdit?: (id: string, type: 'user' | 'thinking' | 'response', text: string, attachments: any[]) => void;
@@ -205,7 +205,6 @@ const ChatInput: React.FC<ChatInputProps> = ({ onSend, onStop, disabled, editing
         }
       }
     }
-  }, [editingBlock]);
   }, [editingBlock]);
   
   const getAllAttachments = useCallback(() => {
@@ -453,7 +452,7 @@ const ChatInput: React.FC<ChatInputProps> = ({ onSend, onStop, disabled, editing
             canvas.width = scaledViewport.width;
             canvas.height = scaledViewport.height;
             
-            await page.render({ canvasContext: context, viewport: scaledViewport }).promise;
+            await page.render({ canvasContext: context, viewport: scaledViewport } as any).promise;
             thumbnail = canvas.toDataURL('image/jpeg', 0.8);
           }
         } catch (e) {

@@ -522,6 +522,7 @@ const ChatArea = () => {
         const lastIdx = newMsgs.length - 1;
         if (lastIdx >= 0 && newMsgs[lastIdx].role === 'assistant') {
           newMsgs[lastIdx] = {
+            id: newMsgs[lastIdx].id,
             role: 'assistant',
             content: displayError,
             thinking: newMsgs[lastIdx].thinking || '',
@@ -649,7 +650,7 @@ const ChatArea = () => {
                     </div>
                     {((isEditingUser && editPreview ? editPreview.attachments : msg.attachments) || []).length > 0 && (
                       <div className="flex gap-2 mt-3 flex-wrap">
-                        {(isEditingUser && editPreview ? editPreview.attachments : msg.attachments).map((att: any, aIdx: number) => (
+                        {((isEditingUser && editPreview ? editPreview.attachments : msg.attachments) || []).map((att: any, aIdx: number) => (
                           <div key={aIdx} className="relative w-16 h-16 rounded-lg overflow-hidden border border-white/10 group/att">
                             {att.type === 'image' && att.url ? (
                               <img src={att.url} alt="attached" className="w-full h-full object-cover" />
