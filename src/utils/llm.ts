@@ -1,3 +1,5 @@
+import { sanitizeText, cleanHtml, parseMhtml, extractThinkingAndContent } from './docParser';
+
 export interface LLMProvider {
   id: string;
   name: string;
@@ -129,6 +131,163 @@ export const fileToBase64 = (file: File): Promise<string> => {
   });
 };
 
+// Robust document parser that extracts clean text from Office, PDF, HTML, MHTML, and code files
+export const parseAttachmentText = async (file: File): Promise<string> => {
+  const ext = file.name.toLowerCase().split('.').pop() || '';
+  const filePath = (file as any).path;
+
+  // Try backend extraction via Electron IPC first (for PDF, DOCX, PPTX, XLSX, HTML, MHTML, etc.)
+  if ((window as any).electronAPI?.parseDocument) {
+    try {
+      let fileBuffer: ArrayBuffer | undefined;
+      if (!filePath) {
+        fileBuffer = await file.arrayBuffer();
+      }
+      const res = await (window as any).electronAPI.parseDocument({
+        filePath,
+        fileBuffer: fileBuffer ? Array.from(new Uint8Array(fileBuffer)) : undefined,
+        fileName: file.name
+      });
+      if (res.success && typeof res.text === 'string') {
+        return res.text;
+      }
+    } catch (e) {
+      console.error('[parseAttachmentText] IPC extraction failed, falling back:', e);
+    }
+  }
+
+  // Client-side fallback for text / HTML / MHTML
+  try {
+    const raw = await file.text();
+    if (ext === 'html' || ext === 'htm') {
+      return cleanHtml(raw);
+    }
+    if (ext === 'mhtml' || ext === 'mht') {
+      return parseMhtml(raw);
+    }
+    return sanitizeText(raw);
+  } catch (e) {
+    console.error('[parseAttachmentText] Text extraction failed:', e);
+    return `[Unable to extract text from ${file.name}]`;
+  }
+};
+
+export interface StreamUpdate {
+  content: string;
+  thinking: string;
+  isGenerating: boolean;
+}
+
+// Generates a streaming chat completion, feeding thinking and response deltas in real-time
+export const generateChatStream = async (
+  model: LLMModel,
+  messages: any[],
+  onUpdate: (update: StreamUpdate) => void,
+  signal?: AbortSignal
+): Promise<{ content: string; thinking: string }> => {
+  const providers = getProviders();
+  const provider = providers.find(p => p.id === model.provider);
+  if (!provider) throw new Error('Provider not found');
+
+  const streamId = Math.random().toString(36).substring(7);
+  let accumulatedContent = '';
+  let accumulatedReasoning = '';
+
+  const processAndEmit = () => {
+    // If thinking tags are embedded in the content string (e.g. <think>...</think>)
+    const parsed = extractThinkingAndContent(accumulatedContent);
+    const combinedThinking = [accumulatedReasoning, parsed.thinking].filter(Boolean).join('\n\n').trim();
+    const finalContent = parsed.content;
+
+    onUpdate({
+      content: finalContent,
+      thinking: combinedThinking,
+      isGenerating: true,
+    });
+  };
+
+  if ((window as any).electronAPI?.chatStream) {
+    return new Promise((resolve, reject) => {
+      let cleanupDelta: (() => void) | undefined;
+      let cleanupEnd: (() => void) | undefined;
+      let cleanupError: (() => void) | undefined;
+
+      const cleanup = () => {
+        if (cleanupDelta) cleanupDelta();
+        if (cleanupEnd) cleanupEnd();
+        if (cleanupError) cleanupError();
+      };
+
+      if (signal) {
+        signal.addEventListener('abort', () => {
+          (window as any).electronAPI.abortChatStream(streamId);
+          cleanup();
+          const parsed = extractThinkingAndContent(accumulatedContent);
+          resolve({
+            content: parsed.content,
+            thinking: [accumulatedReasoning, parsed.thinking].filter(Boolean).join('\n\n').trim()
+          });
+        });
+      }
+
+      cleanupDelta = (window as any).electronAPI.onStreamDelta((data: any) => {
+        if (data.streamId !== streamId) return;
+        if (data.reasoning) {
+          accumulatedReasoning += data.reasoning;
+        }
+        if (data.content) {
+          accumulatedContent += data.content;
+        }
+        processAndEmit();
+      });
+
+      cleanupEnd = (window as any).electronAPI.onStreamEnd((data: any) => {
+        if (data.streamId !== streamId) return;
+        cleanup();
+        const parsed = extractThinkingAndContent(accumulatedContent);
+        const combinedThinking = [accumulatedReasoning, parsed.thinking].filter(Boolean).join('\n\n').trim();
+        onUpdate({
+          content: parsed.content,
+          thinking: combinedThinking,
+          isGenerating: false,
+        });
+        resolve({ content: parsed.content, thinking: combinedThinking });
+      });
+
+      cleanupError = (window as any).electronAPI.onStreamError((data: any) => {
+        if (data.streamId !== streamId) return;
+        cleanup();
+        reject(new Error(data.error || 'Streaming error occurred'));
+      });
+
+      const payload = {
+        model: model.id,
+        messages,
+      };
+
+      (window as any).electronAPI.chatStream({
+        endpoint: provider.endpoint,
+        apiKey: provider.apiKey,
+        payload,
+        streamId,
+      }).catch((err: any) => {
+        cleanup();
+        reject(err);
+      });
+    });
+  }
+
+  // Fallback to non-streaming if chatStream IPC is unavailable
+  const responseText = await generateChatResponse(model, messages);
+  const parsed = extractThinkingAndContent(responseText);
+  onUpdate({
+    content: parsed.content,
+    thinking: parsed.thinking,
+    isGenerating: false,
+  });
+  return parsed;
+};
+
 export const generateChatResponse = async (
   model: LLMModel,
   messages: any[]
@@ -149,7 +308,13 @@ export const generateChatResponse = async (
   });
 
   if (response.success && response.data) {
-    return response.data.choices[0]?.message?.content || '';
+    const choice = response.data.choices?.[0];
+    const reasoning = choice?.message?.reasoning_content || choice?.message?.reasoning || '';
+    const content = choice?.message?.content || '';
+    if (reasoning) {
+      return `<think>\n${reasoning}\n</think>\n\n${content}`;
+    }
+    return content;
   } else {
     throw new Error(response.error || 'Unknown error during generation');
   }

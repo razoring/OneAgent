@@ -1,6 +1,8 @@
 import React, { useState, useRef, useEffect } from 'react';
 import ChatInput from './ChatInput';
-import { generateChatResponse, LLMModel, fileToBase64 } from '../utils/llm';
+import ThinkingBlock from './ThinkingBlock';
+import { generateChatStream, LLMModel, fileToBase64, parseAttachmentText } from '../utils/llm';
+import DEFAULT_SYSTEM_PROMPT from '../utils/systemPrompt.md?raw';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import rehypeRaw from 'rehype-raw';
@@ -43,8 +45,9 @@ const MarkdownComponents: any = {
 };
 
 export interface ChatMessage {
-  role: 'user' | 'assistant';
+  role: 'user' | 'assistant' | 'system';
   content: string;
+  thinking?: string;
   attachments?: any[];
   isGenerating?: boolean;
 }
@@ -52,11 +55,39 @@ export interface ChatMessage {
 const ChatArea = () => {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [isGenerating, setIsGenerating] = useState(false);
+  const [autoScrollEnabled, setAutoScrollEnabled] = useState(true);
+  
   const bottomRef = useRef<HTMLDivElement>(null);
+  const scrollContainerRef = useRef<HTMLDivElement>(null);
+  const abortControllerRef = useRef<AbortController | null>(null);
 
+  const handleScroll = () => {
+    if (!scrollContainerRef.current) return;
+    const { scrollTop, scrollHeight, clientHeight } = scrollContainerRef.current;
+    const isNearBottom = scrollHeight - scrollTop - clientHeight < 150;
+    setAutoScrollEnabled(isNearBottom);
+  };
+
+  // Auto-scroll when messages change or generation updates
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [messages]);
+    if (autoScrollEnabled) {
+      bottomRef.current?.scrollIntoView({ behavior: 'auto' });
+    }
+  }, [messages, autoScrollEnabled]);
+
+  const handleStop = () => {
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+      abortControllerRef.current = null;
+    }
+    setIsGenerating(false);
+  };
+
+  const formatMentions = (text: string) => {
+    if (!text) return text;
+    // Replace @filename.ext with a span for styling
+    return text.replace(/@([a-zA-Z0-9_.-]+)/g, '<span class="mention">@$1</span>');
+  };
 
   const handleSendMessage = async (text: string, attachments: any[], model: LLMModel) => {
     if (!text.trim() && attachments.length === 0) return;
@@ -70,12 +101,29 @@ const ChatArea = () => {
 
     setMessages(prev => [...prev, userMsg]);
     setIsGenerating(true);
+    abortControllerRef.current = new AbortController();
+
+    setTimeout(() => {
+      bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
+    }, 50);
 
     try {
       // Format payload for OpenAI-compatible API
       const formattedMessages = [];
+      
+      // System prompt for multi-attachment focus weighting
+      formattedMessages.push({
+        role: 'system',
+        content: DEFAULT_SYSTEM_PROMPT
+      });
+
       for (const msg of [...messages, userMsg]) {
         let textContent = msg.content || '';
+
+        // If this is a previous assistant turn with thinking, preserve it in the context!
+        if (msg.role === 'assistant' && msg.thinking) {
+          textContent = `<think>\n${msg.thinking}\n</think>\n\n${textContent}`;
+        }
         
         if (msg.attachments && msg.attachments.length > 0) {
           const content = [];
@@ -83,11 +131,12 @@ const ChatArea = () => {
           for (const att of msg.attachments) {
             if (att.type === 'image' && att.file) {
               const b64 = await fileToBase64(att.file);
-              console.log(`[Debug] Image b64 prefix: ${b64.substring(0, 80)}...`);
+              content.push({ type: 'text', text: `[Image Attachment: ${att.display}]` });
               content.push({ type: 'image_url', image_url: { url: b64 } });
             } else if (att.file) {
               try {
-                const fileText = await att.file.text();
+                // Parse document (Office, PDF, HTML, MHTML, Code, Text) cleanly
+                const fileText = await parseAttachmentText(att.file);
                 textContent += `\n\n--- Attachment: ${att.display} ---\n${fileText}\n--- End Attachment ---`;
               } catch (err) {
                 console.error("Could not read file", err);
@@ -110,18 +159,34 @@ const ChatArea = () => {
         }
       }
 
-      // Add temporary loading message
-      setMessages(prev => [...prev, { role: 'assistant', content: '', isGenerating: true }]);
+      // Add temporary loading message for assistant
+      setMessages(prev => [
+        ...prev,
+        { role: 'assistant', content: '', thinking: '', isGenerating: true }
+      ]);
 
-      const responseText = await generateChatResponse(model, formattedMessages);
-
-      setMessages(prev => {
-        const newMsgs = [...prev];
-        newMsgs[newMsgs.length - 1] = { role: 'assistant', content: responseText };
-        return newMsgs;
-      });
+      // Stream chat completion
+      await generateChatStream(model, formattedMessages, update => {
+        setMessages(prev => {
+          const newMsgs = [...prev];
+          const lastIdx = newMsgs.length - 1;
+          if (lastIdx >= 0 && newMsgs[lastIdx].role === 'assistant') {
+            newMsgs[lastIdx] = {
+              role: 'assistant',
+              content: update.content,
+              thinking: update.thinking,
+              isGenerating: update.isGenerating,
+            };
+          }
+          return newMsgs;
+        });
+      }, abortControllerRef.current.signal);
 
     } catch (e: any) {
+      if (e.name === 'AbortError') {
+        console.log('Stream aborted manually');
+        return;
+      }
       console.error(e);
       const errMsg = (e.message || '').toLowerCase();
       let displayError: string;
@@ -136,7 +201,15 @@ const ChatArea = () => {
 
       setMessages(prev => {
         const newMsgs = [...prev];
-        newMsgs[newMsgs.length - 1] = { role: 'assistant', content: displayError };
+        const lastIdx = newMsgs.length - 1;
+        if (lastIdx >= 0 && newMsgs[lastIdx].role === 'assistant') {
+          newMsgs[lastIdx] = {
+            role: 'assistant',
+            content: displayError,
+            thinking: newMsgs[lastIdx].thinking || '',
+            isGenerating: false,
+          };
+        }
         return newMsgs;
       });
     } finally {
@@ -148,7 +221,7 @@ const ChatArea = () => {
     <div className="flex-1 flex flex-col bg-[#212121] relative">
       
       {/* Main Content */}
-      <div className="flex-1 flex flex-col items-center overflow-y-auto w-full">
+      <div ref={scrollContainerRef} onScroll={handleScroll} className="flex-1 flex flex-col items-center overflow-y-auto w-full">
         {messages.length === 0 ? (
           <div className="flex-1 flex flex-col items-center justify-center w-full px-4">
             <div className="flex flex-col items-center max-w-3xl w-full mt-10">
@@ -167,13 +240,13 @@ const ChatArea = () => {
                 </div>
                 {msg.role === 'user' ? (
                   <div className="w-full text-gray-100">
-                    <div className="focus:outline-none [&>span]:inline-flex [&>span]:items-center [&>span]:gap-1.5 [&>span]:bg-white/10 [&>span]:border [&>span]:border-white/5 [&>span]:text-blue-400 [&>span]:px-2 [&>span]:h-[24px] [&>span]:rounded-md [&>span]:mx-1 [&>span]:align-middle [&>span]:select-none">
+                    <div className="focus:outline-none [&_.mention]:inline-flex [&_.mention]:items-center [&_.mention]:gap-1.5 [&_.mention]:bg-white/10 [&_.mention]:border [&_.mention]:border-white/5 [&_.mention]:text-blue-400 [&_.mention]:px-2 [&_.mention]:h-[24px] [&_.mention]:rounded-md [&_.mention]:mx-1 [&_.mention]:align-middle [&_.mention]:select-none">
                       <ReactMarkdown 
                         remarkPlugins={[remarkGfm]} 
                         rehypePlugins={[rehypeRaw]} 
                         components={MarkdownComponents}
                       >
-                        {msg.content}
+                        {formatMentions(msg.content)}
                       </ReactMarkdown>
                     </div>
                     {msg.attachments && (
@@ -182,6 +255,8 @@ const ChatArea = () => {
                           <div key={att.id} className="relative w-16 h-16 rounded-lg overflow-hidden border border-white/10">
                             {att.type === 'image' && att.url ? (
                               <img src={att.url} alt="attached" className="w-full h-full object-cover" />
+                            ) : att.thumbnail ? (
+                              <img src={att.thumbnail} alt={att.display} className="w-full h-full object-contain p-1 bg-black/20" />
                             ) : (
                               <div className="w-full h-full bg-white/5 flex items-center justify-center text-xs text-gray-400">File</div>
                             )}
@@ -192,21 +267,29 @@ const ChatArea = () => {
                   </div>
                 ) : (
                   <div className="w-full text-gray-300">
-                    {msg.isGenerating ? (
-                      <div className="flex items-center gap-2 text-gray-400 text-sm h-6">
-                        <div className="w-1.5 h-1.5 rounded-full bg-gray-400 animate-pulse"></div>
-                        <div className="w-1.5 h-1.5 rounded-full bg-gray-400 animate-pulse delay-75"></div>
-                        <div className="w-1.5 h-1.5 rounded-full bg-gray-400 animate-pulse delay-150"></div>
-                      </div>
-                    ) : (
-                      <ReactMarkdown 
-                        remarkPlugins={[remarkGfm]} 
-                        rehypePlugins={[rehypeRaw]} 
-                        components={MarkdownComponents}
-                      >
-                        {msg.content}
-                      </ReactMarkdown>
+                    {/* Collapsible Thinking Process Block */}
+                    {(msg.thinking || (msg.isGenerating && !msg.content)) && (
+                      <ThinkingBlock thinking={msg.thinking || ''} isGenerating={msg.isGenerating} />
                     )}
+
+                    {/* Assistant Message Content */}
+                    <div className="[&_.mention]:inline-flex [&_.mention]:items-center [&_.mention]:gap-1.5 [&_.mention]:bg-white/10 [&_.mention]:border [&_.mention]:border-white/5 [&_.mention]:text-blue-400 [&_.mention]:px-2 [&_.mention]:h-[24px] [&_.mention]:rounded-md [&_.mention]:mx-1 [&_.mention]:align-middle [&_.mention]:select-none">
+                      {msg.content ? (
+                        <ReactMarkdown 
+                          remarkPlugins={[remarkGfm]} 
+                          rehypePlugins={[rehypeRaw]} 
+                          components={MarkdownComponents}
+                        >
+                          {formatMentions(msg.content)}
+                        </ReactMarkdown>
+                      ) : msg.isGenerating && !msg.thinking ? (
+                        <div className="flex items-center gap-2 text-gray-400 text-sm h-6">
+                          <div className="w-1.5 h-1.5 rounded-full bg-gray-400 animate-pulse"></div>
+                          <div className="w-1.5 h-1.5 rounded-full bg-gray-400 animate-pulse delay-75"></div>
+                          <div className="w-1.5 h-1.5 rounded-full bg-gray-400 animate-pulse delay-150"></div>
+                        </div>
+                      ) : null}
+                    </div>
                   </div>
                 )}
               </div>
@@ -219,7 +302,7 @@ const ChatArea = () => {
       {/* Input Area */}
       <div className="w-full flex justify-center p-4 bg-gradient-to-t from-[#212121] via-[#212121] to-transparent pt-10">
         <div className="max-w-3xl w-full">
-          <ChatInput onSend={handleSendMessage} disabled={isGenerating} />
+          <ChatInput onSend={handleSendMessage} onStop={handleStop} disabled={isGenerating} />
           <div className="text-center text-xs text-gray-500 mt-3">
             AI models can make mistakes. Verify important information.
           </div>

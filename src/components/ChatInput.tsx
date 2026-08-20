@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
-import { ArrowUp, ChevronUp, Plus, FileText, Image as ImageIcon, Folder, X, FileSpreadsheet, MonitorPlay, AlertTriangle } from 'lucide-react';
+import { ArrowUp, ChevronUp, Plus, FileText, Image as ImageIcon, Folder, X, FileSpreadsheet, MonitorPlay, AlertTriangle, Square } from 'lucide-react';
 import CodeMirror, { ReactCodeMirrorRef } from '@uiw/react-codemirror';
 import { markdown } from '@codemirror/lang-markdown';
 import { EditorView, Decoration, DecorationSet, WidgetType, ViewPlugin, ViewUpdate, keymap } from '@codemirror/view';
@@ -39,6 +39,7 @@ const ModelItem = ({ model, isSelected, onClick }: { model: any, isSelected: boo
 
 interface ChatInputProps {
   onSend: (text: string, attachments: any[], model: LLMModel) => void;
+  onStop?: () => void;
   disabled?: boolean;
 }
 
@@ -57,10 +58,14 @@ class MentionWidget extends WidgetType {
     iconSpan.className = 'flex items-center text-current';
     iconSpan.style.width = '14px';
     iconSpan.style.height = '14px';
-    const type = this.attachment?.type || 'file';
-    iconSpan.innerHTML = type === 'image' ? `<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="18" x="3" y="3" rx="2" ry="2"/><circle cx="9" cy="9" r="2"/><path d="m21 15-3.086-3.086a2 2 0 0 0-2.828 0L6 21"/></svg>` : 
-                         type === 'folder' ? `<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13c0 1.1.9 2 2 2Z"/></svg>` :
-                         `<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/><path d="M14 2v4a2 2 0 0 0 2 2h4"/><path d="M10 9H8"/><path d="M16 13H8"/><path d="M16 17H8"/></svg>`;
+    if (this.attachment?.thumbnail) {
+      iconSpan.innerHTML = `<img src="${this.attachment.thumbnail}" style="width:14px; height:14px; object-fit:contain;" />`;
+    } else {
+      const type = this.attachment?.type || 'file';
+      iconSpan.innerHTML = type === 'image' ? `<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="18" x="3" y="3" rx="2" ry="2"/><circle cx="9" cy="9" r="2"/><path d="m21 15-3.086-3.086a2 2 0 0 0-2.828 0L6 21"/></svg>` : 
+                           type === 'folder' ? `<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13c0 1.1.9 2 2 2Z"/></svg>` :
+                           `<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/><path d="M14 2v4a2 2 0 0 0 2 2h4"/><path d="M10 9H8"/><path d="M16 13H8"/><path d="M16 17H8"/></svg>`;
+    }
     span.appendChild(iconSpan);
     
     const textSpan = document.createElement('span');
@@ -163,7 +168,7 @@ const editorTheme = EditorView.theme({
   }
 }, { dark: true });
 
-const ChatInput: React.FC<ChatInputProps> = ({ onSend, disabled }) => {
+const ChatInput: React.FC<ChatInputProps> = ({ onSend, onStop, disabled }) => {
   const [value, setValue] = useState('');
   const [isModelMenuOpen, setIsModelMenuOpen] = useState(false);
   const [allModels, setAllModels] = useState<LLMModel[]>([]);
@@ -329,14 +334,18 @@ const ChatInput: React.FC<ChatInputProps> = ({ onSend, disabled }) => {
       const textBefore = line.text.slice(0, pos - line.from);
       const match = textBefore.match(/(?:^|\s)@([^\s]*)$/);
       if (match && attachmentsRef.current.length > 0) {
-        setMentionQuery(match[1].toLowerCase());
-        setMentionRange({ from: pos - match[1].length - 1, to: pos });
-        setIsMentionMenuOpen(true);
+        const newQuery = match[1].toLowerCase();
+        const newFrom = pos - match[1].length - 1;
+        const newTo = pos;
+
+        setMentionQuery(prev => prev === newQuery ? prev : newQuery);
+        setMentionRange(prev => (prev && prev.from === newFrom && prev.to === newTo) ? prev : { from: newFrom, to: newTo });
+        setIsMentionMenuOpen(prev => prev ? prev : true);
       } else {
-        setIsMentionMenuOpen(false);
+        setIsMentionMenuOpen(prev => !prev ? prev : false);
       }
     } else {
-      setIsMentionMenuOpen(false);
+      setIsMentionMenuOpen(prev => !prev ? prev : false);
     }
   }, []);
 
@@ -352,36 +361,39 @@ const ChatInput: React.FC<ChatInputProps> = ({ onSend, disabled }) => {
     }
   };
   
-  const handleDrop = (e: React.DragEvent) => {
-    e.preventDefault();
-    setIsDragging(false);
-    const files = Array.from(e.dataTransfer.files);
-    const newAttachments = files.map(file => {
+  const processFiles = async (files: File[]) => {
+    const newAttachments = await Promise.all(files.map(async file => {
       const isImage = file.type.startsWith('image/') || /\.(png|jpe?g|gif|webp|bmp|svg)$/i.test(file.name);
+      let thumbnail = null;
+      if ((file as any).path && (window as any).electronAPI?.getFileThumbnail) {
+        try {
+          thumbnail = await (window as any).electronAPI.getFileThumbnail((file as any).path);
+        } catch (e) {
+          console.error('Failed to get thumbnail for', file.name, e);
+        }
+      }
       return {
         id: Math.random().toString(36).substring(7),
         display: file.name,
         type: isImage ? 'image' : 'file',
         file: file,
-        url: URL.createObjectURL(file)
+        url: URL.createObjectURL(file),
+        thumbnail
       };
-    });
+    }));
     setAttachments(prev => [...prev, ...newAttachments]);
   };
 
-  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleDrop = async (e: React.DragEvent) => {
+    e.preventDefault();
+    setIsDragging(false);
+    const files = Array.from(e.dataTransfer.files);
+    await processFiles(files);
+  };
+
+  const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = Array.from(e.target.files || []);
-    const newAttachments = files.map(file => {
-      const isImage = file.type.startsWith('image/') || /\.(png|jpe?g|gif|webp|bmp|svg)$/i.test(file.name);
-      return {
-        id: Math.random().toString(36).substring(7),
-        display: file.name,
-        type: isImage ? 'image' : 'file',
-        file: file,
-        url: URL.createObjectURL(file)
-      };
-    });
-    setAttachments(prev => [...prev, ...newAttachments]);
+    await processFiles(files);
     setIsAttachMenuOpen(false);
     e.target.value = '';
   };
@@ -546,6 +558,8 @@ const ChatInput: React.FC<ChatInputProps> = ({ onSend, disabled }) => {
                 <div className="relative w-14 h-14 rounded-[20px] mac-element flex items-center justify-center bg-black/20 overflow-hidden">
                   {att.type === 'image' && att.url ? (
                     <img src={att.url} alt={att.display} className="w-full h-full object-cover" />
+                  ) : att.thumbnail ? (
+                    <img src={att.thumbnail} alt={att.display} className="w-10 h-10 object-contain" />
                   ) : (
                     getFileIcon(att.type)
                   )}
@@ -579,7 +593,11 @@ const ChatInput: React.FC<ChatInputProps> = ({ onSend, disabled }) => {
                   i === focusedMentionIndex ? 'bg-white/10 text-white' : 'text-gray-300 hover:bg-white/10 hover:text-white'
                 }`}
               >
-                {getFileIconSmall(att.type)}
+                {att.thumbnail ? (
+                  <img src={att.thumbnail} className="w-3.5 h-3.5 object-contain" />
+                ) : (
+                  getFileIconSmall(att.type)
+                )}
                 <span className="truncate">{att.display}</span>
               </button>
             ))}
@@ -706,15 +724,25 @@ const ChatInput: React.FC<ChatInputProps> = ({ onSend, disabled }) => {
 
         </div>
 
-        {/* Right Action: Send Button */}
-        <button 
-          onClick={handleSend}
-          disabled={disabled || !selectedModel || (!value.trim() && attachments.length === 0)}
-          className="p-2 bg-white text-black rounded-full hover:bg-gray-200 transition-colors disabled:opacity-50 disabled:bg-white/20 disabled:text-white/40" 
-          title="Send message"
-        >
-          <ArrowUp size={20} strokeWidth={3} />
-        </button>
+        {/* Right Action: Send/Stop Button */}
+        {disabled && onStop ? (
+          <button 
+            onClick={onStop}
+            className="p-2 bg-white text-black rounded-full hover:bg-gray-200 transition-colors" 
+            title="Stop generating"
+          >
+            <Square fill="currentColor" size={20} strokeWidth={3} />
+          </button>
+        ) : (
+          <button 
+            onClick={handleSend}
+            disabled={!selectedModel || (!value.trim() && attachments.length === 0)}
+            className="p-2 bg-white text-black rounded-full hover:bg-gray-200 transition-colors disabled:opacity-50 disabled:bg-white/20 disabled:text-white/40" 
+            title="Send message"
+          >
+            <ArrowUp size={20} strokeWidth={3} />
+          </button>
+        )}
         
       </div>
     </div>
