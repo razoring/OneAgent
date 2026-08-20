@@ -83,6 +83,7 @@ const ChatArea = () => {
           for (const att of msg.attachments) {
             if (att.type === 'image' && att.file) {
               const b64 = await fileToBase64(att.file);
+              console.log(`[Debug] Image b64 prefix: ${b64.substring(0, 80)}...`);
               content.push({ type: 'image_url', image_url: { url: b64 } });
             } else if (att.file) {
               try {
@@ -98,7 +99,7 @@ const ChatArea = () => {
             content.unshift({ type: 'text', text: textContent });
           }
           
-          // Only send array content if there are images, otherwise send raw text (better compatibility)
+          //only send array content if there are images, otherwise send raw text
           if (content.length === 1 && content[0].type === 'text') {
             formattedMessages.push({ role: msg.role, content: textContent });
           } else {
@@ -122,9 +123,20 @@ const ChatArea = () => {
 
     } catch (e: any) {
       console.error(e);
+      const errMsg = (e.message || '').toLowerCase();
+      let displayError: string;
+
+      if (errMsg.includes('multimodal') || errMsg.includes('does not support')) {
+        displayError = 'Sorry, this model does not support attachments. Please select a vision-capable model (e.g., LLaVA, Gemma 4, Qwen-VL) to use image attachments.';
+      } else if (errMsg.includes('invalid image input')) {
+        displayError = 'Sorry, this model does not support attachments. The selected model rejected the image input. Try a vision-capable model instead.';
+      } else {
+        displayError = `**Error:** ${e.message}`;
+      }
+
       setMessages(prev => {
         const newMsgs = [...prev];
-        newMsgs[newMsgs.length - 1] = { role: 'assistant', content: `**Error:** ${e.message}` };
+        newMsgs[newMsgs.length - 1] = { role: 'assistant', content: displayError };
         return newMsgs;
       });
     } finally {

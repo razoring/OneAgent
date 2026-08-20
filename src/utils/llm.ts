@@ -71,12 +71,60 @@ export const fetchModels = async (): Promise<LLMModel[]> => {
   return allModels;
 };
 
-// Convert local file to base64 for vision models
+//convert local file to base64 for vision models, with downscaling and conversion to JPEG
 export const fileToBase64 = (file: File): Promise<string> => {
   return new Promise((resolve, reject) => {
+    const ext = file.name.toLowerCase().split('.').pop() || '';
+    // SVG is best left as raw SVG text or data URI
+    if (ext === 'svg' || file.type === 'image/svg+xml') {
+      const reader = new FileReader();
+      reader.readAsDataURL(file);
+      reader.onload = () => resolve(reader.result as string);
+      reader.onerror = error => reject(error);
+      return;
+    }
+
     const reader = new FileReader();
     reader.readAsDataURL(file);
-    reader.onload = () => resolve(reader.result as string);
+    reader.onload = () => {
+      const rawResult = reader.result as string;
+
+      // Use Canvas to normalize any image (AVIF, PNG, WEBP, BMP, JPEG) into standard JPEG
+      const img = new Image();
+      img.onload = () => {
+        let { width, height } = img;
+        const MAX_DIM = 1024;
+        
+        if (width > MAX_DIM || height > MAX_DIM) {
+          const ratio = Math.min(MAX_DIM / width, MAX_DIM / height);
+          width = Math.round(width * ratio);
+          height = Math.round(height * ratio);
+        }
+
+        const canvas = document.createElement('canvas');
+        canvas.width = width;
+        canvas.height = height;
+        const ctx = canvas.getContext('2d');
+        if (!ctx) {
+          // Fallback if canvas fails
+          const base64Data = rawResult.includes(',') ? rawResult.split(',')[1] : rawResult;
+          resolve(`data:image/jpeg;base64,${base64Data}`);
+          return;
+        }
+
+        ctx.drawImage(img, 0, 0, width, height);
+        // Standardize on image/jpeg for all Vision LLMs (Ollama, OpenAI, Gemini)
+        const compressedUri = canvas.toDataURL('image/jpeg', 0.85);
+        console.log(`[fileToBase64] Converted & downscaled ${file.name} to ${width}x${height} JPEG`);
+        resolve(compressedUri);
+      };
+      img.onerror = () => {
+        // Fallback if image fails to render in canvas
+        const base64Data = rawResult.includes(',') ? rawResult.split(',')[1] : rawResult;
+        resolve(`data:image/jpeg;base64,${base64Data}`);
+      };
+      img.src = rawResult;
+    };
     reader.onerror = error => reject(error);
   });
 };

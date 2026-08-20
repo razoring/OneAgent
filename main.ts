@@ -83,6 +83,21 @@ ipcMain.handle('chat-complete', async (event, config) => {
     headers['HTTP-Referer'] = 'http://localhost:5173';
     headers['X-Title'] = 'OneAgent';
 
+    //debug: log payload structure (truncate base64 data)
+    const debugPayload = JSON.parse(JSON.stringify(payload));
+    if (debugPayload.messages) {
+      for (const msg of debugPayload.messages) {
+        if (Array.isArray(msg.content)) {
+          for (const part of msg.content) {
+            if (part.type === 'image_url' && part.image_url?.url) {
+              part.image_url.url = part.image_url.url.substring(0, 60) + '...[truncated]';
+            }
+          }
+        }
+      }
+    }
+    console.log('[chat-complete] Payload structure:', JSON.stringify(debugPayload, null, 2));
+
     const url = endpoint.endsWith('/') ? `${endpoint}chat/completions` : `${endpoint}/chat/completions`;
     const response = await fetch(url, {
       method: 'POST',
@@ -96,7 +111,8 @@ ipcMain.handle('chat-complete', async (event, config) => {
     const data = await response.json();
     return { success: true, data };
   } catch (error: any) {
-    return { success: false, error: error.message };
+    console.error('[chat-complete] Fetch error:', error, error.cause);
+    return { success: false, error: error.cause ? `${error.message} (Cause: ${error.cause.message || error.cause})` : error.message };
   }
 });
 

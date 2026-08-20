@@ -58,3 +58,31 @@ body {
 ::-webkit-scrollbar-thumb:hover {
   background: #505050;
 }
+
+/*codemirror dark theme*/
+.cm-editor {
+  background-color: transparent !important;
+  color: #f3f4f6 !important;
+}
+
+.cm-editor .cm-scroller {
+  font-family: inherit !important;
+  background-color: transparent !important;
+}
+
+.cm-editor .cm-content {
+  color: #f3f4f6 !important;
+  caret-color: #ffffff !important;
+}
+
+.cm-editor.cm-focused {
+  outline: none !important;
+}
+
+.cm-editor .cm-line {
+  color: #f3f4f6 !important;
+}
+
+.cm-editor .cm-placeholder {
+  color: #6b7280 !important;
+}

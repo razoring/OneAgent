@@ -3,7 +3,7 @@ import { ArrowUp, ChevronUp, Plus, FileText, Image as ImageIcon, Folder, X, File
 import CodeMirror, { ReactCodeMirrorRef } from '@uiw/react-codemirror';
 import { markdown } from '@codemirror/lang-markdown';
 import { EditorView, Decoration, DecorationSet, WidgetType, ViewPlugin, ViewUpdate, keymap } from '@codemirror/view';
-import { RangeSetBuilder, StateEffect } from '@codemirror/state';
+import { RangeSetBuilder } from '@codemirror/state';
 
 const PROVIDER_ICONS: Record<string, string> = {
   ollama: 'https://ollama.com/public/icon-64x64.png',
@@ -132,8 +132,8 @@ export function createMentionPlugin(getAttachments: () => any[]) {
 
 const editorTheme = EditorView.theme({
   "&": {
-    color: "#f3f4f6", // gray-100
-    backgroundColor: "transparent",
+    color: "#f3f4f6",
+    backgroundColor: "transparent !important",
     fontSize: "15px",
     lineHeight: "2rem",
     width: "100%",
@@ -141,21 +141,27 @@ const editorTheme = EditorView.theme({
   ".cm-content": {
     fontFamily: "ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif",
     padding: "0",
+    color: "#f3f4f6",
+    caretColor: "#ffffff",
+  },
+  ".cm-line": {
+    color: "#f3f4f6",
   },
   "&.cm-focused": {
-    outline: "none"
+    outline: "none !important",
   },
   ".cm-cursor": {
-    borderLeftColor: "#f3f4f6"
+    borderLeftColor: "#f3f4f6",
   },
   ".cm-placeholder": {
-    color: "#6b7280" // gray-500
+    color: "#6b7280",
   },
   ".cm-scroller": {
     fontFamily: "ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif",
-    overflow: "hidden"
+    overflow: "hidden",
+    backgroundColor: "transparent !important",
   }
-});
+}, { dark: true });
 
 const ChatInput: React.FC<ChatInputProps> = ({ onSend, disabled }) => {
   const [value, setValue] = useState('');
@@ -176,9 +182,10 @@ const ChatInput: React.FC<ChatInputProps> = ({ onSend, disabled }) => {
 
   useEffect(() => {
     attachmentsRef.current = attachments;
+    //force codemirror to re-evaluate decorations without triggering react state
     if (cmRef.current?.view) {
-      cmRef.current.view.dispatch({
-        effects: StateEffect.appendConfig.of([]) // force re-render of decorations
+      requestAnimationFrame(() => {
+        cmRef.current?.view?.dispatch();
       });
     }
   }, [attachments]);
@@ -257,7 +264,7 @@ const ChatInput: React.FC<ChatInputProps> = ({ onSend, disabled }) => {
   }, []);
 
   const handleSend = useCallback(() => {
-    if (disabled || !selectedModel || !value.trim()) return;
+    if (disabled || !selectedModel || (!value.trim() && attachmentsRef.current.length === 0)) return;
     onSend(value, attachmentsRef.current, selectedModel);
     setValue('');
     setAttachments([]);
@@ -585,6 +592,7 @@ const ChatInput: React.FC<ChatInputProps> = ({ onSend, disabled }) => {
         <CodeMirror
           ref={cmRef}
           value={value}
+          theme="dark"
           placeholder="Message..."
           extensions={[
             markdown(),
@@ -684,7 +692,11 @@ const ChatInput: React.FC<ChatInputProps> = ({ onSend, disabled }) => {
                 </>
               ) : (
                 <>
-                  <AlertTriangle size={16} className="text-yellow-500" />
+                  {isLoadingModels ? (
+                    <div className="w-4 h-4 rounded-full bg-white/20 animate-pulse" />
+                  ) : (
+                    <AlertTriangle size={16} className="text-yellow-500" />
+                  )}
                   <span className="truncate max-w-[150px]">{isLoadingModels ? 'Loading...' : 'No Models Found'}</span>
                 </>
               )}
@@ -697,7 +709,7 @@ const ChatInput: React.FC<ChatInputProps> = ({ onSend, disabled }) => {
         {/* Right Action: Send Button */}
         <button 
           onClick={handleSend}
-          disabled={disabled || !selectedModel || !value.trim()}
+          disabled={disabled || !selectedModel || (!value.trim() && attachments.length === 0)}
           className="p-2 bg-white text-black rounded-full hover:bg-gray-200 transition-colors disabled:opacity-50 disabled:bg-white/20 disabled:text-white/40" 
           title="Send message"
         >
