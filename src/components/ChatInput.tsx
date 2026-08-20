@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react';
-import { ArrowUp, ChevronUp, Plus, FileText, Image as ImageIcon, Folder, X, FileSpreadsheet, MonitorPlay, AlertTriangle, Square, Check } from 'lucide-react';
+import { ArrowUp, ChevronUp, ChevronRight, Plus, FileText, Image as ImageIcon, Folder, X, FileSpreadsheet, MonitorPlay, AlertTriangle, Square, Check } from 'lucide-react';
 import CodeMirror, { ReactCodeMirrorRef } from '@uiw/react-codemirror';
 import { markdown } from '@codemirror/lang-markdown';
 import { EditorView, Decoration, DecorationSet, WidgetType, ViewPlugin, ViewUpdate, keymap } from '@codemirror/view';
@@ -46,6 +46,7 @@ interface ChatInputProps {
   onModelChange?: (model: LLMModel | null) => void;
   onEditPreview?: (text: string, attachments: any[]) => void;
   messages?: any[];
+  children?: React.ReactNode;
 }
 
 class MentionWidget extends WidgetType {
@@ -176,7 +177,7 @@ const editorTheme = EditorView.theme({
   }
 }, { dark: true });
 
-const ChatInput: React.FC<ChatInputProps> = ({ onSend, onStop, disabled, editingBlock, onSaveEdit, onCancelEdit, onModelChange, onEditPreview, messages }) => {
+const ChatInput: React.FC<ChatInputProps> = ({ onSend, onStop, disabled, editingBlock, onSaveEdit, onCancelEdit, onModelChange, onEditPreview, messages, children }) => {
   const [value, setValue] = useState('');
   const [isModelMenuOpen, setIsModelMenuOpen] = useState(false);
   const [allModels, setAllModels] = useState<LLMModel[]>([]);
@@ -191,6 +192,28 @@ const ChatInput: React.FC<ChatInputProps> = ({ onSend, onStop, disabled, editing
   const cmRef = useRef<ReactCodeMirrorRef>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [hasUnsentChanges, setHasUnsentChanges] = useState(false);
+  
+  const scrollContainerRef = useRef<HTMLDivElement>(null);
+  const [canScrollRight, setCanScrollRight] = useState(false);
+
+  const checkScroll = useCallback(() => {
+    if (scrollContainerRef.current) {
+      const { scrollLeft, scrollWidth, clientWidth } = scrollContainerRef.current;
+      setCanScrollRight(scrollWidth > clientWidth && scrollLeft < scrollWidth - clientWidth - 1);
+    }
+  }, []);
+
+  useEffect(() => {
+    checkScroll();
+    window.addEventListener('resize', checkScroll);
+    return () => window.removeEventListener('resize', checkScroll);
+  }, [checkScroll, children]);
+
+  const scrollToRight = () => {
+    if (scrollContainerRef.current) {
+      scrollContainerRef.current.scrollTo({ left: scrollContainerRef.current.scrollWidth, behavior: 'smooth' });
+    }
+  };
 
   useEffect(() => {
     if (editingBlock && messages) {
@@ -753,10 +776,10 @@ const ChatInput: React.FC<ChatInputProps> = ({ onSend, onStop, disabled, editing
       </div>
 
       {/* Bottom Toolbar Row */}
-      <div className="flex items-center justify-between mt-1 px-1">
+      <div className="flex items-center justify-between mt-1 px-1 gap-2 w-full">
 
         {/* Left Actions: Attach & Model Selector */}
-        <div className="flex items-center gap-3 relative">
+        <div className="flex items-center gap-3 shrink-0 relative">
 
           {/* Attach Button Drop-up */}
           <div className="relative">
@@ -804,7 +827,7 @@ const ChatInput: React.FC<ChatInputProps> = ({ onSend, onStop, disabled, editing
           )}
 
           {/* Model Selector Drop-up */}
-          <div className="relative ml-auto">
+          <div className="relative">
             {isModelMenuOpen && (
               <div className="absolute bottom-full left-0 mb-3 w-64 mac-element rounded-[24px] p-2 z-50 flex flex-col shadow-2xl">
 
@@ -830,7 +853,8 @@ const ChatInput: React.FC<ChatInputProps> = ({ onSend, onStop, disabled, editing
             )}
 
             <button
-              onClick={() => setIsModelMenuOpen(!isModelMenuOpen)}
+              onClick={() => !disabled && setIsModelMenuOpen(!isModelMenuOpen)}
+              disabled={disabled}
               className="flex items-center gap-2.5 px-3.5 py-2 rounded-2xl mac-element mac-element-hover text-gray-200 font-medium text-sm transition-all"
             >
               {selectedModel ? (
@@ -859,29 +883,65 @@ const ChatInput: React.FC<ChatInputProps> = ({ onSend, onStop, disabled, editing
 
         </div>
 
-        {/* Right Action: Send/Stop Button */}
-        {disabled && onStop && !editingBlock ? (
-          <button
-            onClick={onStop}
-            className="p-2 bg-white text-black rounded-full hover:bg-gray-200 transition-colors"
-            title="Stop generating"
-          >
-            <Square fill="currentColor" size={20} strokeWidth={3} />
-          </button>
-        ) : (
-          <button
-            onClick={handleSend}
-            disabled={!selectedModel || (!value.trim() && attachments.length === 0)}
-            className={`p-2 rounded-full transition-colors bg-white text-black hover:bg-gray-200 disabled:opacity-50 disabled:bg-white/20 disabled:text-white/40 shadow-lg`}
-            title={editingBlock ? "Save edit" : "Send message"}
-          >
-            {editingBlock ? (
-              <Check size={20} strokeWidth={3} />
-            ) : (
-              <ArrowUp size={20} strokeWidth={3} />
+        {/* Scrollable Append Area */}
+        {children && (
+          <div className="flex-1 overflow-hidden relative flex items-center h-[36px]">
+            <div 
+              ref={scrollContainerRef}
+              onScroll={checkScroll}
+              className="flex-1 h-full overflow-x-auto flex items-center gap-2 px-1 scroll-smooth" 
+              style={{ scrollbarWidth: 'none', msOverflowStyle: 'none' }}
+            >
+              <style>{`
+                .no-scrollbar::-webkit-scrollbar {
+                  display: none;
+                }
+              `}</style>
+              <div className="flex items-center gap-2 flex-nowrap w-max no-scrollbar h-full">
+                {children}
+              </div>
+            </div>
+            {canScrollRight && (
+              <>
+                <div className="absolute right-0 top-0 bottom-0 w-8 bg-gradient-to-l from-[#212121] to-transparent pointer-events-none" />
+                <button
+                  onClick={scrollToRight}
+                  className="absolute right-0 top-1/2 -translate-y-1/2 bg-white/10 hover:bg-white/20 text-white p-1 rounded-full shadow-md z-10 transition-colors"
+                >
+                  <ChevronRight size={14} />
+                </button>
+              </>
             )}
-          </button>
+          </div>
         )}
+        
+        {!children && <div className="flex-1" />}
+
+        {/* Right Action: Send/Stop Button */}
+        <div className="shrink-0 flex items-center">
+          {disabled && onStop && !editingBlock ? (
+            <button
+              onClick={onStop}
+              className="p-2 bg-white text-black rounded-full hover:bg-gray-200 transition-colors"
+              title="Stop generating"
+            >
+              <Square fill="currentColor" size={20} strokeWidth={3} />
+            </button>
+          ) : (
+            <button
+              onClick={handleSend}
+              disabled={!selectedModel || (!value.trim() && attachments.length === 0)}
+              className={`p-2 rounded-full transition-colors bg-white text-black hover:bg-gray-200 disabled:opacity-50 disabled:bg-white/20 disabled:text-white/40 shadow-lg`}
+              title={editingBlock ? "Save edit" : "Send message"}
+            >
+              {editingBlock ? (
+                <Check size={20} strokeWidth={3} />
+              ) : (
+                <ArrowUp size={20} strokeWidth={3} />
+              )}
+            </button>
+          )}
+        </div>
 
       </div>
     </div>
