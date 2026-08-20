@@ -197,9 +197,11 @@ const ChatInput: React.FC<ChatInputProps> = ({ onSend, onStop, disabled, editing
       const msg = messages.find((m: any) => m.id === editingBlock.id);
       if (msg) {
         if (editingBlock.type === 'user' || editingBlock.type === 'response') {
+          attachmentsRef.current = msg.attachments || [];
           setValue(msg.content || '');
           setAttachments(msg.attachments || []);
         } else if (editingBlock.type === 'thinking') {
+          attachmentsRef.current = [];
           setValue(msg.thinking || '');
           setAttachments([]);
         }
@@ -783,10 +785,10 @@ const ChatInput: React.FC<ChatInputProps> = ({ onSend, onStop, disabled, editing
           </div>
 
           {editingBlock && (
-            <div className="flex items-center gap-2 mr-auto px-3 py-1.5 bg-blue-500/10 border border-blue-500/20 rounded-lg">
-              <span className="text-xs font-medium text-blue-400 flex items-center gap-1.5">
-                <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/><path d="m15 5 4 4"/></svg>
-                Editing {editingBlock.type === 'user' ? 'Prompt' : editingBlock.type === 'thinking' ? 'Thinking' : 'Response'}
+            <div className="flex items-center gap-2.5 mr-auto px-3.5 py-2 rounded-2xl mac-element text-gray-200 font-medium text-sm transition-all border border-white/5">
+              <span className="flex items-center gap-1.5">
+                <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/><path d="m15 5 4 4"/></svg>
+                Editing
               </span>
               <button 
                 onClick={() => {
@@ -794,9 +796,9 @@ const ChatInput: React.FC<ChatInputProps> = ({ onSend, onStop, disabled, editing
                   setAttachments([]);
                   if (onCancelEdit) onCancelEdit();
                 }} 
-                className="text-gray-400 hover:text-white p-0.5 rounded-md hover:bg-white/10"
+                className="text-gray-400 hover:text-white p-0.5 rounded-md hover:bg-white/10 ml-1"
               >
-                <X size={12} />
+                <X size={14} />
               </button>
             </div>
           )}
@@ -870,11 +872,7 @@ const ChatInput: React.FC<ChatInputProps> = ({ onSend, onStop, disabled, editing
           <button
             onClick={handleSend}
             disabled={!selectedModel || (!value.trim() && attachments.length === 0)}
-            className={`p-2 rounded-full transition-colors ${
-              editingBlock 
-                ? 'bg-blue-600 hover:bg-blue-500 text-white shadow-lg disabled:opacity-50 disabled:bg-blue-600/50' 
-                : 'bg-white text-black hover:bg-gray-200 disabled:opacity-50 disabled:bg-white/20 disabled:text-white/40'
-            }`}
+            className={`p-2 rounded-full transition-colors bg-white text-black hover:bg-gray-200 disabled:opacity-50 disabled:bg-white/20 disabled:text-white/40 shadow-lg`}
             title={editingBlock ? "Save edit" : "Send message"}
           >
             {editingBlock ? (

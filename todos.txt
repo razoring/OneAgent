@@ -1,9 +1,7 @@
-implement AI Studio style deletion
 hotmodel swapping with tab
 auto load model when swapped with estimated TTFT label
+LLM parameters like temp, top-p
 show thinking duration
 change finished thinking icon
 chat history
 mcp servers
-Images get treated as another turn in the context and prompt should reflect that to ensure that additional images can be added and be used in the context.
-ability to add comments
