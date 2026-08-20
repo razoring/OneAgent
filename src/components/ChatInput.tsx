@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
-import { ArrowUp, ChevronUp, Plus, FileText, Image as ImageIcon, Folder, X, FileSpreadsheet, MonitorPlay, AlertTriangle, Square } from 'lucide-react';
+import { ArrowUp, ChevronUp, Plus, FileText, Image as ImageIcon, Folder, X, FileSpreadsheet, MonitorPlay, AlertTriangle, Square, Check } from 'lucide-react';
 import CodeMirror, { ReactCodeMirrorRef } from '@uiw/react-codemirror';
 import { markdown } from '@codemirror/lang-markdown';
 import { EditorView, Decoration, DecorationSet, WidgetType, ViewPlugin, ViewUpdate, keymap } from '@codemirror/view';
@@ -43,6 +43,8 @@ interface ChatInputProps {
   editingBlock?: { id: string, type: 'user' | 'thinking' | 'response' } | null;
   onSaveEdit?: (id: string, type: 'user' | 'thinking' | 'response', text: string, attachments: any[]) => void;
   onCancelEdit?: () => void;
+  onModelChange?: (model: LLMModel | null) => void;
+  onEditPreview?: (text: string, attachments: any[]) => void;
   messages?: any[];
 }
 
@@ -174,7 +176,7 @@ const editorTheme = EditorView.theme({
   }
 }, { dark: true });
 
-const ChatInput: React.FC<ChatInputProps> = ({ onSend, onStop, disabled, editingBlock, onSaveEdit, onCancelEdit, messages }) => {
+const ChatInput: React.FC<ChatInputProps> = ({ onSend, onStop, disabled, editingBlock, onSaveEdit, onCancelEdit, onModelChange, onEditPreview, messages }) => {
   const [value, setValue] = useState('');
   const [isModelMenuOpen, setIsModelMenuOpen] = useState(false);
   const [allModels, setAllModels] = useState<LLMModel[]>([]);
@@ -204,6 +206,29 @@ const ChatInput: React.FC<ChatInputProps> = ({ onSend, onStop, disabled, editing
       }
     }
   }, [editingBlock]);
+  }, [editingBlock]);
+  
+  const getAllAttachments = useCallback(() => {
+    const messageAttachments = messages ? messages.flatMap((m: any) => m.attachments || []) : [];
+    const all = [...messageAttachments, ...attachments];
+    
+    // Deduplicate by display name
+    const unique: any[] = [];
+    const seen = new Set();
+    for (const a of all) {
+      if (!seen.has(a.display)) {
+        seen.add(a.display);
+        unique.push(a);
+      }
+    }
+    return unique;
+  }, [messages, attachments]);
+
+  const allAttachmentsRef = useRef<any[]>([]);
+  useEffect(() => {
+    allAttachmentsRef.current = getAllAttachments();
+  }, [getAllAttachments]);
+  
   const attachmentsRef = useRef(attachments);
 
   useEffect(() => {
@@ -215,6 +240,12 @@ const ChatInput: React.FC<ChatInputProps> = ({ onSend, onStop, disabled, editing
       });
     }
   }, [attachments]);
+
+  useEffect(() => {
+    if (onModelChange) {
+      onModelChange(selectedModel);
+    }
+  }, [selectedModel, onModelChange]);
 
   const loadModels = async () => {
     setIsLoadingModels(true);
@@ -247,7 +278,7 @@ const ChatInput: React.FC<ChatInputProps> = ({ onSend, onStop, disabled, editing
     setFocusedMentionIndex(0);
   }, [mentionQuery, isMentionMenuOpen]);
 
-  const filteredAttachments = attachments.filter(a => a.display.toLowerCase().includes(mentionQuery));
+  const filteredAttachments = getAllAttachments().filter(a => a.display.toLowerCase().includes(mentionQuery));
 
   // Refs for keymap closures
   const isMentionMenuOpenRef = useRef(isMentionMenuOpen);
@@ -342,11 +373,16 @@ const ChatInput: React.FC<ChatInputProps> = ({ onSend, onStop, disabled, editing
     }
   ]);
 
-  const handleUpdate = useCallback((update: ViewUpdate) => {
-    if (update.docChanged) {
-      setValue(update.state.doc.toString());
+  const handleUpdate = useCallback((viewUpdate: ViewUpdate) => {
+    if (viewUpdate.docChanged) {
+      const newVal = viewUpdate.state.doc.toString();
+      setValue(newVal);
+      setHasUnsentChanges(true);
+      if (editingBlock && onEditPreview) {
+        onEditPreview(newVal, attachmentsRef.current);
+      }
     }
-    const state = update.state;
+    const state = viewUpdate.state;
     const selection = state.selection.main;
     if (selection.empty) {
       const pos = selection.head;
@@ -367,7 +403,7 @@ const ChatInput: React.FC<ChatInputProps> = ({ onSend, onStop, disabled, editing
     } else {
       setIsMentionMenuOpen(prev => !prev ? prev : false);
     }
-  }, []);
+  }, [editingBlock, onEditPreview]);
 
   const handleDragOver = (e: React.DragEvent) => {
     e.preventDefault();
@@ -470,7 +506,11 @@ const ChatInput: React.FC<ChatInputProps> = ({ onSend, onStop, disabled, editing
         thumbnail
       };
     }));
-    setAttachments(prev => [...prev, ...newAttachments]);
+    const updated = [...attachments, ...newAttachments];
+    setAttachments(updated);
+    if (editingBlock && onEditPreview) {
+      onEditPreview(value, updated);
+    }
   };
 
   const handleDrop = async (e: React.DragEvent) => {
@@ -633,7 +673,13 @@ const ChatInput: React.FC<ChatInputProps> = ({ onSend, onStop, disabled, editing
 
                   {/* Remove Overlay */}
                   <button
-                    onClick={() => removeAttachment(att.id)}
+                    onClick={() => {
+                      const newAtts = attachments.filter(a => a.id !== att.id);
+                      setAttachments(newAtts);
+                      if (editingBlock && onEditPreview) {
+                        onEditPreview(value, newAtts);
+                      }
+                    }}
                     className="absolute inset-0 bg-black/60 opacity-0 group-hover:opacity-100 flex items-center justify-center transition-opacity text-white"
                   >
                     <X size={20} />
@@ -672,7 +718,7 @@ const ChatInput: React.FC<ChatInputProps> = ({ onSend, onStop, disabled, editing
       )}
 
       {/* CodeMirror Input Area */}
-      <div className="w-full min-h-[44px] max-h-[240px] overflow-y-auto px-2 py-1 relative z-10 flex flex-col justify-center">
+      <div className="w-full min-h-[44px] max-h-[240px] overflow-y-auto px-2 py-1 relative z-10">
         <CodeMirror
           ref={cmRef}
           value={value}
@@ -683,7 +729,7 @@ const ChatInput: React.FC<ChatInputProps> = ({ onSend, onStop, disabled, editing
             editorTheme,
             customKeymap,
             EditorView.lineWrapping,
-            createMentionPlugin(() => attachmentsRef.current)
+            useMemo(() => createMentionPlugin(() => allAttachmentsRef.current), [])
           ]}
           onUpdate={handleUpdate}
           basicSetup={{
@@ -770,7 +816,10 @@ const ChatInput: React.FC<ChatInputProps> = ({ onSend, onStop, disabled, editing
                       key={`all-${model.id}`}
                       model={model}
                       isSelected={selectedModel?.id === model.id}
-                      onClick={() => { setSelectedModel(model); setIsModelMenuOpen(false); }}
+                      onClick={() => { 
+                        setSelectedModel(model); 
+                        setIsModelMenuOpen(false); 
+                      }}
                     />
                   ))
                 ) : (
@@ -810,7 +859,7 @@ const ChatInput: React.FC<ChatInputProps> = ({ onSend, onStop, disabled, editing
         </div>
 
         {/* Right Action: Send/Stop Button */}
-        {disabled && onStop ? (
+        {disabled && onStop && !editingBlock ? (
           <button
             onClick={onStop}
             className="p-2 bg-white text-black rounded-full hover:bg-gray-200 transition-colors"
@@ -822,10 +871,18 @@ const ChatInput: React.FC<ChatInputProps> = ({ onSend, onStop, disabled, editing
           <button
             onClick={handleSend}
             disabled={!selectedModel || (!value.trim() && attachments.length === 0)}
-            className="p-2 bg-white text-black rounded-full hover:bg-gray-200 transition-colors disabled:opacity-50 disabled:bg-white/20 disabled:text-white/40"
-            title="Send message"
+            className={`p-2 rounded-full transition-colors ${
+              editingBlock 
+                ? 'bg-blue-600 hover:bg-blue-500 text-white shadow-lg disabled:opacity-50 disabled:bg-blue-600/50' 
+                : 'bg-white text-black hover:bg-gray-200 disabled:opacity-50 disabled:bg-white/20 disabled:text-white/40'
+            }`}
+            title={editingBlock ? "Save edit" : "Send message"}
           >
-            <ArrowUp size={20} strokeWidth={3} />
+            {editingBlock ? (
+              <Check size={20} strokeWidth={3} />
+            ) : (
+              <ArrowUp size={20} strokeWidth={3} />
+            )}
           </button>
         )}
 

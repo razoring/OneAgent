@@ -11,6 +11,7 @@ import rehypeKatex from 'rehype-katex';
 import 'katex/dist/katex.min.css';
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
 import { vscDarkPlus } from 'react-syntax-highlighter/dist/esm/styles/prism';
+import { MessageSquarePlus, MessageSquare, X, Check } from 'lucide-react';
 
 const MarkdownComponents: any = {
   p: ({node, ...props}: any) => <p className="mb-2 last:mb-0" {...props} />,
@@ -47,6 +48,12 @@ const MarkdownComponents: any = {
   }
 };
 
+export interface ChatComment {
+  id: string;
+  quote: string;
+  text: string;
+}
+
 export interface ChatMessage {
   id: string;
   role: 'user' | 'assistant' | 'system';
@@ -54,6 +61,7 @@ export interface ChatMessage {
   thinking?: string;
   attachments?: any[];
   isGenerating?: boolean;
+  comments?: ChatComment[];
 }
 
 const BlockToolbar = ({ onEdit, onRegenerate, onDelete }: { onEdit?: () => void, onRegenerate?: () => void, onDelete?: () => void }) => {
@@ -84,7 +92,16 @@ const ChatArea = () => {
   
   // Edit mode tracking
   const [editingBlock, setEditingBlock] = useState<{ id: string, type: 'user' | 'thinking' | 'response' } | null>(null);
-
+  const [editPreview, setEditPreview] = useState<{ text: string, attachments: any[] } | null>(null);
+  
+  const [currentModel, setCurrentModel] = useState<LLMModel | null>(null);
+  const [lastUsedModel, setLastUsedModel] = useState<LLMModel | null>(null);
+  
+  // Selection state
+  const [selectionContext, setSelectionContext] = useState<{ text: string, x: number, y: number, msgId: string, msgType: 'user' | 'thinking' | 'response' } | null>(null);
+  const [commentInputContext, setCommentInputContext] = useState<{ text: string, msgId: string, msgType: 'user' | 'thinking' | 'response', commentId?: string } | null>(null);
+  const [commentInputValue, setCommentInputValue] = useState('');
+  
   const autoScrollEnabled = useRef(true);
   const bottomRef = useRef<HTMLDivElement>(null);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
@@ -97,6 +114,115 @@ const ChatArea = () => {
     const isNearBottom = scrollHeight - scrollTop - clientHeight <= 30;
     autoScrollEnabled.current = isNearBottom;
   };
+
+  useEffect(() => {
+    const handleMouseUp = (e: MouseEvent) => {
+      // Wait a tick to allow clicks on the button to process before clearing
+      setTimeout(() => {
+        if (commentInputContext) return;
+        
+        const selection = window.getSelection();
+        if (!selection || selection.isCollapsed) {
+          setSelectionContext(null);
+          return;
+        }
+        
+        const text = selection.toString().trim();
+        if (!text) {
+          setSelectionContext(null);
+          return;
+        }
+
+        const range = selection.getRangeAt(0);
+        let container = range.commonAncestorContainer as HTMLElement;
+        if (container.nodeType === 3) container = container.parentElement!;
+        
+        const messageBlock = container.closest('[data-msg-id]');
+        if (!messageBlock) {
+          setSelectionContext(null);
+          return;
+        }
+
+        const msgId = messageBlock.getAttribute('data-msg-id') as string;
+        const msgType = messageBlock.getAttribute('data-msg-type') as 'user' | 'thinking' | 'response';
+        
+        // Only allow comments on responses
+        if (msgType !== 'response') {
+          setSelectionContext(null);
+          return;
+        }
+        
+        const rect = range.getBoundingClientRect();
+        
+        setSelectionContext({
+          text,
+          x: rect.left + rect.width / 2,
+          y: rect.top - 10,
+          msgId,
+          msgType
+        });
+      }, 10);
+    };
+    
+    const handleMouseDown = (e: MouseEvent) => {
+      // If clicking inside the comment input or the add comment button, don't clear
+      const target = e.target as HTMLElement;
+      
+      // Handle click on comment icon
+      const mark = target.closest('.comment-icon-btn');
+      if (mark) {
+        const commentId = mark.getAttribute('data-comment-id');
+        const encodedQuote = mark.getAttribute('data-encoded-quote');
+        const messageBlock = mark.closest('[data-msg-id]');
+        if (commentId && encodedQuote && messageBlock) {
+          const msgId = messageBlock.getAttribute('data-msg-id') as string;
+          const msgType = messageBlock.getAttribute('data-msg-type') as 'user' | 'thinking' | 'response';
+          const quote = decodeURIComponent(atob(encodedQuote));
+          setCommentInputContext({
+            text: quote,
+            msgId,
+            msgType,
+            commentId
+          });
+          const commentObj = messages.find(m => m.id === msgId)?.comments?.find(c => c.id === commentId);
+          setCommentInputValue(commentObj?.text || '');
+        }
+        return;
+      }
+
+      if (target.closest('.comment-popup-ui')) return;
+      if (window.getSelection()?.isCollapsed) {
+        setSelectionContext(null);
+        if (!target.closest('.comment-icon-btn')) {
+           setCommentInputContext(null);
+        }
+      }
+    };
+    
+    document.addEventListener('mouseup', handleMouseUp);
+    document.addEventListener('mousedown', handleMouseDown);
+    
+    return () => {
+      document.removeEventListener('mouseup', handleMouseUp);
+      document.removeEventListener('mousedown', handleMouseDown);
+    };
+  }, [commentInputContext]);
+
+  // Bind global function for comment editing
+  useEffect(() => {
+    (window as any).openCommentEdit = (msgId: string, msgType: 'user' | 'thinking' | 'response', commentId: string, encodedQuote: string) => {
+      const quote = decodeURIComponent(atob(encodedQuote));
+      setCommentInputContext({
+        text: quote,
+        msgId,
+        msgType,
+        commentId
+      });
+    };
+    return () => {
+      delete (window as any).openCommentEdit;
+    };
+  }, []);
 
   // Auto-scroll when messages change or generation updates
   useEffect(() => {
@@ -116,17 +242,40 @@ const ChatArea = () => {
 
   const allAttachments = messages.flatMap(m => m.attachments || []);
 
-  const formatMentions = (text: string) => {
-    if (!text) return text;
-    if (allAttachments.length === 0) return text;
+  const formatMentions = (text: string, msgComments?: ChatComment[]) => {
+    let processedText = text;
+    if (msgComments && msgComments.length > 0) {
+      msgComments.forEach(comment => {
+        if (!comment.quote) return;
+        // Escape the quote for regex safely
+        const escapedQuote = comment.quote.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        // We use a regex to replace only the first occurrence to avoid messing up duplicate phrases
+        const quoteRegex = new RegExp(`(${escapedQuote})`);
+        
+        // Find the message this comment belongs to by looking at the ID of the comment (actually we don't have msgId here, but we can pass it)
+        // Wait, formatMentions is called per message block, so we know the message block it's in.
+        // We need the msgId and msgType to pass to openCommentEdit.
+        // Actually, I didn't pass msgId or msgType to formatMentions. I should.
+        // Let's just use data attributes and attach an event listener to the container, OR pass msgId and msgType to formatMentions.
+        // Use a span with data attributes and we will render a tooltip using CSS or JS
+        processedText = processedText.replace(quoteRegex, `<mark class="bg-yellow-500/20 text-yellow-200 rounded relative group/comment cursor-pointer comment-icon-btn" data-comment-id="${comment.id}" data-encoded-quote="${btoa(encodeURIComponent(comment.quote))}">$1<span class="absolute -top-2 -right-2 bg-[#1e1e1e] rounded-full border border-yellow-500/30 p-0.5 shadow-md flex items-center justify-center text-yellow-400 opacity-0 group-hover/comment:opacity-100 transition-opacity"><svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path></svg></span><span class="absolute bottom-full left-1/2 transform -translate-x-1/2 mb-2 w-max max-w-xs bg-[#1e1e1e] border border-white/10 shadow-xl rounded-lg p-2 text-xs text-gray-200 opacity-0 group-hover/comment:opacity-100 pointer-events-none transition-opacity z-50 whitespace-pre-wrap text-left hidden group-hover/comment:block"><b>Comment:</b><br/>${comment.text}</span></mark>`);
+      });
+    }
+
+    if (!processedText) return processedText;
+    if (allAttachments.length === 0) return processedText;
     
-    // Match code blocks, inline code, or exact attachment names to strictly avoid replacing within code
-    // Dynamically build regex based on actual attachment names to support spaces
     const attachmentNames = allAttachments.map(a => a.display.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
     const namesRegex = attachmentNames.join('|');
+    
+    // First, strip backticks around exactly a mention (e.g., `@IMG_0029.JPG`)
+    const stripBackticksRegex = new RegExp(`\\\`@(${namesRegex})\\\``, 'g');
+    processedText = processedText.replace(stripBackticksRegex, '@$1');
+
+    // Match code blocks, inline code, or exact attachment names to strictly avoid replacing within code
     const regex = new RegExp(`(\`\`\`[\\s\\S]*?\`\`\`|\`[^\`]+\`)|(?<![a-zA-Z0-9])@(${namesRegex})`, 'g');
     
-    return text.replace(regex, (match, codeBlock, mention) => {
+    return processedText.replace(regex, (match, codeBlock, mention) => {
       if (codeBlock) return codeBlock;
       if (mention) {
         return `<span data-mention="${mention}"></span>`;
@@ -184,8 +333,6 @@ const ChatArea = () => {
     }
   };
 
-  const [lastUsedModel, setLastUsedModel] = useState<LLMModel | null>(null);
-
   const handleSendMessage = async (text: string, attachments: any[], model: LLMModel) => {
     if (!text.trim() && attachments.length === 0) return;
     setLastUsedModel(model);
@@ -204,7 +351,7 @@ const ChatArea = () => {
     await triggerGeneration(newMsgs, model);
   };
 
-  const triggerGeneration = async (currentMessages: ChatMessage[], model: LLMModel, prefillThinking: string = '') => {
+  const triggerGeneration = async (contextMsgs: ChatMessage[], targetModel: LLMModel, keepThinking?: string, feedbackComments?: ChatComment[]) => {
     setIsGenerating(true);
     abortControllerRef.current = new AbortController();
 
@@ -217,11 +364,11 @@ const ChatArea = () => {
     const assistantMsgId = Math.random().toString(36).substring(7);
 
     // Add temporary loading message for assistant
-    setMessages([...currentMessages, { 
+    setMessages([...contextMsgs, { 
       id: assistantMsgId,
       role: 'assistant', 
       content: '', 
-      thinking: prefillThinking, 
+      thinking: keepThinking || '', 
       isGenerating: true 
     }]);
 
@@ -235,12 +382,21 @@ const ChatArea = () => {
         content: DEFAULT_SYSTEM_PROMPT
       });
 
-      for (const msg of currentMessages) {
+      for (const msg of contextMsgs) {
         let textContent = msg.content || '';
 
         // If this is a previous assistant turn with thinking, preserve it in the context!
         if (msg.role === 'assistant' && msg.thinking) {
           textContent = `<think>\n${msg.thinking}\n</think>\n\n${textContent}`;
+        }
+        
+        // Append comments context
+        if (msg.comments && msg.comments.length > 0) {
+          textContent += `\n\n--- User Comments on this message ---\n`;
+          msg.comments.forEach(c => {
+            textContent += `On text: "${c.quote}"\nComment: "${c.text}"\n\n`;
+          });
+          textContent += `--- End User Comments ---`;
         }
         
         if (msg.attachments && msg.attachments.length > 0) {
@@ -310,15 +466,23 @@ const ChatArea = () => {
         }
       }
 
-      if (prefillThinking) {
+      if (feedbackComments && feedbackComments.length > 0) {
+        let feedbackText = "Please regenerate your last response and take into account the following feedback from the user:\n\n";
+        feedbackComments.forEach(c => {
+          feedbackText += `On your previous text: "${c.quote}"\nUser Comment: "${c.text}"\n\n`;
+        });
+        formattedMessages.push({ role: 'user', content: feedbackText });
+      }
+
+      if (keepThinking) {
         formattedMessages.push({
           role: 'assistant',
-          content: `<think>\n${prefillThinking}\n</think>\n\n`
+          content: `<think>\n${keepThinking}\n</think>\n\n`
         });
       }
 
       // Stream chat completion
-      await generateChatStream(model, formattedMessages, update => {
+      await generateChatStream(targetModel, formattedMessages, update => {
         setMessages(prev => {
           const newMsgs = [...prev];
           const targetIdx = newMsgs.findIndex(m => m.id === assistantMsgId);
@@ -326,7 +490,7 @@ const ChatArea = () => {
             newMsgs[targetIdx] = {
               ...newMsgs[targetIdx],
               content: update.content,
-              thinking: prefillThinking ? prefillThinking : update.thinking,
+              thinking: keepThinking ? keepThinking : update.thinking,
               isGenerating: update.isGenerating
             };
           }
@@ -385,6 +549,7 @@ const ChatArea = () => {
       return newMsgs;
     });
     setEditingBlock(null);
+    setEditPreview(null);
   };
 
   const handleDelete = (id: string, type: 'user' | 'thinking' | 'response') => {
@@ -410,7 +575,8 @@ const ChatArea = () => {
   };
 
   const handleRegenerate = async (id: string, type: 'user' | 'thinking' | 'response') => {
-    if (!lastUsedModel) return;
+    const targetModel = currentModel || lastUsedModel;
+    if (!targetModel) return;
     const msgIdx = messages.findIndex(m => m.id === id);
     if (msgIdx === -1) return;
     const msg = messages[msgIdx];
@@ -424,15 +590,15 @@ const ChatArea = () => {
       if (type === 'user') {
         const newMsgs = [...contextMsgs, { ...msg }];
         setMessages(newMsgs);
-        triggerGeneration(newMsgs, lastUsedModel);
+        triggerGeneration(newMsgs, targetModel);
       } else {
         // If type is 'thinking', msgIdx points to the assistant message. We just regenerate it.
-        triggerGeneration(contextMsgs, lastUsedModel);
+        triggerGeneration(contextMsgs, targetModel);
       }
     } else if (type === 'response') {
       const contextMsgs = messages.slice(0, msgIdx);
       setMessages(contextMsgs);
-      triggerGeneration(contextMsgs, lastUsedModel, msg.thinking || '');
+      triggerGeneration(contextMsgs, targetModel, msg.thinking || '', msg.comments);
     }
     setEditingBlock(null);
   };
@@ -464,24 +630,26 @@ const ChatArea = () => {
                   {msg.role === 'user' ? 'You' : 'Assistant'}
                 </div>
                 {msg.role === 'user' && (
-                  <div className={`w-full group relative ${isEditingUser ? 'ring-2 ring-blue-500 rounded-lg p-2' : ''}`}>
-                    <BlockToolbar 
-                      onEdit={() => setEditingBlock({ id: msg.id, type: 'user' })} 
-                      onRegenerate={() => handleRegenerate(msg.id, 'user')} 
-                      onDelete={() => handleDelete(msg.id, 'user')} 
-                    />
+                  <div data-msg-id={msg.id} data-msg-type="user" className={`w-full group relative ${isEditingUser ? 'ring-2 ring-blue-500 rounded-lg p-2' : ''}`}>
+                    {!isGenerating && !msg.isGenerating && (
+                      <BlockToolbar 
+                        onEdit={() => setEditingBlock({ id: msg.id, type: 'user' })} 
+                        onRegenerate={() => handleRegenerate(msg.id, 'user')} 
+                        onDelete={() => handleDelete(msg.id, 'user')} 
+                      />
+                    )}
                     <div className="focus:outline-none [&_.mention]:inline-flex [&_.mention]:items-center [&_.mention]:gap-1.5 [&_.mention]:bg-white/10 [&_.mention]:border [&_.mention]:border-white/5 [&_.mention]:text-blue-400 [&_.mention]:px-2 [&_.mention]:h-[24px] [&_.mention]:rounded-md [&_.mention]:mx-1 [&_.mention]:align-middle [&_.mention]:select-none">
                       <ReactMarkdown 
                         remarkPlugins={[remarkGfm, remarkMath]} 
                         rehypePlugins={[rehypeRaw, rehypeKatex]} 
                         components={chatComponents}
                       >
-                        {formatMentions(msg.content)}
+                        {formatMentions(isEditingUser && editPreview ? editPreview.text : msg.content, msg.comments)}
                       </ReactMarkdown>
                     </div>
-                    {msg.attachments && msg.attachments.length > 0 && (
+                    {((isEditingUser && editPreview ? editPreview.attachments : msg.attachments) || []).length > 0 && (
                       <div className="flex gap-2 mt-3 flex-wrap">
-                        {msg.attachments.map((att: any, aIdx: number) => (
+                        {(isEditingUser && editPreview ? editPreview.attachments : msg.attachments).map((att: any, aIdx: number) => (
                           <div key={aIdx} className="relative w-16 h-16 rounded-lg overflow-hidden border border-white/10 group/att">
                             {att.type === 'image' && att.url ? (
                               <img src={att.url} alt="attached" className="w-full h-full object-cover" />
@@ -499,31 +667,35 @@ const ChatArea = () => {
 
                 {msg.role === 'assistant' && (
                   <div className="w-full text-gray-300 flex flex-col gap-2">
-                    {(msg.thinking || (msg.isGenerating && !msg.content)) && (
-                      <div className={`w-full group relative ${isEditingThinking ? 'ring-2 ring-blue-500 rounded-lg p-2' : ''}`}>
-                        <BlockToolbar 
-                          onEdit={() => setEditingBlock({ id: msg.id, type: 'thinking' })} 
-                          onRegenerate={() => handleRegenerate(msg.id, 'thinking')} 
-                          onDelete={() => handleDelete(msg.id, 'thinking')} 
-                        />
-                        <ThinkingBlock thinking={msg.thinking || ''} isGenerating={msg.isGenerating && !msg.content} />
+                    {(msg.thinking || (msg.isGenerating && !msg.content) || (isEditingThinking && editPreview?.text)) && (
+                      <div data-msg-id={msg.id} data-msg-type="thinking" className={`w-full group relative ${isEditingThinking ? 'ring-2 ring-blue-500 rounded-lg p-2' : ''}`}>
+                        {!isGenerating && !msg.isGenerating && (
+                          <BlockToolbar 
+                            onEdit={() => setEditingBlock({ id: msg.id, type: 'thinking' })} 
+                            onRegenerate={() => handleRegenerate(msg.id, 'thinking')} 
+                            onDelete={() => handleDelete(msg.id, 'thinking')} 
+                          />
+                        )}
+                        <ThinkingBlock thinking={(isEditingThinking && editPreview) ? editPreview.text : (msg.thinking || '')} isGenerating={msg.isGenerating && !msg.content} />
                       </div>
                     )}
                     
-                    {(msg.content || (msg.isGenerating && !msg.thinking)) && (
-                      <div className={`w-full group relative ${isEditingResponse ? 'ring-2 ring-blue-500 rounded-lg p-2' : ''}`}>
-                        <BlockToolbar 
-                          onEdit={() => setEditingBlock({ id: msg.id, type: 'response' })} 
-                          onRegenerate={() => handleRegenerate(msg.id, 'response')} 
-                          onDelete={() => handleDelete(msg.id, 'response')} 
-                        />
+                    {(msg.content || (msg.isGenerating && !msg.thinking) || (isEditingResponse && editPreview?.text)) && (
+                      <div data-msg-id={msg.id} data-msg-type="response" className={`w-full group relative ${isEditingResponse ? 'ring-2 ring-blue-500 rounded-lg p-2' : ''}`}>
+                        {!isGenerating && !msg.isGenerating && (
+                          <BlockToolbar 
+                            onEdit={() => setEditingBlock({ id: msg.id, type: 'response' })} 
+                            onRegenerate={() => handleRegenerate(msg.id, 'response')} 
+                            onDelete={() => handleDelete(msg.id, 'response')} 
+                          />
+                        )}
                         <div className="[&_.mention]:inline-flex [&_.mention]:items-center [&_.mention]:gap-1.5 [&_.mention]:bg-white/10 [&_.mention]:border [&_.mention]:border-white/5 [&_.mention]:text-blue-400 [&_.mention]:px-2 [&_.mention]:h-[24px] [&_.mention]:rounded-md [&_.mention]:mx-1 [&_.mention]:align-middle [&_.mention]:select-none">
                           <ReactMarkdown 
                             remarkPlugins={[remarkGfm, remarkMath]} 
                             rehypePlugins={[rehypeRaw, rehypeKatex]} 
                             components={chatComponents}
                           >
-                            {formatMentions(msg.content) + (msg.isGenerating ? ' ⬤' : '')}
+                            {formatMentions(isEditingResponse && editPreview ? editPreview.text : msg.content, msg.comments) + (msg.isGenerating ? ' ⬤' : '')}
                           </ReactMarkdown>
                         </div>
                       </div>
@@ -537,6 +709,119 @@ const ChatArea = () => {
         )}
       </div>
 
+      {/* Selection Pop-up */}
+      {selectionContext && !commentInputContext && (
+        <div 
+          className="fixed z-50 transform -translate-x-1/2 -translate-y-full pb-2 comment-popup-ui"
+          style={{ left: selectionContext.x, top: selectionContext.y }}
+        >
+          <button
+            onClick={() => {
+              setCommentInputContext({
+                text: selectionContext.text,
+                msgId: selectionContext.msgId,
+                msgType: selectionContext.msgType
+              });
+              setCommentInputValue('');
+              setSelectionContext(null);
+            }}
+            className="flex items-center gap-2 bg-[#1e1e1e] text-blue-400 hover:text-blue-300 border border-white/10 shadow-xl px-3 py-1.5 rounded-full text-sm font-medium transition-transform hover:scale-105"
+          >
+            <MessageSquarePlus size={16} />
+            <span>Add Comment</span>
+          </button>
+        </div>
+      )}
+
+      {/* Comment Input Pop-up */}
+      {commentInputContext && (
+        <div 
+          className="fixed z-50 transform -translate-x-1/2 -translate-y-full pb-2 comment-popup-ui"
+          style={{ 
+            left: selectionContext ? selectionContext.x : window.innerWidth / 2, 
+            top: selectionContext ? selectionContext.y : window.innerHeight / 2 
+          }}
+        >
+          <div className="bg-[#1e1e1e] border border-white/10 shadow-2xl rounded-xl p-3 w-72 flex flex-col gap-2">
+            <div className="text-xs font-semibold text-gray-500 uppercase">
+              {commentInputContext.commentId ? 'Edit Comment' : 'New Comment'}
+            </div>
+            <div className="text-xs italic text-gray-400 border-l-2 border-gray-600 pl-2 line-clamp-2">
+              "{commentInputContext.text}"
+            </div>
+            <textarea
+              autoFocus
+              value={commentInputValue}
+              onChange={(e) => setCommentInputValue(e.target.value)}
+              placeholder="Write your comment..."
+              className="w-full bg-black/40 text-sm text-gray-200 p-2 rounded-lg resize-none outline-none focus:ring-1 focus:ring-blue-500 min-h-[60px]"
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && !e.shiftKey) {
+                  e.preventDefault();
+                  // Save comment
+                  setMessages(prev => {
+                    const newMsgs = [...prev];
+                    const msgIdx = newMsgs.findIndex(m => m.id === commentInputContext.msgId);
+                    if (msgIdx !== -1) {
+                      const msg = newMsgs[msgIdx];
+                      const newComments = [...(msg.comments || [])];
+                      if (commentInputContext.commentId) {
+                        const cIdx = newComments.findIndex(c => c.id === commentInputContext.commentId);
+                        if (cIdx !== -1) newComments[cIdx].text = commentInputValue;
+                      } else {
+                        newComments.push({
+                          id: Math.random().toString(36).substring(7),
+                          quote: commentInputContext.text,
+                          text: commentInputValue
+                        });
+                      }
+                      newMsgs[msgIdx] = { ...msg, comments: newComments };
+                    }
+                    return newMsgs;
+                  });
+                  setCommentInputContext(null);
+                  setCommentInputValue('');
+                  window.getSelection()?.removeAllRanges();
+                }
+                if (e.key === 'Escape') {
+                  setCommentInputContext(null);
+                }
+              }}
+            />
+            <div className="flex justify-between items-center text-xs">
+              <span className="text-gray-500">Press <kbd className="bg-white/10 px-1 rounded">Enter</kbd> to save</span>
+              <div className="flex gap-2">
+                {commentInputContext.commentId && (
+                  <button 
+                    onClick={() => {
+                      setMessages(prev => {
+                        const newMsgs = [...prev];
+                        const msgIdx = newMsgs.findIndex(m => m.id === commentInputContext.msgId);
+                        if (msgIdx !== -1) {
+                          const msg = newMsgs[msgIdx];
+                          newMsgs[msgIdx] = { ...msg, comments: (msg.comments || []).filter(c => c.id !== commentInputContext.commentId) };
+                        }
+                        return newMsgs;
+                      });
+                      setCommentInputContext(null);
+                    }}
+                    className="text-red-400 hover:text-red-300 px-2 py-1 rounded"
+                  >
+                    Delete
+                  </button>
+                )}
+                <button 
+                  onClick={() => setCommentInputContext(null)}
+                  className="text-gray-400 hover:text-gray-300 px-2 py-1 rounded"
+                >
+                  Cancel
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Input Area */}
       <div className="w-full flex justify-center p-4 bg-gradient-to-t from-[#212121] via-[#212121] to-transparent pt-10">
         <div className="max-w-3xl w-full">
@@ -546,7 +831,12 @@ const ChatArea = () => {
             disabled={isGenerating} 
             editingBlock={editingBlock}
             onSaveEdit={handleSaveEdit}
-            onCancelEdit={() => setEditingBlock(null)}
+            onCancelEdit={() => {
+              setEditingBlock(null);
+              setEditPreview(null);
+            }}
+            onModelChange={setCurrentModel}
+            onEditPreview={(text, attachments) => setEditPreview({ text, attachments })}
             messages={messages}
           />
           <div className="text-center text-xs text-gray-500 mt-3">
