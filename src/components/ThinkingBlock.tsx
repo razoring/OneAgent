@@ -48,7 +48,11 @@ export const ThinkingBlock: React.FC<ThinkingBlockProps> = ({ thinking, isGenera
         className="flex items-center justify-between px-3 py-2 cursor-pointer hover:bg-white/[0.05] transition-colors select-none text-xs text-textSecondary group"
       >
         <div className="flex items-center gap-2">
-          {isGenerating && <Loader2 className="w-3.5 h-3.5 text-accentBright animate-spin" />}
+          {isGenerating ? (
+            <Loader2 className="w-3.5 h-3.5 text-accentBright animate-spin" />
+          ) : (
+            <Check className="w-3.5 h-3.5 text-green-400" />
+          )}
           <span className="font-medium text-textSecondary group-hover:text-white transition-colors">
             {isGenerating
               ? `Thinking for ${elapsed}s`

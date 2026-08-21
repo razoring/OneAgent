@@ -3,6 +3,7 @@ import ChatInput from './ChatInput';
 import ThinkingBlock from './ThinkingBlock';
 import ToolCallBlock from './ToolCallBlock';
 import { generateChatStream, LLMModel, fileToBase64, parseAttachmentDocument } from '../utils/llm';
+import { executeToolCall } from '../utils/toolExecutor';
 import DEFAULT_SYSTEM_PROMPT from '../utils/systemPrompt.md?raw';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -13,6 +14,7 @@ import 'katex/dist/katex.min.css';
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
 import { vscDarkPlus } from 'react-syntax-highlighter/dist/esm/styles/prism';
 import { MessageSquarePlus, MessageSquare, X, Check } from 'lucide-react';
+import { getSystemTools } from '../utils/tools';
 
 const MarkdownComponents: any = {
   p: ({node, ...props}: any) => <p className="mb-2 last:mb-0" {...props} />,
@@ -55,6 +57,15 @@ export interface ChatComment {
   text: string;
 }
 
+export interface ToolCall {
+  id: string;
+  name: string;
+  args: any;
+  status: 'executing' | 'completed' | 'error';
+  result?: string;
+  raw?: string;
+}
+
 export interface ChatMessage {
   id: string;
   role: 'user' | 'assistant' | 'system';
@@ -63,9 +74,15 @@ export interface ChatMessage {
   attachments?: any[];
   isGenerating?: boolean;
   comments?: ChatComment[];
-  toolCalls?: string[];
+  toolCalls?: ToolCall[];
   isCallingTool?: boolean;
 }
+
+// Safety cap so a model stuck in tool-call loops can't run forever
+const MAX_TOOL_ROUNDS = 10;
+
+const truncateForContext = (s: string, max = 6000) =>
+  s.length > max ? s.slice(0, max) + `\n...[truncated ${s.length - max} chars]` : s;
 
 const BlockToolbar = ({ onEdit, onRegenerate, onDelete }: { onEdit?: () => void, onRegenerate?: () => void, onDelete?: () => void }) => {
   return (
@@ -524,24 +541,155 @@ const ChatArea = () => {
         });
       }
 
-      // Stream chat completion
-      await generateChatStream(targetModel, formattedMessages, update => {
-        setMessages(prev => {
-          const newMsgs = [...prev];
-          const targetIdx = newMsgs.findIndex(m => m.id === assistantMsgId);
-          if (targetIdx !== -1) {
-            newMsgs[targetIdx] = {
-              ...newMsgs[targetIdx],
-              content: update.content,
-              thinking: keepThinking ? keepThinking : update.thinking,
-              isGenerating: update.isGenerating,
-              toolCalls: update.toolCalls,
-              isCallingTool: update.isCallingTool
-            };
+      // Multi-round tool execution loop
+      let round = 0;
+      let accumulatedThinking = keepThinking || '';
+      let accumulatedContent = '';
+      const allToolCalls: ToolCall[] = [];
+
+      while (round < MAX_TOOL_ROUNDS) {
+        round++;
+
+        const streamResult = await generateChatStream(targetModel, formattedMessages, update => {
+          const currentToolCalls: ToolCall[] = (update.toolCalls || []).map((tc, i) => {
+            try {
+              const parsed = JSON.parse(tc);
+              return {
+                id: `${assistantMsgId}-tc-${round}-${i}`,
+                name: parsed.name || parsed.toolName || 'tool',
+                args: parsed.arguments || parsed.args || {},
+                status: 'executing' as const,
+                raw: tc
+              };
+            } catch {
+              return {
+                id: `${assistantMsgId}-tc-${round}-${i}`,
+                name: 'tool',
+                args: tc,
+                status: 'executing' as const,
+                raw: tc
+              };
+            }
+          });
+
+          const combinedToolCalls = [...allToolCalls, ...currentToolCalls];
+
+          setMessages(prev => {
+            const newMsgs = [...prev];
+            const targetIdx = newMsgs.findIndex(m => m.id === assistantMsgId);
+            if (targetIdx !== -1) {
+              newMsgs[targetIdx] = {
+                ...newMsgs[targetIdx],
+                content: accumulatedContent ? (update.content ? `${accumulatedContent}\n\n${update.content}` : accumulatedContent) : update.content,
+                thinking: accumulatedThinking ? (update.thinking ? `${accumulatedThinking}\n\n${update.thinking}` : accumulatedThinking) : update.thinking,
+                isGenerating: true,
+                toolCalls: combinedToolCalls.length > 0 ? combinedToolCalls : undefined,
+                isCallingTool: update.isCallingTool
+              };
+            }
+            return newMsgs;
+          });
+        }, abortControllerRef.current.signal, undefined, getSystemTools());
+
+        if (streamResult.thinking) {
+          accumulatedThinking = accumulatedThinking ? `${accumulatedThinking}\n\n${streamResult.thinking}` : streamResult.thinking;
+        }
+        if (streamResult.content) {
+          accumulatedContent = accumulatedContent ? `${accumulatedContent}\n\n${streamResult.content}` : streamResult.content;
+        }
+
+        const rawCalls = streamResult.toolCalls || [];
+        if (rawCalls.length === 0) {
+          break;
+        }
+
+        const roundToolCalls: ToolCall[] = [];
+        const toolResponses: string[] = [];
+
+        for (let i = 0; i < rawCalls.length; i++) {
+          const raw = rawCalls[i];
+          let toolName = 'unknown_tool';
+          let args: any = {};
+          try {
+            const parsed = JSON.parse(raw);
+            toolName = parsed.name || parsed.toolName || 'tool';
+            args = parsed.arguments || parsed.args || {};
+          } catch {
+            toolName = 'tool';
+            args = raw;
           }
-          return newMsgs;
+
+          const tcObj: ToolCall = {
+            id: `${assistantMsgId}-tc-${round}-${i}`,
+            name: toolName,
+            args,
+            status: 'executing',
+            raw
+          };
+          roundToolCalls.push(tcObj);
+
+          const currentCombined = [...allToolCalls, ...roundToolCalls];
+          setMessages(prev => {
+            const newMsgs = [...prev];
+            const targetIdx = newMsgs.findIndex(m => m.id === assistantMsgId);
+            if (targetIdx !== -1) {
+              newMsgs[targetIdx] = {
+                ...newMsgs[targetIdx],
+                toolCalls: currentCombined,
+                isGenerating: true
+              };
+            }
+            return newMsgs;
+          });
+
+          const execRes = await executeToolCall(raw);
+          tcObj.status = execRes.result.startsWith('Execution error:') || execRes.result.startsWith('Failed to parse') ? 'error' : 'completed';
+          tcObj.result = execRes.result;
+
+          setMessages(prev => {
+            const newMsgs = [...prev];
+            const targetIdx = newMsgs.findIndex(m => m.id === assistantMsgId);
+            if (targetIdx !== -1) {
+              newMsgs[targetIdx] = {
+                ...newMsgs[targetIdx],
+                toolCalls: [...allToolCalls, ...roundToolCalls],
+                isGenerating: true
+              };
+            }
+            return newMsgs;
+          });
+
+          toolResponses.push(`<tool_response tool="${toolName}">\n${truncateForContext(execRes.result)}\n</tool_response>`);
+        }
+
+        allToolCalls.push(...roundToolCalls);
+
+        formattedMessages.push({
+          role: 'assistant',
+          content: rawCalls.map((c: string) => `<tool_call>\n${c}\n</tool_call>`).join('\n\n')
         });
-      }, abortControllerRef.current.signal);
+
+        formattedMessages.push({
+          role: 'user',
+          content: toolResponses.join('\n\n')
+        });
+      }
+
+      setMessages(prev => {
+        const newMsgs = [...prev];
+        const targetIdx = newMsgs.findIndex(m => m.id === assistantMsgId);
+        if (targetIdx !== -1) {
+          newMsgs[targetIdx] = {
+            ...newMsgs[targetIdx],
+            content: accumulatedContent,
+            thinking: accumulatedThinking,
+            toolCalls: allToolCalls.length > 0 ? allToolCalls : undefined,
+            isGenerating: false,
+            isCallingTool: false
+          };
+        }
+        return newMsgs;
+      });
 
 
 
@@ -653,24 +801,23 @@ const ChatArea = () => {
     setActiveComment(null);
   };
 
-  const handleDelete = (id: string, type: 'user' | 'thinking' | 'response') => {
+  const handleDelete = (id: string, type?: 'user' | 'thinking' | 'response') => {
     setMessages(prev => {
       const newMsgs = [...prev];
       const idx = newMsgs.findIndex(m => m.id === id);
       if (idx === -1) return prev;
       
-      if (type === 'user') {
+      if (!type || type === 'user') {
         newMsgs.splice(idx, 1);
       } else if (type === 'thinking') {
         newMsgs[idx] = { ...newMsgs[idx], thinking: '' };
-        if (!newMsgs[idx].content) newMsgs.splice(idx, 1);
+        if (!newMsgs[idx].content && (!newMsgs[idx].toolCalls || newMsgs[idx].toolCalls.length === 0)) newMsgs.splice(idx, 1);
       } else if (type === 'response') {
-        newMsgs[idx] = { ...newMsgs[idx], content: '' };
-        if (!newMsgs[idx].thinking) newMsgs.splice(idx, 1);
+        newMsgs.splice(idx, 1);
       }
       return newMsgs;
     });
-    if (editingBlock?.id === id && editingBlock?.type === type) {
+    if (editingBlock?.id === id) {
       setEditingBlock(null);
     }
   };
@@ -704,6 +851,21 @@ const ChatArea = () => {
     setEditingBlock(null);
   };
 
+  // The most recent browser tool call across the conversation hosts the live embedded browser
+  let liveBrowserToolId: string | null = null;
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const tcs = messages[i].toolCalls;
+    if (tcs && tcs.length > 0) {
+      for (let j = tcs.length - 1; j >= 0; j--) {
+        if ((tcs[j].name || '').startsWith('browser')) {
+          liveBrowserToolId = tcs[j].id;
+          break;
+        }
+      }
+      if (liveBrowserToolId) break;
+    }
+  }
+
   return (
     <div className="flex-1 flex flex-col bg-surface relative">
       
@@ -726,9 +888,9 @@ const ChatArea = () => {
               const isEditingResponse = editingBlock?.id === msg.id && editingBlock?.type === 'response';
               
               return (
-              <div key={msg.id || idx} className="flex flex-col w-full text-gray-100 gap-2 mb-4">
-                <div className="font-semibold text-sm text-textSecondary">
-                  {msg.role === 'user' ? 'You' : 'Assistant'}
+              <div key={msg.id || idx} className="flex flex-col w-full text-gray-100 gap-2 mb-4 group/msg relative">
+                <div className="flex items-center justify-between font-semibold text-sm text-textSecondary">
+                  <span>{msg.role === 'user' ? 'You' : 'Assistant'}</span>
                 </div>
                 {msg.role === 'user' && (
                   <div data-msg-id={msg.id} data-msg-type="user" className={`w-full group relative ${isEditingUser ? 'ring-2 ring-accent rounded-lg p-2 -m-2' : ''}`}>
@@ -767,8 +929,8 @@ const ChatArea = () => {
                 )}
 
                 {msg.role === 'assistant' && (
-                  <div className="w-full text-textSecondary flex flex-col gap-2">
-                    {(msg.thinking || (msg.isGenerating && !msg.content) || (isEditingThinking && editPreview?.text)) && (
+                  <div className="w-full text-white flex flex-col gap-2">
+                    {(msg.thinking || (msg.isGenerating && !msg.content && !msg.toolCalls?.length) || (isEditingThinking && editPreview?.text)) && (
                       <div data-msg-id={msg.id} data-msg-type="thinking" className={`w-full group relative ${isEditingThinking ? 'ring-2 ring-accent rounded-lg p-2 -m-2' : ''}`}>
                         {!isGenerating && !msg.isGenerating && (
                           <BlockToolbar 
@@ -777,30 +939,28 @@ const ChatArea = () => {
                             onDelete={() => handleDelete(msg.id, 'thinking')} 
                           />
                         )}
-                        <ThinkingBlock content={msg.thinking} isGenerating={!!msg.isGenerating && !msg.content && !msg.isCallingTool} />
+                        <ThinkingBlock thinking={(isEditingThinking && editPreview) ? editPreview.text : (msg.thinking || '')} isGenerating={!!msg.isGenerating && !msg.content && !msg.isCallingTool} />
                       </div>
                     )}
                     
-                    {msg.toolCalls && msg.toolCalls.map((tc, idx) => {
-                      let parsed: any;
-                      let toolName = 'unknown_tool';
-                      let args: any = tc;
-                      try {
-                        parsed = JSON.parse(tc);
-                        if (parsed.toolName || parsed.name) toolName = parsed.toolName || parsed.name;
-                        if (parsed.arguments || parsed.args) args = parsed.arguments || parsed.args;
-                      } catch {}
+                    {msg.toolCalls && msg.toolCalls.map((tc: any, idx) => {
+                      const toolName = tc.name || tc.toolName || 'tool';
+                      const args = tc.args || tc.arguments || tc;
+                      const status = tc.status || (msg.isGenerating && idx === msg.toolCalls!.length - 1 ? 'executing' : 'completed');
+                      const result = tc.result;
                       return (
                         <ToolCallBlock 
-                          key={`tc-${msg.id}-${idx}`} 
+                          key={`${tc.id || 'tc-' + msg.id}-${idx}`} 
                           toolName={toolName} 
                           args={args} 
-                          status={msg.isGenerating && idx === msg.toolCalls!.length - 1 ? 'executing' : 'completed'} 
+                          status={status}
+                          result={result}
+                          isBrowserHost={!!tc.id && tc.id === liveBrowserToolId}
                         />
                       );
                     })}
                     
-                    {(msg.content || (msg.isGenerating && !msg.thinking) || (isEditingResponse && editPreview?.text)) && (
+                    {(msg.content || (msg.isGenerating && !msg.thinking && !msg.toolCalls?.length) || (isEditingResponse && editPreview?.text)) && (
                       <div data-msg-id={msg.id} data-msg-type="response" className={`w-full group relative ${isEditingResponse ? 'ring-2 ring-accent rounded-lg p-2 -m-2' : ''}`}>
                         {!isGenerating && !msg.isGenerating && (
                           <BlockToolbar 
@@ -823,7 +983,8 @@ const ChatArea = () => {
                   </div>
                 )}
               </div>
-            )})}
+            );
+          })}
             <div ref={bottomRef} />
           </div>
         )}

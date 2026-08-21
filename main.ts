@@ -245,7 +245,8 @@ ipcMain.handle('chat-stream', async (event, { endpoint, apiKey, payload, streamI
           if (choice) {
             const content = choice.delta?.content || '';
             const reasoning = choice.delta?.reasoning_content || choice.delta?.reasoning || choice.delta?.thinking || '';
-            event.sender.send('chat-stream-delta', { streamId, content, reasoning });
+            const toolCalls = choice.delta?.tool_calls;
+            event.sender.send('chat-stream-delta', { streamId, content, reasoning, toolCalls });
           }
         } catch {
           // Ignore incomplete chunk parse errors
@@ -571,36 +572,29 @@ ipcMain.handle('run-command', async (event, { command, cwd }) => {
   });
 });
 
-ipcMain.handle('search-web', async (event, { query, limit = 5 }) => {
+// Generic web search proxy: forwards { query, limit } to the user-configured
+// endpoint with a Bearer token and passes the response back to the agent.
+ipcMain.handle('search-web', async (event, { endpoint, apiKey, query, limit = 5 }) => {
+  if (!endpoint || !endpoint.trim()) {
+    return { success: false, error: 'No search endpoint configured' };
+  }
   try {
-    const response = await fetch('https://html.duckduckgo.com/html/?q=' + encodeURIComponent(query), {
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-      }
-    });
-    const html = await response.text();
-    
-    const results = [];
-    const blockRegex = /<div class="result__body">([\s\S]*?)<\/div>\s*<\/div>/g;
-    let blockMatch;
-    let count = 0;
-    
-    while ((blockMatch = blockRegex.exec(html)) !== null && count < limit) {
-       const block = blockMatch[1];
-       const url = block.match(/<a class="result__url" href="([^"]+)">/)?.[1];
-       let title = block.match(/<h2 class="result__title">[\s\S]*?<a[^>]*>([\s\S]*?)<\/a>/)?.[1] || '';
-       let snippet = block.match(/<a class="result__snippet[^>]*>([\s\S]*?)<\/a>/)?.[1] || '';
-       
-       title = title.replace(/<[^>]+>/g, '').trim();
-       snippet = snippet.replace(/<[^>]+>/g, '').trim();
-       
-       if (url && title) {
-           results.push({ url, title, snippet });
-           count++;
-       }
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json'
+    };
+    if (apiKey && apiKey.trim()) {
+      headers['Authorization'] = 'Bearer ' + apiKey.trim();
     }
-    
-    return { success: true, results };
+    const response = await fetch(endpoint.trim(), {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ query, limit })
+    });
+    const text = await response.text();
+    if (!response.ok) {
+      return { success: false, error: `Search endpoint returned ${response.status}: ${text.substring(0, 500)}` };
+    }
+    return { success: true, results: text };
   } catch (err: any) {
     return { success: false, error: err.message };
   }

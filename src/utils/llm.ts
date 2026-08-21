@@ -79,6 +79,43 @@ export const saveModelSettings = (settings: ModelSettings) => {
   localStorage.setItem('model_settings', JSON.stringify(settings));
 };
 
+export interface WebSearchSettings {
+  endpoint: string;
+  apiKey: string;
+}
+
+export const DEFAULT_WEB_SEARCH_SETTINGS: WebSearchSettings = {
+  endpoint: '',
+  apiKey: '',
+};
+
+export const getWebSearchSettings = (): WebSearchSettings => {
+  const stored = localStorage.getItem('web_search_settings');
+  if (stored) {
+    try {
+      const parsed = JSON.parse(stored) as Partial<WebSearchSettings>;
+      return {
+        endpoint: parsed.endpoint || '',
+        apiKey: parsed.apiKey || ''
+      };
+    } catch (e) {
+      console.error('Failed to parse web search settings', e);
+    }
+  }
+  return DEFAULT_WEB_SEARCH_SETTINGS;
+};
+
+export const saveWebSearchSettings = (settings: WebSearchSettings) => {
+  localStorage.setItem('web_search_settings', JSON.stringify(settings));
+  window.dispatchEvent(new Event('websearch-updated'));
+};
+
+// The search_web tool only exists when the user configured a provider.
+export const isWebSearchConfigured = (): boolean => {
+  const { endpoint } = getWebSearchSettings();
+  return endpoint.trim().length > 0;
+};
+
 // Warm a model into provider memory with a minimal completion to improve TTFT.
 export const primeModel = async (model: LLMModel): Promise<void> => {
   const provider = getProviders().find(p => p.id === model.provider);
@@ -307,14 +344,22 @@ export interface StreamUpdate {
   isCallingTool?: boolean;
 }
 
+export interface ChatStreamResult {
+  content: string;
+  thinking: string;
+  toolCalls?: string[];
+  isCallingTool?: boolean;
+}
+
 // Generates a streaming chat completion, feeding thinking and response deltas in real-time
 export const generateChatStream = async (
   model: LLMModel,
   messages: any[],
   onUpdate: (update: StreamUpdate) => void,
   signal?: AbortSignal,
-  settings?: ModelSettings
-): Promise<{ content: string; thinking: string }> => {
+  settings?: ModelSettings,
+  tools?: any[]
+): Promise<ChatStreamResult> => {
   const providers = getProviders();
   const provider = providers.find(p => p.id === model.provider);
   if (!provider) throw new Error('Provider not found');
@@ -324,18 +369,34 @@ export const generateChatStream = async (
   let accumulatedContent = '';
   let accumulatedReasoning = '';
 
+  let accumulatedToolCalls: any[] = [];
+
   const processAndEmit = () => {
-    // If thinking tags are embedded in the content string (e.g. <think>...</think>)
+    // Extract thinking tags if present in standard content
     const parsed = extractThinkingAndContent(accumulatedContent);
     const combinedThinking = [accumulatedReasoning, parsed.thinking].filter(Boolean).join('\n\n').trim();
     const finalContent = parsed.content;
+
+    // Convert accumulated native tool calls to strings for backward compatibility with ChatArea
+    const nativeToolCalls = accumulatedToolCalls.filter(Boolean).map(tc => {
+      let parsedArgs = tc.function.arguments;
+      try {
+        parsedArgs = JSON.parse(tc.function.arguments);
+      } catch {
+        // Leave as string if it's incomplete
+      }
+      return JSON.stringify({
+        name: tc.function.name,
+        arguments: parsedArgs
+      });
+    });
 
     onUpdate({
       content: finalContent,
       thinking: combinedThinking,
       isGenerating: true,
-      toolCalls: parsed.toolCalls,
-      isCallingTool: parsed.isCallingTool
+      toolCalls: nativeToolCalls.length > 0 ? nativeToolCalls : parsed.toolCalls,
+      isCallingTool: nativeToolCalls.length > 0 || parsed.isCallingTool
     });
   };
 
@@ -390,6 +451,17 @@ export const generateChatStream = async (
         if (data.content) {
           accumulatedContent += data.content;
         }
+        if (data.toolCalls) {
+          data.toolCalls.forEach((tc: any) => {
+            const idx = tc.index;
+            if (!accumulatedToolCalls[idx]) {
+              accumulatedToolCalls[idx] = { id: tc.id, type: 'function', function: { name: tc.function?.name || '', arguments: tc.function?.arguments || '' } };
+            } else {
+              if (tc.function?.arguments) accumulatedToolCalls[idx].function.arguments += tc.function.arguments;
+              if (tc.function?.name) accumulatedToolCalls[idx].function.name += tc.function.name;
+            }
+          });
+        }
         processAndEmit();
       });
 
@@ -398,14 +470,31 @@ export const generateChatStream = async (
         cleanup();
         const parsed = extractThinkingAndContent(accumulatedContent);
         const combinedThinking = [accumulatedReasoning, parsed.thinking].filter(Boolean).join('\n\n').trim();
+        
+        const nativeToolCalls = accumulatedToolCalls.filter(Boolean).map(tc => {
+          let parsedArgs = tc.function.arguments;
+          try {
+            parsedArgs = JSON.parse(tc.function.arguments);
+          } catch {
+            // Leave as string
+          }
+          return JSON.stringify({
+            name: tc.function.name,
+            arguments: parsedArgs
+          });
+        });
+
+        const finalToolCalls = nativeToolCalls.length > 0 ? nativeToolCalls : parsed.toolCalls;
+        const isCallingTool = nativeToolCalls.length > 0 || parsed.isCallingTool;
+
         onUpdate({
           content: parsed.content,
           thinking: combinedThinking,
           isGenerating: false,
-          toolCalls: parsed.toolCalls,
-          isCallingTool: parsed.isCallingTool
+          toolCalls: finalToolCalls,
+          isCallingTool: isCallingTool
         });
-        resolve({ content: parsed.content, thinking: combinedThinking, toolCalls: parsed.toolCalls, isCallingTool: parsed.isCallingTool });
+        resolve({ content: parsed.content, thinking: combinedThinking, toolCalls: finalToolCalls, isCallingTool: isCallingTool });
       });
 
       cleanupError = (window as any).electronAPI.onStreamError((data: any) => {
@@ -418,6 +507,10 @@ export const generateChatStream = async (
         model: model.id,
         messages,
       };
+
+      if (tools && tools.length > 0) {
+        payload.tools = tools;
+      }
 
       if (typeof modelSettings.temperature === 'number') {
         payload.temperature = modelSettings.temperature;

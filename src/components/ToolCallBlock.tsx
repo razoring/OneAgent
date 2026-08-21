@@ -1,103 +1,148 @@
-import React, { useState } from 'react';
-import { ChevronRight, ChevronDown, Check, X, Terminal, FileCode, Search, Globe, MousePointer2 } from 'lucide-react';
-import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
-import { vscDarkPlus } from 'react-syntax-highlighter/dist/esm/styles/prism';
+import React, { useState, useEffect, useRef } from 'react';
+import { ChevronRight, ChevronDown, Check, X, Terminal, FileCode, Search, Globe, MousePointer2, Loader2 } from 'lucide-react';
+import AgentBrowser from './AgentBrowser';
 
 interface ToolCallBlockProps {
   toolName: string;
-  args: string | any;
-  status: 'pending' | 'approved' | 'rejected' | 'executing' | 'completed' | 'error';
+  args: any;
+  status: 'executing' | 'completed' | 'error';
   result?: string;
-  onApprove?: () => void;
-  onReject?: () => void;
+  isBrowserHost?: boolean;
 }
 
-const getToolIcon = (name: string) => {
-  if (name.includes('file') || name.includes('dir')) return <FileCode size={16} className="text-blue-400" />;
-  if (name.includes('command')) return <Terminal size={16} className="text-green-400" />;
-  if (name.includes('search') || name.includes('grep')) return <Search size={16} className="text-orange-400" />;
-  if (name.includes('browser') || name.includes('web')) return <Globe size={16} className="text-indigo-400" />;
-  if (name.includes('desktop')) return <MousePointer2 size={16} className="text-purple-400" />;
-  return <Terminal size={16} className="text-gray-400" />;
+const TOOL_LABELS: Record<string, string> = {
+  run_command: 'Terminal',
+  view_file: 'Read File',
+  list_dir: 'List Directory',
+  write_to_file: 'Write File',
+  replace_file_content: 'Edit File',
+  delete_file: 'Delete File',
+  search_web: 'Web Search',
+  browser_navigate: 'Browser',
+  browser_go_back: 'Browser',
+  browser_get_dom: 'Browser',
+  browser_visual_capture: 'Browser',
+  browser_interact: 'Browser',
+  desktop_screenshot: 'Screenshot',
+  desktop_click: 'Desktop Control',
+  desktop_type: 'Desktop Control',
 };
 
-const getToolTitle = (name: string, args: any) => {
+const getToolIcon = (name: string) => {
+  if (name.includes('file') || name.includes('dir')) return <FileCode size={15} className="text-blue-400 shrink-0" />;
+  if (name.includes('command')) return <Terminal size={15} className="text-green-400 shrink-0" />;
+  if (name.includes('search')) return <Search size={15} className="text-orange-400 shrink-0" />;
+  if (name.includes('browser') || name.includes('web')) return <Globe size={15} className="text-indigo-400 shrink-0" />;
+  if (name.includes('desktop')) return <MousePointer2 size={15} className="text-purple-400 shrink-0" />;
+  return <Terminal size={15} className="text-gray-400 shrink-0" />;
+};
+
+const basename = (p?: string) => (p ? p.split(/[/\\]/).pop() : undefined);
+
+const getToolSummary = (name: string, args: any): string => {
   try {
-    const parsed = typeof args === 'string' ? JSON.parse(args) : args;
-    if (name === 'view_file') return `Viewed ${parsed.AbsolutePath?.split(/[/\\]/).pop()}`;
-    if (name === 'write_to_file') return `Created ${parsed.TargetFile?.split(/[/\\]/).pop()}`;
-    if (name === 'replace_file_content') return `Edited ${parsed.TargetFile?.split(/[/\\]/).pop()}`;
-    if (name === 'run_command') return `Ran \`${parsed.CommandLine}\``;
-    if (name === 'grep_search') return `Searched for "${parsed.Query}"`;
-    return `Called ${name}`;
+    switch (name) {
+      case 'run_command': return args?.command || '';
+      case 'view_file': return basename(args?.AbsolutePath) || '';
+      case 'list_dir': return args?.DirectoryPath || '';
+      case 'write_to_file': return basename(args?.targetFile) || '';
+      case 'replace_file_content': return basename(args?.targetFile) || '';
+      case 'delete_file': return basename(args?.filePath) || '';
+      case 'search_web': return args?.query || '';
+      case 'browser_navigate': return args?.url || '';
+      default: return '';
+    }
   } catch {
-    return `Called ${name}`;
+    return '';
   }
 };
 
-const ToolCallBlock: React.FC<ToolCallBlockProps> = ({ toolName, args, status, result, onApprove, onReject }) => {
-  const [expanded, setExpanded] = useState(false);
-  const title = getToolTitle(toolName, args);
-  const isDestructive = toolName === 'write_to_file' || toolName === 'replace_file_content' || toolName === 'run_command' || toolName === 'delete_file';
-  
-  const formattedArgs = typeof args === 'string' ? args : JSON.stringify(args, null, 2);
+// Turns the raw JSON tool output into human-readable terminal-style output
+const formatOutput = (result?: string): string => {
+  if (!result) return '';
+  try {
+    const parsed = JSON.parse(result);
+    if (parsed && typeof parsed === 'object') {
+      const parts: string[] = [];
+      if (typeof parsed.stdout === 'string' && parsed.stdout.trim()) parts.push(parsed.stdout.trimEnd());
+      if (typeof parsed.stderr === 'string' && parsed.stderr.trim()) parts.push(parsed.stderr.trimEnd());
+      if (parsed.error) parts.push(`Error: ${parsed.error}`);
+      if (parts.length > 0) return parts.join('\n');
+      if (Array.isArray(parsed.items)) {
+        return parsed.items.map((i: any) => `${i.isDir ? '[dir]  ' : ''}${i.name}${i.sizeBytes ? `  (${i.sizeBytes} B)` : ''}`).join('\n');
+      }
+      if (typeof parsed.content === 'string') return parsed.content;
+      if (parsed.success === false) return `Error: ${parsed.error || 'Unknown error'}`;
+      if (parsed.success === true) return 'Completed successfully';
+      return JSON.stringify(parsed, null, 2);
+    }
+  } catch {
+    // plain-text result (e.g. browser tools)
+  }
+  return result;
+};
+
+const ToolCallBlock: React.FC<ToolCallBlockProps> = ({ toolName, args, status, result, isBrowserHost }) => {
+  const [expanded, setExpanded] = useState(status === 'executing');
+  const userToggled = useRef(false);
+  const isBrowserTool = toolName.startsWith('browser');
+
+  // Auto-open while running and when the output arrives, unless the user took control
+  useEffect(() => {
+    if (!userToggled.current && (status === 'executing' || status === 'completed' || status === 'error')) {
+      setExpanded(true);
+    }
+  }, [status]);
+
+  const label = TOOL_LABELS[toolName] || toolName;
+  const summary = getToolSummary(toolName, args);
+  const output = formatOutput(result);
 
   return (
-    <div className="my-3 border border-white/10 bg-[#1e1e1e] rounded-lg overflow-hidden">
-      <div 
-        className="flex items-center justify-between px-3 py-2 cursor-pointer hover:bg-white/5 transition-colors"
-        onClick={() => setExpanded(!expanded)}
+    <div className="w-full rounded-xl border border-white/10 bg-white/[0.03] backdrop-blur-md overflow-hidden transition-all duration-200">
+      {/* Header — always visible summary */}
+      <div
+        onClick={() => { userToggled.current = true; setExpanded(!expanded); }}
+        className="flex items-center justify-between px-3 py-2 cursor-pointer hover:bg-white/[0.05] transition-colors select-none text-xs text-textSecondary group"
       >
-        <div className="flex items-center gap-2">
-          {expanded ? <ChevronDown size={16} className="text-textSecondary" /> : <ChevronRight size={16} className="text-textSecondary" />}
+        <div className="flex items-center gap-2 min-w-0">
           {getToolIcon(toolName)}
-          <span className="text-sm font-medium text-gray-200">{title}</span>
-          
-          {status === 'pending' && <span className="ml-2 px-1.5 py-0.5 rounded text-[10px] font-bold bg-yellow-500/20 text-yellow-500 border border-yellow-500/30">Needs Approval</span>}
-          {status === 'executing' && <span className="ml-2 px-1.5 py-0.5 rounded text-[10px] font-bold bg-blue-500/20 text-blue-400 border border-blue-500/30">Executing...</span>}
-          {status === 'completed' && <span className="ml-2 px-1.5 py-0.5 rounded text-[10px] font-bold bg-green-500/20 text-green-400 border border-green-500/30">Done</span>}
-          {status === 'error' && <span className="ml-2 px-1.5 py-0.5 rounded text-[10px] font-bold bg-red-500/20 text-red-400 border border-red-500/30">Failed</span>}
+          <span className="font-medium text-textSecondary group-hover:text-white transition-colors shrink-0">{label}</span>
+          {summary && <span className="font-mono truncate text-textSecondary/80">{summary}</span>}
+        </div>
+
+        <div className="flex items-center gap-2 shrink-0 ml-2">
+          {status === 'executing' && <Loader2 size={13} className="animate-spin text-accentBright" />}
+          {status === 'completed' && <Check size={14} className="text-green-400" />}
+          {status === 'error' && <X size={14} className="text-red-400" />}
+          {expanded ? (
+            <ChevronDown size={14} className="text-textSecondary group-hover:text-gray-200 transition-transform" />
+          ) : (
+            <ChevronRight size={14} className="text-textSecondary group-hover:text-gray-200 transition-transform" />
+          )}
         </div>
       </div>
-      
+
+      {/* Collapsible body — live browser view (host block only) + exact input + output */}
       {expanded && (
-        <div className="p-3 border-t border-white/5 bg-black/30">
-          <div className="text-xs text-textSecondary mb-1 font-medium uppercase tracking-wider">Arguments</div>
-          <SyntaxHighlighter
-            language="json"
-            style={vscDarkPlus}
-            customStyle={{ margin: 0, padding: '0.75rem', borderRadius: '0.5rem', background: '#121212', fontSize: '0.8125rem' }}
-          >
-            {formattedArgs}
-          </SyntaxHighlighter>
-          
-          {result && (
-            <div className="mt-3">
-              <div className="text-xs text-textSecondary mb-1 font-medium uppercase tracking-wider">Result</div>
-              <SyntaxHighlighter
-                language="json"
-                style={vscDarkPlus}
-                customStyle={{ margin: 0, padding: '0.75rem', borderRadius: '0.5rem', background: '#121212', fontSize: '0.8125rem' }}
-              >
-                {result}
-              </SyntaxHighlighter>
-            </div>
+        <div className="border-t border-white/5 bg-black/20">
+          {isBrowserTool && isBrowserHost && (
+            <AgentBrowser />
           )}
-          
-          {status === 'pending' && isDestructive && (
-            <div className="mt-4 flex gap-2">
-              <button 
-                onClick={(e) => { e.stopPropagation(); onApprove?.(); }}
-                className="flex items-center gap-1.5 bg-green-600/20 text-green-400 hover:bg-green-600/30 border border-green-500/30 px-3 py-1.5 rounded-md text-sm font-medium transition-colors"
-              >
-                <Check size={16} /> Approve
-              </button>
-              <button 
-                onClick={(e) => { e.stopPropagation(); onReject?.(); }}
-                className="flex items-center gap-1.5 bg-red-600/20 text-red-400 hover:bg-red-600/30 border border-red-500/30 px-3 py-1.5 rounded-md text-sm font-medium transition-colors"
-              >
-                <X size={16} /> Reject
-              </button>
+
+          <div className="px-3.5 py-2.5">
+            <div className="text-[10px] font-semibold uppercase tracking-wider text-textSecondary mb-1.5">Input</div>
+            <pre className="text-xs font-mono leading-relaxed text-gray-200 whitespace-pre-wrap break-all max-h-[200px] overflow-y-auto select-text">
+              {toolName === 'run_command' && args?.command ? `$ ${args.command}` : JSON.stringify(args ?? {}, null, 2)}
+            </pre>
+          </div>
+
+          {status !== 'executing' && (
+            <div className="px-3.5 pb-2.5">
+              <div className="text-[10px] font-semibold uppercase tracking-wider text-textSecondary mb-1.5">Output</div>
+              <pre className={`text-xs font-mono leading-relaxed whitespace-pre-wrap break-words max-h-[300px] overflow-y-auto select-text ${status === 'error' ? 'text-red-300' : 'text-textSecondary'}`}>
+                {output || (status === 'completed' ? 'Completed successfully' : '')}
+              </pre>
             </div>
           )}
         </div>

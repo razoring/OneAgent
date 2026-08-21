@@ -1,0 +1,21 @@
+// Shared navigation state for the agent-driven embedded browser.
+// The webview itself may unmount/remount (e.g. when its tool call block
+// collapses), but the current URL survives here so it restores in place.
+
+type Listener = () => void;
+
+let currentUrl = 'https://html.duckduckgo.com/';
+const listeners = new Set<Listener>();
+
+export const agentBrowserStore = {
+  getUrl: () => currentUrl,
+  navigate: (url: string) => {
+    if (!url || currentUrl === url) return;
+    currentUrl = url;
+    listeners.forEach(l => l());
+  },
+  subscribe: (l: Listener) => {
+    listeners.add(l);
+    return () => { listeners.delete(l); };
+  }
+};

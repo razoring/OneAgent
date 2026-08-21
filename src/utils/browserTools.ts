@@ -1,8 +1,20 @@
 export const getActiveWebview = () => (window as any).activeWebview;
 
+// The live webview mounts inside the latest browser tool call block, which can
+// land a beat after the agent's first browser_* call arrives — poll briefly.
+export const waitForActiveWebview = async (timeoutMs = 5000): Promise<any> => {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    const wv = await waitForActiveWebview();
+    if (wv) return wv;
+    await new Promise(r => setTimeout(r, 100));
+  }
+  throw new Error("No active webview available");
+};
+
 // Injects the Set-of-Mark overlay into the webview and returns the annotated DOM mapping.
 export const injectSetOfMark = async (): Promise<any> => {
-  const wv = getActiveWebview();
+  const wv = await waitForActiveWebview();
   if (!wv) throw new Error("No active webview available");
 
   const code = `
@@ -86,7 +98,7 @@ export const injectSetOfMark = async (): Promise<any> => {
 };
 
 export const getSemanticDOM = async (): Promise<string> => {
-  const wv = getActiveWebview();
+  const wv = await waitForActiveWebview();
   if (!wv) throw new Error("No active webview available");
 
   const code = `
@@ -128,13 +140,13 @@ export const getSemanticDOM = async (): Promise<string> => {
 };
 
 export const clearSetOfMark = async (): Promise<void> => {
-  const wv = getActiveWebview();
+  const wv = await waitForActiveWebview();
   if (!wv) return;
   await wv.executeJavaScript(`document.querySelectorAll('.oneagent-som-marker').forEach(e => e.remove());`);
 };
 
 export const interactWithElement = async (id: number, action: 'click' | 'type' | 'scroll', value?: string): Promise<boolean> => {
-  const wv = getActiveWebview();
+  const wv = await waitForActiveWebview();
   if (!wv) throw new Error("No active webview available");
 
   const code = `
@@ -166,8 +178,8 @@ export const interactWithElement = async (id: number, action: 'click' | 'type' |
   return await wv.executeJavaScript(code);
 };
 
-export const executeBrowserNavigation = (action: string, url?: string) => {
-  const wv = getActiveWebview();
+export const executeBrowserNavigation = async (action: string, url?: string) => {
+  const wv = await waitForActiveWebview();
   if (!wv) throw new Error("No active webview available");
 
   switch (action) {

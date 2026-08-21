@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
-import { X, Save, Settings2, ShieldAlert } from 'lucide-react';
-import { LLMProvider, getProviders, saveProviders } from '../utils/llm';
+import { X, Save, Settings2, Globe } from 'lucide-react';
+import { LLMProvider, getProviders, saveProviders, WebSearchSettings, getWebSearchSettings, saveWebSearchSettings } from '../utils/llm';
 
 interface SettingsModalProps {
   onClose: () => void;
@@ -8,9 +8,11 @@ interface SettingsModalProps {
 
 const SettingsModal: React.FC<SettingsModalProps> = ({ onClose }) => {
   const [providers, setProviders] = useState<LLMProvider[]>([]);
+  const [webSearch, setWebSearch] = useState<WebSearchSettings>({ endpoint: '', apiKey: '' });
 
   useEffect(() => {
     setProviders(getProviders());
+    setWebSearch(getWebSearchSettings());
   }, []);
 
   const handleProviderChange = (index: number, field: keyof LLMProvider, value: any) => {
@@ -21,6 +23,7 @@ const SettingsModal: React.FC<SettingsModalProps> = ({ onClose }) => {
 
   const handleSave = () => {
     saveProviders(providers);
+    saveWebSearchSettings(webSearch);
     onClose();
   };
 
@@ -100,7 +103,47 @@ const SettingsModal: React.FC<SettingsModalProps> = ({ onClose }) => {
               ))}
             </div>
           </div>
-          
+
+          <div>
+            <h3 className="text-white font-medium mb-4 flex items-center gap-2">
+              <Globe size={18} className="text-accentBright" />
+              Web Search
+            </h3>
+            <p className="text-sm text-textSecondary mb-4">
+              Optional search API provider. When configured, the agent gets a direct
+              <span className="font-mono text-xs text-textSecondary"> search_web </span>
+              tool. When left empty (default), the agent searches by driving the embedded
+              browser instead — you can watch it live in the tool call view.
+            </p>
+
+            <div className="p-4 rounded-xl border border-white/5 bg-black/20 space-y-3">
+              <div className="flex flex-col gap-1">
+                <label className="menu-header">Search Endpoint URL</label>
+                <input
+                  type="text"
+                  value={webSearch.endpoint}
+                  onChange={(e) => setWebSearch({ ...webSearch, endpoint: e.target.value })}
+                  className="input-field"
+                  placeholder="Leave empty to use the embedded browser for search"
+                />
+                <span className="text-[11px] text-textSecondary/70">
+                  Receives POST {'{ query, limit }'} with a Bearer token; return JSON results.
+                </span>
+              </div>
+
+              <div className="flex flex-col gap-1">
+                <label className="menu-header">API Key</label>
+                <input
+                  type="password"
+                  value={webSearch.apiKey}
+                  onChange={(e) => setWebSearch({ ...webSearch, apiKey: e.target.value })}
+                  className="input-field"
+                  placeholder="Sent as Authorization: Bearer &lt;key&gt;"
+                />
+              </div>
+            </div>
+          </div>
+
         </div>
 
         {/* Footer */}
