@@ -156,12 +156,16 @@ export const SYSTEM_TOOLS = [
     type: "function",
     function: {
       name: "browser_interact",
-      description: "Click, scroll to, or type text into a labeled browser element ID.",
+      description: "Interact with the browser using advanced OS-level mouse and keyboard events at a specific element ID.",
       parameters: {
         type: "object",
         properties: {
           id: { type: "number", description: "The element ID from Set-of-Mark." },
-          action: { type: "string", enum: ["click", "type", "scroll"], description: "Action to perform." },
+          action: { type: "string", enum: ["mouse", "keyboard", "type", "scroll"], description: "Hardware action category." },
+          state: { type: "string", enum: ["click", "down", "up", "move", "press"], description: "Interaction state (e.g., 'click', 'down' for hold, 'up' for release, 'move' for hover)." },
+          button: { type: "string", enum: ["left", "right", "middle"], description: "Mouse button to use (if action is mouse)." },
+          key: { type: "string", description: "Specific keyboard key to press (if action is keyboard)." },
+          modifiers: { type: "array", items: { type: "string" }, description: "Array of modifier keys (e.g. ['control', 'shift']) to hold during the interaction." },
           value: { type: "string", description: "Text to type (if action is type)." }
         },
         required: ["id", "action"]

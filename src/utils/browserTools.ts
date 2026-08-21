@@ -44,7 +44,26 @@ export const injectSetOfMark = async (): Promise<any> => {
 
         const id = nextId++;
         
-        // Create marker
+        // Create or get container to ensure absolute coordinates match perfectly
+        let container = document.getElementById('oneagent-som-container');
+        if (!container) {
+          container = document.createElement('div');
+          container.id = 'oneagent-som-container';
+          Object.assign(container.style, {
+            position: 'absolute',
+            top: '0',
+            left: '0',
+            width: '100%',
+            height: '100%',
+            pointerEvents: 'none',
+            zIndex: '2147483647',
+            margin: '0',
+            padding: '0',
+            border: 'none'
+          });
+          document.documentElement.appendChild(container);
+        }
+
         const marker = document.createElement('div');
         marker.className = 'oneagent-som-marker';
         marker.textContent = id;
@@ -58,13 +77,11 @@ export const injectSetOfMark = async (): Promise<any> => {
           fontWeight: 'bold',
           padding: '2px 4px',
           borderRadius: '4px',
-          zIndex: '2147483647',
           pointerEvents: 'none',
           boxShadow: '0 0 2px rgba(0,0,0,0.5)',
           lineHeight: '1'
         });
         
-        // Draw border around element
         const border = document.createElement('div');
         border.className = 'oneagent-som-marker';
         Object.assign(border.style, {
@@ -74,12 +91,11 @@ export const injectSetOfMark = async (): Promise<any> => {
           width: rect.width + 'px',
           height: rect.height + 'px',
           border: '2px dashed rgba(255, 0, 0, 0.8)',
-          zIndex: '2147483646',
           pointerEvents: 'none'
         });
 
-        document.body.appendChild(border);
-        document.body.appendChild(marker);
+        container.appendChild(border);
+        container.appendChild(marker);
 
         // Save element reference to window for later interaction
         window.__oneagentElements = window.__oneagentElements || {};
@@ -167,37 +183,137 @@ export const clearSetOfMark = async (): Promise<void> => {
   await wv.executeJavaScript(`document.querySelectorAll('.oneagent-som-marker').forEach(e => e.remove());`);
 };
 
-export const interactWithElement = async (id: number, action: 'click' | 'type' | 'scroll', value?: string): Promise<boolean> => {
+export const interactWithElement = async (args: any): Promise<boolean> => {
   const wv = await waitForActiveWebview();
   if (!wv) throw new Error("No active webview available");
 
+  const id = args.id || args.Id || 0;
+  const action = args.action || args.Action || 'click';
+  const state = args.state || args.State || 'click';
+  const button = args.button || args.Button || 'left';
+  const key = args.key || args.Key || '';
+  const modifiers = args.modifiers || args.Modifiers || [];
+  const value = args.value || args.Value || '';
+
   const code = `
     (function() {
-      const el = window.__oneagentElements && window.__oneagentElements[${id}];
-      if (!el) return false;
-      
-      try {
-        if ('${action}' === 'click') {
-          el.scrollIntoView({ block: 'center', inline: 'center' });
-          el.click();
-          return true;
+      return new Promise((resolve) => {
+        const el = window.__oneagentElements && window.__oneagentElements[${id}];
+        if (!el) {
+          resolve(null);
+          return;
         }
-        if ('${action}' === 'type') {
+        
+        try {
           el.scrollIntoView({ block: 'center', inline: 'center' });
-          el.focus();
-          el.value = ${JSON.stringify(value || '')};
-          el.dispatchEvent(new Event('input', { bubbles: true }));
-          el.dispatchEvent(new Event('change', { bubbles: true }));
-          return true;
+          const rect = el.getBoundingClientRect();
+          const targetX = Math.round(rect.left + rect.width / 2);
+          const targetY = Math.round(rect.top + rect.height / 2);
+          
+          // Create standard arrow cursor
+          const cursor = document.createElement('div');
+          cursor.innerHTML = '<svg width="24" height="36" viewBox="0 0 24 36" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M5.65376 2.15376C5.42103 1.92103 5.06847 1.8385 4.75338 1.94314C4.4383 2.04778 4.22019 2.31885 4.19702 2.65171L2.03035 33.8517C2.00844 34.1673 2.1969 34.4636 2.49603 34.5843C2.79517 34.7049 3.13653 34.6231 3.34032 34.3813L10.3704 26.0355L16.2731 34.8021C16.4805 35.1097 16.8906 35.1884 17.1889 34.978L22.4206 31.2872C22.7188 31.0768 22.7845 30.666 22.5663 30.3621L16.2238 21.5303H24.3333C24.6468 21.5303 24.9312 21.3414 25.0482 21.0558C25.1652 20.7702 25.0906 20.4431 24.8604 20.2319L5.65376 2.15376Z" fill="black" stroke="white" stroke-width="2" stroke-linejoin="round"/></svg>';
+          Object.assign(cursor.style, {
+            position: 'fixed',
+            zIndex: '2147483647',
+            pointerEvents: 'none',
+            transition: 'all 0.6s cubic-bezier(0.25, 1, 0.5, 1)',
+            left: window.innerWidth + 'px',
+            top: window.innerHeight + 'px',
+            transform: 'translate(-4px, -4px)',
+            filter: 'drop-shadow(1px 2px 3px rgba(0,0,0,0.4))'
+          });
+          document.documentElement.appendChild(cursor);
+
+          // Animate
+          setTimeout(() => {
+            cursor.style.left = targetX + 'px';
+            cursor.style.top = targetY + 'px';
+          }, 50);
+
+          setTimeout(() => {
+            // Click effect
+            cursor.style.transform = 'translate(-4px, -4px) scale(0.8)';
+            setTimeout(() => cursor.style.transform = 'translate(-4px, -4px) scale(1)', 150);
+
+            if ('${action}' === 'type' || '${action}' === 'keyboard') {
+              const overlay = document.createElement('div');
+              Object.assign(overlay.style, {
+                position: 'absolute',
+                top: (window.scrollY + rect.top) + 'px',
+                left: (window.scrollX + rect.left) + 'px',
+                width: rect.width + 'px',
+                height: rect.height + 'px',
+                background: 'rgba(0, 120, 255, 0.2)',
+                pointerEvents: 'none',
+                zIndex: '2147483646',
+                transition: 'opacity 0.3s'
+              });
+              document.documentElement.appendChild(overlay);
+              setTimeout(() => {
+                overlay.style.opacity = '0';
+                setTimeout(() => overlay.remove(), 300);
+              }, 300);
+            }
+
+            setTimeout(() => {
+              cursor.style.opacity = '0';
+              setTimeout(() => {
+                cursor.remove();
+                resolve({ x: targetX, y: targetY });
+              }, 300);
+            }, 300);
+          }, 650);
+
+        } catch(e) {
+          console.error(e);
+          resolve(null);
         }
-      } catch(e) {
-        console.error(e);
-        return false;
-      }
-      return false;
+      });
     })();
   `;
-  return await wv.executeJavaScript(code);
+  const coords = await wv.executeJavaScript(code);
+  if (!coords) return false;
+
+  const electronAPI = (window as any).electronAPI;
+  const webContentsId = wv.getWebContentsId();
+
+  if (action === 'mouse' || action === 'click' || action === 'scroll') {
+    let type = 'mouseDown';
+    if (state === 'up') type = 'mouseUp';
+    if (state === 'move' || state === 'hover') type = 'mouseMove';
+
+    if (state === 'click') {
+      await electronAPI.browserSendInputEvent({ webContentsId, type: 'mouseDown', x: coords.x, y: coords.y, button, clickCount: 1, modifiers });
+      await new Promise(r => setTimeout(r, 50));
+      await electronAPI.browserSendInputEvent({ webContentsId, type: 'mouseUp', x: coords.x, y: coords.y, button, clickCount: 1, modifiers });
+    } else {
+      await electronAPI.browserSendInputEvent({ webContentsId, type, x: coords.x, y: coords.y, button, clickCount: 1, modifiers });
+    }
+  } else if (action === 'keyboard' || action === 'type') {
+    // Focus first
+    await electronAPI.browserSendInputEvent({ webContentsId, type: 'mouseDown', x: coords.x, y: coords.y, button: 'left', clickCount: 1 });
+    await new Promise(r => setTimeout(r, 50));
+    await electronAPI.browserSendInputEvent({ webContentsId, type: 'mouseUp', x: coords.x, y: coords.y, button: 'left', clickCount: 1 });
+    await new Promise(r => setTimeout(r, 50));
+
+    if (action === 'type' && value) {
+      await electronAPI.browserInsertText({ webContentsId, text: value });
+    } else if (key) {
+      let type = 'keyDown';
+      if (state === 'up') type = 'keyUp';
+      
+      if (state === 'press' || state === 'click') {
+        await electronAPI.browserSendInputEvent({ webContentsId, type: 'keyDown', keyCode: key, modifiers });
+        await new Promise(r => setTimeout(r, 50));
+        await electronAPI.browserSendInputEvent({ webContentsId, type: 'keyUp', keyCode: key, modifiers });
+      } else {
+        await electronAPI.browserSendInputEvent({ webContentsId, type, keyCode: key, modifiers });
+      }
+    }
+  }
+
+  return true;
 };
 
 export const executeBrowserNavigation = async (action: string, url?: string): Promise<string> => {

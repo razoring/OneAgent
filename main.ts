@@ -564,6 +564,30 @@ ipcMain.handle('delete-file', async (event, filePath) => {
   }
 });
 
+ipcMain.handle('browser-send-input-event', async (event, { webContentsId, type, x, y, button, clickCount, modifiers, keyCode }) => {
+  try {
+    const { webContents } = require('electron');
+    const wc = webContents.fromId(webContentsId);
+    if (!wc) return { success: false, error: 'WebContents not found' };
+    wc.sendInputEvent({ type, x, y, button, clickCount, modifiers, keyCode });
+    return { success: true };
+  } catch (err: any) {
+    return { success: false, error: err.message };
+  }
+});
+
+ipcMain.handle('browser-insert-text', async (event, { webContentsId, text }) => {
+  try {
+    const { webContents } = require('electron');
+    const wc = webContents.fromId(webContentsId);
+    if (!wc) return { success: false, error: 'WebContents not found' };
+    wc.insertText(text);
+    return { success: true };
+  } catch (err: any) {
+    return { success: false, error: err.message };
+  }
+});
+
 ipcMain.handle('run-command', async (event, { command, cwd }) => {
   return new Promise((resolve) => {
     exec(command, { cwd: cwd || process.cwd() }, (error, stdout, stderr) => {

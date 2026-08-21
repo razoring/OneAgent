@@ -104,10 +104,7 @@ export const executeToolCall = async (toolCallRaw: string): Promise<{ toolName: 
         break;
       }
       case 'browser_interact': {
-        const id = args.id || args.Id || 0;
-        const action = args.action || args.Action || 'click';
-        const value = args.value || args.Value;
-        const success = await interactWithElement(id, action, value);
+        const success = await interactWithElement(args);
         resStr = success ? "Interaction successful" : "Interaction failed or element not found";
         break;
       }
