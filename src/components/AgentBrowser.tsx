@@ -5,11 +5,13 @@ import { agentBrowserStore } from '../utils/agentBrowserStore';
 // Live embedded browser driven by the agent's browser_* tools.
 // Registers itself as window.activeWebview so browserTools.ts can drive it.
 const AgentBrowser: React.FC = () => {
-  const url = agentBrowserStore.getUrl();
-  const [inputUrl, setInputUrl] = useState(url);
+  // Frozen at mount: navigation is driven imperatively (loadURL) by
+  // browserTools — rewriting the src attribute mid-flight causes ERR_ABORTED.
+  const [initialSrc] = useState(() => agentBrowserStore.getUrl());
+  const [displayUrl, setDisplayUrl] = useState(initialSrc);
   const webviewRef = useRef<any>(null);
 
-  useEffect(() => setInputUrl(url), [url]);
+  useEffect(() => agentBrowserStore.subscribe(url => setDisplayUrl(url)), []);
 
   useEffect(() => {
     const webview = webviewRef.current;
@@ -18,17 +20,24 @@ const AgentBrowser: React.FC = () => {
     (window as any).activeWebview = webview;
 
     const handleDidFinishLoad = () => {
-      const live = webview.getURL();
-      setInputUrl(live);
-      agentBrowserStore.navigate(live);
+      agentBrowserStore.navigate(webview.getURL());
+    };
+
+    // -3 = ERR_ABORTED: a navigation was superseded (expected when the agent
+    // redirects mid-load). Subframe loads report isMainFrame=false. Ignore both.
+    const handleDidFailLoad = (e: any) => {
+      if (e?.errorCode === -3 || e?.isMainFrame === false) return;
+      console.warn('[AgentBrowser] load failed:', e?.errorDescription || e);
     };
 
     webview.addEventListener('did-finish-load', handleDidFinishLoad);
+    webview.addEventListener('did-fail-load', handleDidFailLoad);
     return () => {
       if ((window as any).activeWebview === webview) {
         (window as any).activeWebview = null;
       }
       webview.removeEventListener('did-finish-load', handleDidFinishLoad);
+      webview.removeEventListener('did-fail-load', handleDidFailLoad);
     };
   }, []);
 
@@ -51,7 +60,7 @@ const AgentBrowser: React.FC = () => {
         </button>
         <div className="flex-1 flex items-center gap-1.5 bg-black/40 border border-white/5 rounded px-2 py-1 min-w-0">
           <Shield size={11} className="text-accentBright shrink-0" />
-          <span className="text-[11px] font-mono text-gray-300 truncate select-text">{inputUrl}</span>
+          <span className="text-[11px] font-mono text-gray-300 truncate select-text">{displayUrl}</span>
         </div>
       </div>
 
@@ -59,7 +68,7 @@ const AgentBrowser: React.FC = () => {
       {/* @ts-ignore - webview is a custom element in Electron */}
       <webview
         ref={webviewRef}
-        src={url}
+        src={initialSrc}
         className="flex-1 w-full"
         partition="persist:oneagent_browser"
         webpreferences="contextIsolation=yes,javascript=yes"

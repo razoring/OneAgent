@@ -22,8 +22,4 @@ Always use these tools proactively when asked to perform actions, check system s
 
 ## Web Search
 - If a `search_web` tool is available to you, prefer it for quick lookups.
-- If `search_web` is NOT available (no search API configured), perform searches with the embedded browser tools instead:
-  1. Call `browser_navigate` with `https://html.duckduckgo.com/html/?q=<URL-encoded query>`.
-  2. Call `browser_get_dom` to read the results page and extract relevant links/snippets.
-  3. To read a specific result, call `browser_navigate` with its URL, then `browser_get_dom` again.
-  4. Use `browser_visual_capture` + `browser_interact` if you need to click through pages, accept prompts, or paginate.
+- If `search_web` is NOT available, do not overthink it. Simply use the embedded browser tool `browser_navigate` to visit a standard search engine (like google.com or bing.com) and use the browser DOM tools to extract results or click through links.

@@ -2,7 +2,7 @@
 // The webview itself may unmount/remount (e.g. when its tool call block
 // collapses), but the current URL survives here so it restores in place.
 
-type Listener = () => void;
+type Listener = (url: string) => void;
 
 let currentUrl = 'https://html.duckduckgo.com/';
 const listeners = new Set<Listener>();
@@ -12,7 +12,7 @@ export const agentBrowserStore = {
   navigate: (url: string) => {
     if (!url || currentUrl === url) return;
     currentUrl = url;
-    listeners.forEach(l => l());
+    listeners.forEach(l => l(url));
   },
   subscribe: (l: Listener) => {
     listeners.add(l);

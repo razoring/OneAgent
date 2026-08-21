@@ -77,9 +77,16 @@ export const executeToolCall = async (toolCallRaw: string): Promise<{ toolName: 
       
       // Browser Tools
       case 'browser_navigate': {
-        const url = args.url || args.Url || 'https://html.duckduckgo.com';
-        await executeBrowserNavigation('navigate', url);
-        resStr = "Navigation started to " + url;
+        let url: string = args.url || args.Url || 'https://html.duckduckgo.com';
+        url = url.trim();
+        if (!/^https?:\/\//i.test(url)) {
+          if (url.includes('.') && !url.includes(' ')) {
+            url = 'https://' + url;
+          } else {
+            url = 'https://html.duckduckgo.com/html/?q=' + encodeURIComponent(url);
+          }
+        }
+        resStr = await executeBrowserNavigation('navigate', url);
         break;
       }
       case 'browser_go_back': {

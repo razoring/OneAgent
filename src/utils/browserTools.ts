@@ -1,3 +1,5 @@
+import { agentBrowserStore } from './agentBrowserStore';
+
 export const getActiveWebview = () => (window as any).activeWebview;
 
 // The live webview mounts inside the latest browser tool call block, which can
@@ -5,7 +7,7 @@ export const getActiveWebview = () => (window as any).activeWebview;
 export const waitForActiveWebview = async (timeoutMs = 5000): Promise<any> => {
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
-    const wv = await waitForActiveWebview();
+    const wv = (window as any).activeWebview;
     if (wv) return wv;
     await new Promise(r => setTimeout(r, 100));
   }
@@ -101,39 +103,59 @@ export const getSemanticDOM = async (): Promise<string> => {
   const wv = await waitForActiveWebview();
   if (!wv) throw new Error("No active webview available");
 
+  // If a navigation is in flight (e.g. after browser_interact click), let it
+  // finish so we read the settled page instead of a torn-down document.
+  const start = Date.now();
+  while (Date.now() - start < 10000) {
+    try {
+      if (!wv.isLoading()) break;
+    } catch {}
+    await new Promise(r => setTimeout(r, 150));
+  }
+
   const code = `
     (function() {
-      // Very basic semantic extraction
-      const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT, {
-        acceptNode: function(node) {
-          if (node.nodeType === Node.ELEMENT_NODE) {
-            const tag = node.tagName.toLowerCase();
-            if (['script', 'style', 'noscript', 'svg', 'path'].includes(tag)) return NodeFilter.FILTER_REJECT;
-            const style = window.getComputedStyle(node);
-            if (style.display === 'none' || style.visibility === 'hidden') return NodeFilter.FILTER_REJECT;
+      try {
+        // Very basic semantic extraction
+        const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT, {
+          acceptNode: function(node) {
+            try {
+              if (node.nodeType === Node.ELEMENT_NODE) {
+                const tag = node.tagName.toLowerCase();
+                if (['script', 'style', 'noscript', 'svg', 'path'].includes(tag)) return NodeFilter.FILTER_REJECT;
+                const style = window.getComputedStyle(node);
+                if (style.display === 'none' || style.visibility === 'hidden') return NodeFilter.FILTER_REJECT;
+              }
+              return NodeFilter.FILTER_ACCEPT;
+            } catch (e) {
+              return NodeFilter.FILTER_ACCEPT;
+            }
           }
-          return NodeFilter.FILTER_ACCEPT;
-        }
-      });
+        });
 
-      let result = '';
-      let currentNode = walker.nextNode();
-      while(currentNode) {
-        if (currentNode.nodeType === Node.TEXT_NODE) {
-          const text = currentNode.textContent.trim();
-          if (text) result += text + ' ';
-        } else if (currentNode.nodeType === Node.ELEMENT_NODE) {
-          const tag = currentNode.tagName.toLowerCase();
-          if (['p', 'div', 'section', 'article', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'li'].includes(tag)) {
-            result += '\\n';
+        let result = '';
+        let currentNode = walker.nextNode();
+        while(currentNode) {
+          if (currentNode.nodeType === Node.TEXT_NODE) {
+            const text = currentNode.textContent.trim();
+            if (text) result += text + ' ';
+          } else if (currentNode.nodeType === Node.ELEMENT_NODE) {
+            const tag = currentNode.tagName.toLowerCase();
+            if (['p', 'div', 'section', 'article', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'li'].includes(tag)) {
+              result += '\\n';
+            }
+            if (tag === 'a' && currentNode.href) {
+              result += '[' + currentNode.textContent.trim() + '](' + currentNode.href + ') ';
+            }
           }
-          if (tag === 'a' && currentNode.href) {
-            result += '[' + currentNode.textContent.trim() + '](' + currentNode.href + ') ';
-          }
+          currentNode = walker.nextNode();
         }
-        currentNode = walker.nextNode();
+        // Collapse blank lines without regex backtracking over huge inputs
+        const cleaned = result.split('\\n').map(s => s.trim()).filter(Boolean).join('\\n');
+        return cleaned.substring(0, 20000);
+      } catch (err) {
+        return '[browser_get_dom error] ' + (err && err.message ? err.message : String(err));
       }
-      return result.replace(/\\n\\s*\\n/g, '\\n').trim().substring(0, 20000); // Limit to 20k chars
     })();
   `;
   return await wv.executeJavaScript(code);
@@ -178,14 +200,40 @@ export const interactWithElement = async (id: number, action: 'click' | 'type' |
   return await wv.executeJavaScript(code);
 };
 
-export const executeBrowserNavigation = async (action: string, url?: string) => {
+export const executeBrowserNavigation = async (action: string, url?: string): Promise<string> => {
   const wv = await waitForActiveWebview();
   if (!wv) throw new Error("No active webview available");
 
   switch (action) {
-    case 'navigate':
-      if (url) wv.loadURL(url);
-      break;
+    case 'navigate': {
+      if (!url) break;
+      // Navigating to the URL currently loading/loaded aborts the in-flight
+      // request (ERR_ABORTED) — treat as success instead.
+      try {
+        if (wv.getURL() === url || wv.isLoading()) {
+          wv.stop();
+        }
+      } catch {}
+      if (wv.getURL() !== url) {
+        // Swallow rejections: ERR_ABORTED here means a navigation was
+        // superseded, which is expected during rapid agent driving.
+        Promise.resolve(wv.loadURL(url)).catch(() => {});
+      }
+      // Wait for the page to settle so a following browser_get_dom reads
+      // the finished page instead of racing the load.
+      const start = Date.now();
+      while (Date.now() - start < 15000) {
+        try {
+          if (!wv.isLoading()) {
+            agentBrowserStore.navigate(wv.getURL());
+            return "Navigation complete: " + wv.getURL();
+          }
+        } catch {}
+        await new Promise(r => setTimeout(r, 150));
+      }
+      agentBrowserStore.navigate(wv.getURL());
+      return "Navigation still in progress after 15s: " + wv.getURL();
+    }
     case 'back':
       wv.goBack();
       break;
@@ -198,4 +246,5 @@ export const executeBrowserNavigation = async (action: string, url?: string) => 
     default:
       throw new Error("Unknown browser action");
   }
+  return "OK";
 };
