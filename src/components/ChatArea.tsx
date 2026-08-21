@@ -21,13 +21,13 @@ const MarkdownComponents: any = {
   ul: ({node, ...props}: any) => <ul className="list-disc pl-6 mb-4 space-y-1" {...props} />,
   ol: ({node, ...props}: any) => <ol className="list-decimal pl-6 mb-4 space-y-1" {...props} />,
   li: ({node, ...props}: any) => <li className="leading-relaxed" {...props} />,
-  a: ({node, ...props}: any) => <a className="text-blue-400 hover:underline" target="_blank" rel="noopener noreferrer" {...props} />,
+  a: ({node, ...props}: any) => <a className="text-accentBright hover:underline" target="_blank" rel="noopener noreferrer" {...props} />,
   strong: ({node, ...props}: any) => <strong className="font-bold text-gray-100" {...props} />,
   blockquote: ({node, ...props}: any) => <blockquote className="border-l-4 border-gray-500 pl-4 py-1 italic text-gray-400 my-4" {...props} />,
   code: ({node, inline, className, children, ...props}: any) => {
     const match = /language-(\w+)/.exec(className || '');
     return !inline && match ? (
-      <div className="rounded-lg overflow-hidden my-4 border border-white/10 bg-[#1e1e1e]">
+      <div className="rounded-lg overflow-hidden my-4 border border-white/10 bg-overlay">
         <div className="bg-black/40 px-4 py-1 text-xs text-gray-400 flex items-center justify-between border-b border-white/10">
           <span>{match[1]}</span>
         </div>
@@ -258,7 +258,7 @@ const ChatArea = () => {
         // Actually, I didn't pass msgId or msgType to formatMentions. I should.
         // Let's just use data attributes and attach an event listener to the container, OR pass msgId and msgType to formatMentions.
         // Use a span with data attributes and we will render a tooltip using CSS or JS
-        processedText = processedText.replace(quoteRegex, `<mark class="bg-yellow-500/20 text-yellow-200 rounded relative group/comment cursor-pointer comment-icon-btn" data-comment-id="${comment.id}" data-encoded-quote="${btoa(encodeURIComponent(comment.quote))}">$1<span class="absolute -top-2 -right-2 bg-[#1e1e1e] rounded-full border border-yellow-500/30 p-0.5 shadow-md flex items-center justify-center text-yellow-400 opacity-0 group-hover/comment:opacity-100 transition-opacity"><svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path></svg></span><span class="absolute bottom-full left-1/2 transform -translate-x-1/2 mb-2 w-max max-w-xs bg-[#1e1e1e] border border-white/10 shadow-xl rounded-lg p-2 text-xs text-gray-200 opacity-0 group-hover/comment:opacity-100 pointer-events-none transition-opacity z-50 whitespace-pre-wrap text-left hidden group-hover/comment:block"><b>Comment:</b><br/>${comment.text}</span></mark>`);
+        processedText = processedText.replace(quoteRegex, `<mark class="bg-accent/20 text-white rounded relative group/comment cursor-pointer comment-icon-btn" data-comment-id="${comment.id}" data-encoded-quote="${btoa(encodeURIComponent(comment.quote))}">$1<span class="absolute -top-2 -right-2 bg-overlay rounded-full border border-accent/30 p-0.5 shadow-md flex items-center justify-center text-accentBright opacity-0 group-hover/comment:opacity-100 transition-opacity"><svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path></svg></span><span class="absolute bottom-full left-1/2 transform -translate-x-1/2 mb-2 w-max max-w-xs bg-overlay border border-white/10 shadow-xl rounded-lg p-2 text-xs text-gray-200 opacity-0 group-hover/comment:opacity-100 pointer-events-none transition-opacity z-50 whitespace-pre-wrap text-left hidden group-hover/comment:block"><b>Comment:</b><br/>${comment.text}</span></mark>`);
       });
     }
 
@@ -315,7 +315,7 @@ const ChatArea = () => {
 
         return (
           <span 
-            className="mention inline-flex items-center gap-1.5 bg-white/10 border border-white/5 text-blue-400 px-2 h-[24px] rounded-md mx-1 align-middle select-none cursor-pointer hover:underline"
+            className="mention inline-flex items-center gap-1.5 bg-white/10 border border-white/5 text-accentBright px-2 h-[24px] rounded-md mx-1 align-middle select-none cursor-pointer hover:underline"
             onClick={() => {
               if (att?.path) {
                 (window as any).electronAPI.openPath(att.path);
@@ -605,7 +605,7 @@ const ChatArea = () => {
   };
 
   return (
-    <div className="flex-1 flex flex-col bg-[#212121] relative">
+    <div className="flex-1 flex flex-col bg-surface relative">
       
       {/* Main Content */}
       <div ref={scrollContainerRef} onScroll={handleScroll} className="flex-1 flex flex-col items-center overflow-y-auto w-full">
@@ -631,7 +631,7 @@ const ChatArea = () => {
                   {msg.role === 'user' ? 'You' : 'Assistant'}
                 </div>
                 {msg.role === 'user' && (
-                  <div data-msg-id={msg.id} data-msg-type="user" className={`w-full group relative ${isEditingUser ? 'ring-2 ring-blue-500 rounded-lg p-2' : ''}`}>
+                  <div data-msg-id={msg.id} data-msg-type="user" className={`w-full group relative ${isEditingUser ? 'ring-2 ring-accent rounded-lg p-2 -m-2' : ''}`}>
                     {!isGenerating && !msg.isGenerating && (
                       <BlockToolbar 
                         onEdit={() => setEditingBlock({ id: msg.id, type: 'user' })} 
@@ -639,7 +639,7 @@ const ChatArea = () => {
                         onDelete={() => handleDelete(msg.id, 'user')} 
                       />
                     )}
-                    <div className="focus:outline-none [&_.mention]:inline-flex [&_.mention]:items-center [&_.mention]:gap-1.5 [&_.mention]:bg-white/10 [&_.mention]:border [&_.mention]:border-white/5 [&_.mention]:text-blue-400 [&_.mention]:px-2 [&_.mention]:h-[24px] [&_.mention]:rounded-md [&_.mention]:mx-1 [&_.mention]:align-middle [&_.mention]:select-none">
+                    <div className="focus:outline-none [&_.mention]:inline-flex [&_.mention]:items-center [&_.mention]:gap-1.5 [&_.mention]:bg-white/10 [&_.mention]:border [&_.mention]:border-white/5 [&_.mention]:text-accentBright [&_.mention]:px-2 [&_.mention]:h-[24px] [&_.mention]:rounded-md [&_.mention]:mx-1 [&_.mention]:align-middle [&_.mention]:select-none">
                       <ReactMarkdown 
                         remarkPlugins={[remarkGfm, remarkMath]} 
                         rehypePlugins={[rehypeRaw, rehypeKatex]} 
@@ -669,7 +669,7 @@ const ChatArea = () => {
                 {msg.role === 'assistant' && (
                   <div className="w-full text-gray-300 flex flex-col gap-2">
                     {(msg.thinking || (msg.isGenerating && !msg.content) || (isEditingThinking && editPreview?.text)) && (
-                      <div data-msg-id={msg.id} data-msg-type="thinking" className={`w-full group relative ${isEditingThinking ? 'ring-2 ring-blue-500 rounded-lg p-2' : ''}`}>
+                      <div data-msg-id={msg.id} data-msg-type="thinking" className={`w-full group relative ${isEditingThinking ? 'ring-2 ring-accent rounded-lg p-2 -m-2' : ''}`}>
                         {!isGenerating && !msg.isGenerating && (
                           <BlockToolbar 
                             onEdit={() => setEditingBlock({ id: msg.id, type: 'thinking' })} 
@@ -682,7 +682,7 @@ const ChatArea = () => {
                     )}
                     
                     {(msg.content || (msg.isGenerating && !msg.thinking) || (isEditingResponse && editPreview?.text)) && (
-                      <div data-msg-id={msg.id} data-msg-type="response" className={`w-full group relative ${isEditingResponse ? 'ring-2 ring-blue-500 rounded-lg p-2' : ''}`}>
+                      <div data-msg-id={msg.id} data-msg-type="response" className={`w-full group relative ${isEditingResponse ? 'ring-2 ring-accent rounded-lg p-2 -m-2' : ''}`}>
                         {!isGenerating && !msg.isGenerating && (
                           <BlockToolbar 
                             onEdit={() => setEditingBlock({ id: msg.id, type: 'response' })} 
@@ -690,7 +690,7 @@ const ChatArea = () => {
                             onDelete={() => handleDelete(msg.id, 'response')} 
                           />
                         )}
-                        <div className="[&_.mention]:inline-flex [&_.mention]:items-center [&_.mention]:gap-1.5 [&_.mention]:bg-white/10 [&_.mention]:border [&_.mention]:border-white/5 [&_.mention]:text-blue-400 [&_.mention]:px-2 [&_.mention]:h-[24px] [&_.mention]:rounded-md [&_.mention]:mx-1 [&_.mention]:align-middle [&_.mention]:select-none">
+                        <div className="[&_.mention]:inline-flex [&_.mention]:items-center [&_.mention]:gap-1.5 [&_.mention]:bg-white/10 [&_.mention]:border [&_.mention]:border-white/5 [&_.mention]:text-accentBright [&_.mention]:px-2 [&_.mention]:h-[24px] [&_.mention]:rounded-md [&_.mention]:mx-1 [&_.mention]:align-middle [&_.mention]:select-none">
                           <ReactMarkdown 
                             remarkPlugins={[remarkGfm, remarkMath]} 
                             rehypePlugins={[rehypeRaw, rehypeKatex]} 
@@ -743,11 +743,11 @@ const ChatArea = () => {
             top: selectionContext ? selectionContext.y : window.innerHeight / 2 
           }}
         >
-          <div className="bg-[#1e1e1e] border border-white/10 shadow-2xl rounded-xl p-3 w-72 flex flex-col gap-2">
-            <div className="text-xs font-semibold text-gray-500 uppercase">
+          <div className="menu-panel rounded-xl p-3 w-72 flex flex-col gap-2">
+            <div className="menu-header">
               {commentInputContext.commentId ? 'Edit Comment' : 'New Comment'}
             </div>
-            <div className="text-xs italic text-gray-400 border-l-2 border-gray-600 pl-2 line-clamp-2">
+            <div className="text-sm italic text-gray-400 border-l-2 border-gray-600 pl-2 line-clamp-2">
               "{commentInputContext.text}"
             </div>
             <textarea
@@ -755,7 +755,7 @@ const ChatArea = () => {
               value={commentInputValue}
               onChange={(e) => setCommentInputValue(e.target.value)}
               placeholder="Write your comment..."
-              className="w-full bg-black/40 text-sm text-gray-200 p-2 rounded-lg resize-none outline-none focus:ring-1 focus:ring-blue-500 min-h-[60px]"
+              className="input-field resize-none min-h-[60px]"
               onKeyDown={(e) => {
                 if (e.key === 'Enter' && !e.shiftKey) {
                   e.preventDefault();
@@ -789,7 +789,7 @@ const ChatArea = () => {
                 }
               }}
             />
-            <div className="flex justify-between items-center text-xs">
+            <div className="flex justify-between items-center text-sm">
               <span className="text-gray-500">Press <kbd className="bg-white/10 px-1 rounded">Enter</kbd> to save</span>
               <div className="flex gap-2">
                 {commentInputContext.commentId && (
@@ -806,7 +806,7 @@ const ChatArea = () => {
                       });
                       setCommentInputContext(null);
                     }}
-                    className="text-red-400 hover:text-red-300 px-2 py-1 rounded"
+                    className="text-gray-400 hover:text-white px-2 py-1 rounded"
                   >
                     Delete
                   </button>
@@ -824,7 +824,7 @@ const ChatArea = () => {
       )}
 
       {/* Input Area */}
-      <div className="w-full flex justify-center p-4 bg-gradient-to-t from-[#212121] via-[#212121] to-transparent pt-10">
+            <div className="w-full flex justify-center p-4 bg-gradient-to-t from-surface via-surface to-transparent pt-10">
         <div className="max-w-3xl w-full">
           <ChatInput 
             onSend={handleSendMessage} 

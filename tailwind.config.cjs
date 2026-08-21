@@ -7,11 +7,13 @@ module.exports = {
   theme: {
     extend: {
       colors: {
-        background: '#121212', // Spotify dark
-        surface: '#181818',
-        surfaceElevated: '#282828',
-        accent: '#1DB954', // Spotify green
-        accentHover: '#1ed760',
+        background: '#171717',
+        surface: '#212121',
+        surfaceElevated: '#2a2a2a',
+        overlay: '#1e1e1e',
+        accent: 'rgb(var(--accent-rgb) / <alpha-value>)',
+        accentHover: 'rgb(var(--accent-hover-rgb) / <alpha-value>)',
+        accentBright: 'rgb(var(--accent-bright-rgb) / <alpha-value>)',
         textPrimary: '#ffffff',
         textSecondary: '#b3b3b3',
       },

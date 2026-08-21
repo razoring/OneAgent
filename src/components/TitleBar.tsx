@@ -29,7 +29,7 @@ const TitleBar = () => {
         <button onClick={handleMaximize} className="p-1.5 text-textSecondary hover:bg-white/10 hover:text-white rounded transition-colors" title="Maximize">
           <Square size={12} />
         </button>
-        <button onClick={handleClose} className="p-1.5 text-textSecondary hover:bg-red-500 hover:text-white rounded transition-colors" title="Close">
+        <button onClick={handleClose} className="p-1.5 text-textSecondary hover:bg-white/10 hover:text-white rounded transition-colors" title="Close">
           <X size={16} />
         </button>
       </div>

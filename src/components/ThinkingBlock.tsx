@@ -37,9 +37,9 @@ export const ThinkingBlock: React.FC<ThinkingBlockProps> = ({ thinking, isGenera
       >
         <div className="flex items-center gap-2">
           {isGenerating ? (
-            <Loader2 className="w-3.5 h-3.5 text-blue-400 animate-spin" />
+            <Loader2 className="w-3.5 h-3.5 text-accentBright animate-spin" />
           ) : (
-            <Brain className="w-3.5 h-3.5 text-purple-400 group-hover:text-purple-300 transition-colors" />
+            <Brain className="w-3.5 h-3.5 text-gray-400 group-hover:text-gray-300 transition-colors" />
           )}
           <span className="font-medium text-gray-300 group-hover:text-white transition-colors">
             {isGenerating ? 'Thinking...' : 'Thought Process'}
@@ -56,7 +56,7 @@ export const ThinkingBlock: React.FC<ThinkingBlockProps> = ({ thinking, isGenera
               title="Copy thinking process"
               className="p-1 rounded hover:bg-white/10 text-gray-400 hover:text-gray-200 transition-colors"
             >
-              {copied ? <Check className="w-3 h-3 text-green-400" /> : <Copy className="w-3 h-3" />}
+              {copied ? <Check className="w-3 h-3 text-white" /> : <Copy className="w-3 h-3" />}
             </button>
           )}
           {isExpanded ? (

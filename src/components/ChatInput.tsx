@@ -22,7 +22,7 @@ import DEFAULT_SYSTEM_PROMPT from '../utils/systemPrompt.md?raw';
 const ModelItem = ({ model, isSelected, onClick }: { model: any, isSelected: boolean, onClick: () => void }) => (
   <button
     onClick={onClick}
-    className={`flex items-center gap-3 w-full text-left px-4 py-2.5 rounded-xl text-sm transition-colors ${isSelected
+    className={`menu-item ${isSelected
         ? 'bg-white/10 text-white font-medium'
         : 'text-gray-300 hover:bg-white/5 hover:text-white'
       }`}
@@ -59,7 +59,7 @@ class MentionWidget extends WidgetType {
   }
   toDOM() {
     const span = document.createElement('span');
-    span.className = 'inline-flex items-center gap-1.5 bg-white/10 border border-white/5 text-blue-400 px-2 h-[24px] rounded-md mx-1 align-middle select-none shadow-sm cursor-pointer hover:underline -my-2';
+    span.className = 'inline-flex items-center gap-1.5 bg-white/10 border border-white/5 text-accentBright px-2 h-[24px] rounded-md mx-1 align-middle select-none shadow-sm cursor-pointer hover:underline -my-2';
 
     const iconSpan = document.createElement('span');
     iconSpan.className = 'flex items-center text-current';
@@ -239,6 +239,13 @@ const ChatInput: React.FC<ChatInputProps> = ({ onSend, onStop, disabled, editing
       total: systemTokens + historyTokens + promptTokens,
     });
   }, [isSettingsOpen, messages, value, attachments]);
+
+  const contextLimit = modelSettings.contextWindow || 8192;
+  const usageSegments = [
+    { key: 'prompt', label: 'Prompt', tokens: estimatedTokens?.prompt ?? 0, color: 'color-mix(in srgb, rgb(var(--accent-rgb)) 45%, white)' },
+    { key: 'history', label: 'History', tokens: estimatedTokens?.history ?? 0, color: 'color-mix(in srgb, rgb(var(--accent-rgb)) 70%, white)' },
+    { key: 'system', label: 'System', tokens: estimatedTokens?.system ?? 0, color: 'rgb(var(--accent-rgb))' },
+  ];
   
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const [canScrollRight, setCanScrollRight] = useState(false);
@@ -656,17 +663,17 @@ const ChatInput: React.FC<ChatInputProps> = ({ onSend, onStop, disabled, editing
 
   const getFileIcon = (type: string) => {
     switch (type) {
-      case 'image': return <ImageIcon size={24} className="text-blue-400" />;
-      case 'folder': return <Folder size={24} className="text-yellow-400" />;
-      default: return <FileText size={24} className="text-red-400" />;
+      case 'image': return <ImageIcon size={24} className="text-gray-400" />;
+      case 'folder': return <Folder size={24} className="text-gray-400" />;
+      default: return <FileText size={24} className="text-gray-400" />;
     }
   };
 
   const getFileIconSmall = (type: string) => {
     switch (type) {
-      case 'image': return <ImageIcon size={14} className="text-blue-400" />;
-      case 'folder': return <Folder size={14} className="text-yellow-400" />;
-      default: return <FileText size={14} className="text-red-400" />;
+      case 'image': return <ImageIcon size={14} className="text-gray-400" />;
+      case 'folder': return <Folder size={14} className="text-gray-400" />;
+      default: return <FileText size={14} className="text-gray-400" />;
     }
   };
 
@@ -695,7 +702,7 @@ const ChatInput: React.FC<ChatInputProps> = ({ onSend, onStop, disabled, editing
               </button>
               <button
                 onClick={() => confirmRemoveAttachment(attachmentToRemove)}
-                className="px-4 py-2 rounded-xl text-sm font-medium bg-red-500/20 text-red-400 hover:bg-red-500/30 transition-colors"
+                className="px-4 py-2 rounded-xl text-sm font-medium bg-white/10 text-gray-300 hover:bg-white/20 hover:text-white transition-colors"
               >
                 Remove (Enter)
               </button>
@@ -707,7 +714,7 @@ const ChatInput: React.FC<ChatInputProps> = ({ onSend, onStop, disabled, editing
       {/* Drag & Drop Overlay */}
       {isDragging && (
         <div className="absolute inset-0 z-50 bg-black/60 rounded-[28px] backdrop-blur-sm flex items-center justify-center p-3 pointer-events-none">
-          <div className="w-full h-full border-2 border-dashed border-blue-400/50 rounded-[20px] bg-blue-500/10 flex flex-col items-center justify-center p-4">
+          <div className="w-full h-full border-2 border-dashed border-accentBright/50 rounded-[20px] bg-accent/10 flex flex-col items-center justify-center p-4">
             <div className="flex flex-col items-center gap-1 w-full px-2">
               <div className="text-white font-medium text-lg text-center w-full">Drop anything here</div>
               <div className="text-gray-400 text-xs text-center w-full break-words">
@@ -715,11 +722,11 @@ const ChatInput: React.FC<ChatInputProps> = ({ onSend, onStop, disabled, editing
               </div>
             </div>
             <div className="flex items-center gap-4 mt-4">
-              <ImageIcon size={24} className="text-blue-400" />
-              <FileText size={24} className="text-blue-400" />
-              <FileSpreadsheet size={24} className="text-blue-400" />
-              <MonitorPlay size={24} className="text-blue-400" />
-              <Folder size={24} className="text-blue-400" />
+              <ImageIcon size={24} className="text-accentBright" />
+              <FileText size={24} className="text-accentBright" />
+              <FileSpreadsheet size={24} className="text-accentBright" />
+              <MonitorPlay size={24} className="text-accentBright" />
+              <Folder size={24} className="text-accentBright" />
             </div>
           </div>
         </div>
@@ -826,7 +833,7 @@ const ChatInput: React.FC<ChatInputProps> = ({ onSend, onStop, disabled, editing
       <div className="flex items-center justify-between mt-1 px-1 gap-2 w-full">
 
         {/* Left Actions: Attach & Model Selector */}
-        <div className="flex items-center gap-3 shrink-0 relative">
+        <div className="flex items-center gap-3 shrink-0 relative z-20">
 
           {/* Attach Button Drop-up */}
           <div className="relative">
@@ -838,8 +845,8 @@ const ChatInput: React.FC<ChatInputProps> = ({ onSend, onStop, disabled, editing
               onChange={handleFileChange}
             />
             {isAttachMenuOpen && (
-              <div className="absolute bottom-full left-0 mb-3 w-40 mac-element rounded-[24px] p-2 z-50 flex flex-col shadow-2xl">
-                <button onClick={handleAttachClick} className="flex items-center gap-3 w-full text-left px-3 py-2.5 rounded-2xl text-sm text-gray-300 hover:bg-white/10 hover:text-white transition-colors">
+              <div className="absolute bottom-full left-0 mb-3 w-40 menu-panel rounded-[24px] p-2 z-50 flex flex-col">
+                <button onClick={handleAttachClick} className="menu-item">
                   <FileText size={18} className="text-gray-400" />
                   Attach Files
                 </button>
@@ -861,29 +868,42 @@ const ChatInput: React.FC<ChatInputProps> = ({ onSend, onStop, disabled, editing
           {/* Settings-2 Model Adjustments Drop-up */}
           <div className="relative">
             {isSettingsOpen && (
-              <div className="absolute bottom-full left-0 mb-3 w-80 mac-element rounded-[24px] p-4 z-50 flex flex-col shadow-2xl gap-3.5 border border-white/10 text-gray-200">
-                {/* Live Token Count at Top */}
-                <div className="flex items-center justify-between pb-2 border-b border-white/10">
-                  <span className="text-xs font-semibold text-gray-400 uppercase tracking-wider">Model Parameters</span>
-                  <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-white/5 border border-white/10 text-xs">
-                    <span className="text-gray-400">Tokens:</span>
-                    <span className="font-semibold text-blue-400 font-mono">
-                      ~{estimatedTokens?.total.toLocaleString() || '0'}
+              <div className="absolute bottom-full left-0 mb-3 w-80 menu-panel rounded-[24px] p-4 z-50 flex flex-col gap-3.5 text-gray-200">
+                {/* Header + Context Usage Chart */}
+                <div className="flex flex-col gap-2">
+                  <span className="menu-header">Model Parameters</span>
+                  <div className="flex items-baseline justify-between">
+                    <span className="text-sm font-semibold text-white font-mono">
+                      {estimatedTokens?.total.toLocaleString() || '0'}
+                    </span>
+                    <span className="text-xs text-gray-500 font-mono">
+                      of {contextLimit.toLocaleString()} tokens
                     </span>
                   </div>
-                </div>
-
-                <div className="flex items-center justify-between text-[11px] text-gray-400 px-0.5 -mt-1.5">
-                  <span>Prompt: ~{estimatedTokens?.prompt.toLocaleString() || '0'}</span>
-                  <span>History: ~{estimatedTokens?.history.toLocaleString() || '0'}</span>
-                  <span>System: ~{estimatedTokens?.system.toLocaleString() || '0'}</span>
+                  <div className="flex h-2 w-full rounded-full overflow-hidden bg-white/10">
+                    {usageSegments.map((seg) => (
+                      <div
+                        key={seg.key}
+                        className="h-full"
+                        style={{ width: `${(seg.tokens / contextLimit) * 100}%`, backgroundColor: seg.color }}
+                      />
+                    ))}
+                  </div>
+                  <div className="flex items-center justify-between text-xs text-gray-400 px-0.5">
+                    {usageSegments.map((seg) => (
+                      <span key={seg.key} className="flex items-center gap-1.5">
+                        <span className="w-1.5 h-1.5 rounded-full" style={{ backgroundColor: seg.color }} />
+                        {seg.label} {Math.round((seg.tokens / contextLimit) * 100)}%
+                      </span>
+                    ))}
+                  </div>
                 </div>
 
                 {/* Thinking Level */}
                 <div className="flex flex-col gap-1.5">
-                  <div className="flex justify-between items-center text-xs">
+                  <div className="flex justify-between items-center text-sm">
                     <span className="text-gray-300 font-medium">Thinking Level</span>
-                    <span className="text-gray-400 font-mono text-[11px] capitalize">{modelSettings.thinkingLevel}</span>
+                    <span className="text-gray-400 font-mono text-xs capitalize">{modelSettings.thinkingLevel}</span>
                   </div>
                   <div className="grid grid-cols-4 gap-1 p-1 bg-black/30 rounded-xl border border-white/5">
                     {(['off', 'low', 'medium', 'high'] as const).map(level => (
@@ -891,7 +911,7 @@ const ChatInput: React.FC<ChatInputProps> = ({ onSend, onStop, disabled, editing
                         key={level}
                         type="button"
                         onClick={() => updateSettings({ thinkingLevel: level })}
-                        className={`py-1 text-xs rounded-lg capitalize transition-colors ${
+                        className={`py-1.5 text-sm rounded-lg capitalize transition-colors ${
                           modelSettings.thinkingLevel === level
                             ? 'bg-white/20 text-white font-medium shadow-sm'
                             : 'text-gray-400 hover:text-gray-200'
@@ -905,9 +925,9 @@ const ChatInput: React.FC<ChatInputProps> = ({ onSend, onStop, disabled, editing
 
                 {/* Thinking Timeout */}
                 <div className="flex flex-col gap-1.5">
-                  <div className="flex justify-between items-center text-xs">
+                  <div className="flex justify-between items-center text-sm">
                     <span className="text-gray-300 font-medium">Thinking Timeout</span>
-                    <span className="text-gray-400 font-mono text-[11px]">
+                    <span className="text-gray-400 font-mono text-xs">
                       {modelSettings.thinkingTimeout === 0 ? 'No timeout' : `${modelSettings.thinkingTimeout}s`}
                     </span>
                   </div>
@@ -918,15 +938,16 @@ const ChatInput: React.FC<ChatInputProps> = ({ onSend, onStop, disabled, editing
                     step={10}
                     value={modelSettings.thinkingTimeout}
                     onChange={(e) => updateSettings({ thinkingTimeout: Number(e.target.value) })}
-                    className="w-full accent-blue-500 bg-white/10 h-1.5 rounded-lg cursor-pointer"
+                    className="neutral-slider w-full cursor-pointer"
+                    style={{ '--fill': `${(modelSettings.thinkingTimeout / 300) * 100}%` } as React.CSSProperties}
                   />
                 </div>
 
                 {/* Model Temperature */}
                 <div className="flex flex-col gap-1.5">
-                  <div className="flex justify-between items-center text-xs">
+                  <div className="flex justify-between items-center text-sm">
                     <span className="text-gray-300 font-medium">Model Temperature</span>
-                    <span className="text-gray-400 font-mono text-[11px]">{modelSettings.temperature.toFixed(2)}</span>
+                    <span className="text-gray-400 font-mono text-xs">{modelSettings.temperature.toFixed(2)}</span>
                   </div>
                   <input
                     type="range"
@@ -935,15 +956,16 @@ const ChatInput: React.FC<ChatInputProps> = ({ onSend, onStop, disabled, editing
                     step={0.05}
                     value={modelSettings.temperature}
                     onChange={(e) => updateSettings({ temperature: Number(e.target.value) })}
-                    className="w-full accent-blue-500 bg-white/10 h-1.5 rounded-lg cursor-pointer"
+                    className="neutral-slider w-full cursor-pointer"
+                    style={{ '--fill': `${(modelSettings.temperature / 2) * 100}%` } as React.CSSProperties}
                   />
                 </div>
 
                 {/* Top-P */}
                 <div className="flex flex-col gap-1.5">
-                  <div className="flex justify-between items-center text-xs">
+                  <div className="flex justify-between items-center text-sm">
                     <span className="text-gray-300 font-medium">Top-P</span>
-                    <span className="text-gray-400 font-mono text-[11px]">{modelSettings.topP.toFixed(2)}</span>
+                    <span className="text-gray-400 font-mono text-xs">{modelSettings.topP.toFixed(2)}</span>
                   </div>
                   <input
                     type="range"
@@ -952,15 +974,16 @@ const ChatInput: React.FC<ChatInputProps> = ({ onSend, onStop, disabled, editing
                     step={0.05}
                     value={modelSettings.topP}
                     onChange={(e) => updateSettings({ topP: Number(e.target.value) })}
-                    className="w-full accent-blue-500 bg-white/10 h-1.5 rounded-lg cursor-pointer"
+                    className="neutral-slider w-full cursor-pointer"
+                    style={{ '--fill': `${modelSettings.topP * 100}%` } as React.CSSProperties}
                   />
                 </div>
 
                 {/* Max Output Length */}
                 <div className="flex flex-col gap-1.5">
-                  <div className="flex justify-between items-center text-xs">
+                  <div className="flex justify-between items-center text-sm">
                     <span className="text-gray-300 font-medium">Max Output Length</span>
-                    <span className="text-gray-400 font-mono text-[11px]">
+                    <span className="text-gray-400 font-mono text-xs">
                       {modelSettings.maxOutputLength ? `${modelSettings.maxOutputLength.toLocaleString()} tokens` : 'Default'}
                     </span>
                   </div>
@@ -971,7 +994,28 @@ const ChatInput: React.FC<ChatInputProps> = ({ onSend, onStop, disabled, editing
                     step={256}
                     value={modelSettings.maxOutputLength || 4096}
                     onChange={(e) => updateSettings({ maxOutputLength: Number(e.target.value) })}
-                    className="w-full accent-blue-500 bg-white/10 h-1.5 rounded-lg cursor-pointer"
+                    className="neutral-slider w-full cursor-pointer"
+                    style={{ '--fill': `${(((modelSettings.maxOutputLength || 4096) - 256) / (32768 - 256)) * 100}%` } as React.CSSProperties}
+                  />
+                </div>
+
+                {/* Context Window */}
+                <div className="flex flex-col gap-1.5">
+                  <div className="flex justify-between items-center text-sm">
+                    <span className="text-gray-300 font-medium">Context Window</span>
+                    <span className="text-gray-400 font-mono text-xs">
+                      {modelSettings.contextWindow >= 1024 ? `${Math.round(modelSettings.contextWindow / 1024)}K` : modelSettings.contextWindow} tokens
+                    </span>
+                  </div>
+                  <input
+                    type="range"
+                    min={1024}
+                    max={131072}
+                    step={1024}
+                    value={modelSettings.contextWindow || 8192}
+                    onChange={(e) => updateSettings({ contextWindow: Number(e.target.value) })}
+                    className="neutral-slider w-full cursor-pointer"
+                    style={{ '--fill': `${(((modelSettings.contextWindow || 8192) - 1024) / (131072 - 1024)) * 100}%` } as React.CSSProperties}
                   />
                 </div>
               </div>
@@ -988,36 +1032,17 @@ const ChatInput: React.FC<ChatInputProps> = ({ onSend, onStop, disabled, editing
               className="p-2 text-gray-400 hover:text-white rounded-full hover:bg-white/10 transition-all"
               title="Model settings"
             >
-              <Settings2 size={20} className={`transition-transform duration-200 ${isSettingsOpen ? 'text-white rotate-45' : ''}`} />
+              <Settings2 size={20} className={`transition-colors ${isSettingsOpen ? 'text-white' : ''}`} />
             </button>
           </div>
-
-          {editingBlock && (
-            <div className="flex items-center gap-2.5 mr-auto px-3.5 py-2 rounded-2xl mac-element text-gray-200 font-medium text-sm transition-all border border-white/5">
-              <span className="flex items-center gap-1.5">
-                <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/><path d="m15 5 4 4"/></svg>
-                Editing
-              </span>
-              <button 
-                onClick={() => {
-                  setValue('');
-                  setAttachments([]);
-                  if (onCancelEdit) onCancelEdit();
-                }} 
-                className="text-gray-400 hover:text-white p-0.5 rounded-md hover:bg-white/10 ml-1"
-              >
-                <X size={14} />
-              </button>
-            </div>
-          )}
 
           {/* Model Selector Drop-up */}
           <div className="relative">
             {isModelMenuOpen && (
-              <div className="absolute bottom-full left-0 mb-3 w-64 mac-element rounded-[24px] p-2 z-50 flex flex-col shadow-2xl">
+              <div className="absolute bottom-full left-0 mb-3 w-64 menu-panel rounded-[24px] p-2 z-50 flex flex-col">
 
                 <div className="flex items-center justify-between px-3 pt-3 pb-2">
-                  <span className="text-xs font-semibold text-gray-500 uppercase tracking-wider">Models</span>
+                  <span className="menu-header">Models</span>
                   <button
                     onClick={loadModels}
                     disabled={isLoadingModels}
@@ -1073,7 +1098,7 @@ const ChatInput: React.FC<ChatInputProps> = ({ onSend, onStop, disabled, editing
                   {isLoadingModels ? (
                     <div className="w-4 h-4 rounded-full bg-white/20 animate-pulse" />
                   ) : (
-                    <AlertTriangle size={16} className="text-yellow-500" />
+                    <AlertTriangle size={16} className="text-gray-400" />
                   )}
                   <span className="truncate max-w-[150px]">{isLoadingModels ? 'Loading...' : 'No Models Found'}</span>
                 </>
@@ -1082,11 +1107,30 @@ const ChatInput: React.FC<ChatInputProps> = ({ onSend, onStop, disabled, editing
             </button>
           </div>
 
+          {editingBlock && (
+            <div className="flex items-center gap-2.5 mr-auto px-3.5 py-2 rounded-2xl mac-element text-gray-200 font-medium text-sm transition-all border border-white/5">
+              <span className="flex items-center gap-1.5">
+                <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/><path d="m15 5 4 4"/></svg>
+                Editing
+              </span>
+              <button
+                onClick={() => {
+                  setValue('');
+                  setAttachments([]);
+                  if (onCancelEdit) onCancelEdit();
+                }}
+                className="text-gray-400 hover:text-white p-0.5 rounded-md hover:bg-white/10 ml-1"
+              >
+                <X size={14} />
+              </button>
+            </div>
+          )}
+
         </div>
 
         {/* Scrollable Append Area */}
         {children && (
-          <div className="flex-1 overflow-hidden relative flex items-center h-[36px]">
+          <div className="flex-1 overflow-hidden relative flex items-center h-[36px] z-0">
             <div 
               ref={scrollContainerRef}
               onScroll={checkScroll}
@@ -1104,7 +1148,7 @@ const ChatInput: React.FC<ChatInputProps> = ({ onSend, onStop, disabled, editing
             </div>
             {canScrollRight && (
               <>
-                <div className="absolute right-0 top-0 bottom-0 w-8 bg-gradient-to-l from-[#212121] to-transparent pointer-events-none" />
+                <div className="absolute right-0 top-0 bottom-0 w-8 bg-gradient-to-l from-surface to-transparent pointer-events-none" />
                 <button
                   onClick={scrollToRight}
                   className="absolute right-0 top-1/2 -translate-y-1/2 bg-white/10 hover:bg-white/20 text-white p-1 rounded-full shadow-md z-10 transition-colors"

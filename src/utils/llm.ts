@@ -47,6 +47,7 @@ export interface ModelSettings {
   temperature: number;
   topP: number;
   maxOutputLength: number;
+  contextWindow: number;
 }
 
 export const DEFAULT_MODEL_SETTINGS: ModelSettings = {
@@ -55,6 +56,7 @@ export const DEFAULT_MODEL_SETTINGS: ModelSettings = {
   temperature: 0.7,
   topP: 0.95,
   maxOutputLength: 4096,
+  contextWindow: 8192,
 };
 
 export const getModelSettings = (): ModelSettings => {
