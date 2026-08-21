@@ -1061,12 +1061,17 @@ const ChatInput: React.FC<ChatInputProps> = ({ onSend, onStop, disabled, editing
                       model={model}
                       isSelected={selectedModel?.id === model.id}
                       onClick={() => {
-                        if (selectedModel && selectedModel.id !== model.id) {
-                          flushModel(selectedModel);
-                        }
+                        const isSwitching = !!selectedModel && selectedModel.id !== model.id;
                         setSelectedModel(model);
                         setIsModelMenuOpen(false);
-                        primeModel(model);
+                        // While a generation is running, skip memory management:
+                        // flushing would unload the model mid-generation.
+                        if (!disabled) {
+                          if (isSwitching && selectedModel) {
+                            flushModel(selectedModel);
+                          }
+                          primeModel(model);
+                        }
                       }}
                     />
                   ))
@@ -1078,13 +1083,10 @@ const ChatInput: React.FC<ChatInputProps> = ({ onSend, onStop, disabled, editing
 
             <button
               onClick={() => {
-                if (!disabled) {
-                  setIsModelMenuOpen(!isModelMenuOpen);
-                  setIsAttachMenuOpen(false);
-                  setIsSettingsOpen(false);
-                }
+                setIsModelMenuOpen(!isModelMenuOpen);
+                setIsAttachMenuOpen(false);
+                setIsSettingsOpen(false);
               }}
-              disabled={disabled}
               className="flex items-center gap-2.5 px-3.5 py-2 rounded-2xl mac-element mac-element-hover text-gray-200 font-medium text-sm transition-all"
             >
               {selectedModel ? (

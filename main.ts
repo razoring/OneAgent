@@ -463,7 +463,8 @@ ipcMain.handle('get-file-thumbnail', async (event, filePath) => {
 });
 
 import { exec } from 'child_process';
-const { keyboard, mouse, Point } = require('@nut-tree-fork/nut-js');
+import nutJs from '@nut-tree-fork/nut-js';
+const { keyboard, mouse, Point } = nutJs;
 
 // --- AGENT DESKTOP TOOLS IPC HANDLERS ---
 ipcMain.handle('take-screenshot', async () => {
