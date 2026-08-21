@@ -8,6 +8,8 @@
   --accent-rgb: 29 185 84;
   --accent-hover-rgb: 30 215 96;
   --accent-bright-rgb: 30 215 96;
+  /* Secondary/muted text colour used across the app */
+  --text-secondary-rgb: 127 135 146;
 }
 
 @layer utilities {
@@ -62,7 +64,7 @@
     font-size: 0.75rem;
     line-height: 1rem;
     font-weight: 600;
-    color: #6b7280;
+    color: rgb(var(--text-secondary-rgb));
     text-transform: uppercase;
     letter-spacing: 0.05em;
   }

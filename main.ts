@@ -84,6 +84,23 @@ ipcMain.handle('fetch-models', async (event, config) => {
   }
 });
 
+// Unload a model from provider memory (Ollama native API).
+ipcMain.handle('flush-model', async (event, config) => {
+  try {
+    const { baseUrl, model } = config;
+    const url = baseUrl.endsWith('/') ? `${baseUrl}api/generate` : `${baseUrl}/api/generate`;
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model, keep_alive: 0 }),
+    });
+    await response.text();
+    return { success: true };
+  } catch (error: any) {
+    return { success: false, error: error.message };
+  }
+});
+
 // Some providers reject unknown reasoning params (or don't support thinking on a given model).
 // Retry once without them when the 400 error mentions reasoning/thinking.
 const stripReasoningParams = (payload: any): any => {

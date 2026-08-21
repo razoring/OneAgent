@@ -23,7 +23,7 @@ const BrowserShell = () => {
       {/* Browser Content Area Placeholder */}
       <div className="flex-1 relative bg-white flex items-center justify-center overflow-hidden">
         {/* Placeholder image of a website or a loading state */}
-        <div className="absolute inset-0 bg-gray-100 flex flex-col items-center justify-center text-gray-400">
+        <div className="absolute inset-0 bg-gray-100 flex flex-col items-center justify-center text-textSecondary">
           <div className="h-12 w-12 border-4 border-gray-300 border-t-accent rounded-full animate-spin mb-4"></div>
           <p className="font-medium text-sm">Loading webview...</p>
         </div>

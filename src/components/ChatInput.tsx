@@ -16,7 +16,7 @@ const PROVIDER_ICONS: Record<string, string> = {
   anthropic: 'https://www.anthropic.com/favicon.ico'
 };
 
-import { LLMModel, fetchModels, ModelSettings, getModelSettings, saveModelSettings } from '../utils/llm';
+import { LLMModel, fetchModels, ModelSettings, getModelSettings, saveModelSettings, primeModel, flushModel } from '../utils/llm';
 import DEFAULT_SYSTEM_PROMPT from '../utils/systemPrompt.md?raw';
 
 const ModelItem = ({ model, isSelected, onClick }: { model: any, isSelected: boolean, onClick: () => void }) => (
@@ -24,7 +24,7 @@ const ModelItem = ({ model, isSelected, onClick }: { model: any, isSelected: boo
     onClick={onClick}
     className={`menu-item ${isSelected
         ? 'bg-white/10 text-white font-medium'
-        : 'text-gray-300 hover:bg-white/5 hover:text-white'
+        : 'text-textSecondary hover:bg-white/5 hover:text-white'
       }`}
   >
     <img
@@ -663,17 +663,17 @@ const ChatInput: React.FC<ChatInputProps> = ({ onSend, onStop, disabled, editing
 
   const getFileIcon = (type: string) => {
     switch (type) {
-      case 'image': return <ImageIcon size={24} className="text-gray-400" />;
-      case 'folder': return <Folder size={24} className="text-gray-400" />;
-      default: return <FileText size={24} className="text-gray-400" />;
+      case 'image': return <ImageIcon size={24} className="text-textSecondary" />;
+      case 'folder': return <Folder size={24} className="text-textSecondary" />;
+      default: return <FileText size={24} className="text-textSecondary" />;
     }
   };
 
   const getFileIconSmall = (type: string) => {
     switch (type) {
-      case 'image': return <ImageIcon size={14} className="text-gray-400" />;
-      case 'folder': return <Folder size={14} className="text-gray-400" />;
-      default: return <FileText size={14} className="text-gray-400" />;
+      case 'image': return <ImageIcon size={14} className="text-textSecondary" />;
+      case 'folder': return <Folder size={14} className="text-textSecondary" />;
+      default: return <FileText size={14} className="text-textSecondary" />;
     }
   };
 
@@ -690,19 +690,19 @@ const ChatInput: React.FC<ChatInputProps> = ({ onSend, onStop, disabled, editing
         <div className="fixed inset-0 z-[200] bg-black/60 flex items-center justify-center p-4 backdrop-blur-sm" onClick={() => setAttachmentToRemove(null)}>
           <div className="mac-element rounded-2xl p-6 max-w-sm w-full flex flex-col gap-4 shadow-2xl border border-white/10" onClick={e => e.stopPropagation()}>
             <h3 className="text-white font-medium text-lg">Remove Attachment?</h3>
-            <p className="text-gray-300 text-sm">
+            <p className="text-textSecondary text-sm">
               This attachment is currently referenced in your message. Removing it will also remove all mentions. Are you sure?
             </p>
             <div className="flex justify-end gap-3 mt-2">
               <button
                 onClick={() => setAttachmentToRemove(null)}
-                className="px-4 py-2 rounded-xl text-sm font-medium text-gray-300 hover:bg-white/10 transition-colors"
+                className="px-4 py-2 rounded-xl text-sm font-medium text-textSecondary hover:bg-white/10 transition-colors"
               >
                 Cancel (Esc)
               </button>
               <button
                 onClick={() => confirmRemoveAttachment(attachmentToRemove)}
-                className="px-4 py-2 rounded-xl text-sm font-medium bg-white/10 text-gray-300 hover:bg-white/20 hover:text-white transition-colors"
+                className="px-4 py-2 rounded-xl text-sm font-medium bg-white/10 text-textSecondary hover:bg-white/20 hover:text-white transition-colors"
               >
                 Remove (Enter)
               </button>
@@ -717,7 +717,7 @@ const ChatInput: React.FC<ChatInputProps> = ({ onSend, onStop, disabled, editing
           <div className="w-full h-full border-2 border-dashed border-accentBright/50 rounded-[20px] bg-accent/10 flex flex-col items-center justify-center p-4">
             <div className="flex flex-col items-center gap-1 w-full px-2">
               <div className="text-white font-medium text-lg text-center w-full">Drop anything here</div>
-              <div className="text-gray-400 text-xs text-center w-full break-words">
+              <div className="text-textSecondary text-xs text-center w-full break-words">
                 Images, Documents, Spreadsheets, Presentations, Folders
               </div>
             </div>
@@ -763,7 +763,7 @@ const ChatInput: React.FC<ChatInputProps> = ({ onSend, onStop, disabled, editing
                     <X size={20} />
                   </button>
                 </div>
-                <span className="text-[10px] text-gray-400 truncate w-full text-center">{att.display}</span>
+                <span className="text-[10px] text-textSecondary truncate w-full text-center">{att.display}</span>
               </div>
             ))}
           </div>
@@ -775,12 +775,12 @@ const ChatInput: React.FC<ChatInputProps> = ({ onSend, onStop, disabled, editing
       {isMentionMenuOpen && filteredAttachments.length > 0 && (
         <div className="absolute bottom-full left-0 w-full z-50 mb-3">
           <div className="mac-element rounded-[24px] p-2 flex flex-col shadow-2xl max-h-[200px] overflow-y-auto">
-            <div className="text-xs font-semibold text-gray-500 px-3 pt-2 pb-2 uppercase tracking-wider">Mentions</div>
+            <div className="text-xs font-semibold text-textSecondary px-3 pt-2 pb-2 uppercase tracking-wider">Mentions</div>
             {filteredAttachments.map((att, i) => (
               <button
                 key={att.id}
                 onClick={() => insertMention(att)}
-                className={`flex items-center gap-3 w-full text-left px-3 py-2.5 rounded-2xl text-sm transition-colors ${i === focusedMentionIndex ? 'bg-white/10 text-white' : 'text-gray-300 hover:bg-white/10 hover:text-white'
+                className={`flex items-center gap-3 w-full text-left px-3 py-2.5 rounded-2xl text-sm transition-colors ${i === focusedMentionIndex ? 'bg-white/10 text-white' : 'text-textSecondary hover:bg-white/10 hover:text-white'
                   }`}
               >
                 {att.thumbnail ? (
@@ -847,7 +847,7 @@ const ChatInput: React.FC<ChatInputProps> = ({ onSend, onStop, disabled, editing
             {isAttachMenuOpen && (
               <div className="absolute bottom-full left-0 mb-3 w-40 menu-panel rounded-[24px] p-2 z-50 flex flex-col">
                 <button onClick={handleAttachClick} className="menu-item">
-                  <FileText size={18} className="text-gray-400" />
+                  <FileText size={18} className="text-textSecondary" />
                   Attach Files
                 </button>
               </div>
@@ -858,7 +858,7 @@ const ChatInput: React.FC<ChatInputProps> = ({ onSend, onStop, disabled, editing
                 setIsSettingsOpen(false);
                 setIsModelMenuOpen(false);
               }}
-              className="p-2 text-gray-400 hover:text-white rounded-full hover:bg-white/10 transition-all"
+              className="p-2 text-textSecondary hover:text-white rounded-full hover:bg-white/10 transition-all"
               title="Attach file"
             >
               <Plus size={20} className={`transition-transform duration-200 ${isAttachMenuOpen ? 'rotate-45' : ''}`} />
@@ -868,7 +868,7 @@ const ChatInput: React.FC<ChatInputProps> = ({ onSend, onStop, disabled, editing
           {/* Settings-2 Model Adjustments Drop-up */}
           <div className="relative">
             {isSettingsOpen && (
-              <div className="absolute bottom-full left-0 mb-3 w-80 menu-panel rounded-[24px] p-4 z-50 flex flex-col gap-3.5 text-gray-200">
+              <div className="absolute bottom-full left-0 mb-3 w-80 menu-panel rounded-[24px] p-4 z-50 flex flex-col gap-3.5 text-textSecondary">
                 {/* Header + Context Usage Chart */}
                 <div className="flex flex-col gap-2">
                   <span className="menu-header">Model Parameters</span>
@@ -876,7 +876,7 @@ const ChatInput: React.FC<ChatInputProps> = ({ onSend, onStop, disabled, editing
                     <span className="text-sm font-semibold text-white font-mono">
                       {estimatedTokens?.total.toLocaleString() || '0'}
                     </span>
-                    <span className="text-xs text-gray-500 font-mono">
+                    <span className="text-xs text-textSecondary font-mono">
                       of {contextLimit.toLocaleString()} tokens
                     </span>
                   </div>
@@ -889,7 +889,7 @@ const ChatInput: React.FC<ChatInputProps> = ({ onSend, onStop, disabled, editing
                       />
                     ))}
                   </div>
-                  <div className="flex items-center justify-between text-xs text-gray-400 px-0.5">
+                  <div className="flex items-center justify-between text-xs text-textSecondary px-0.5">
                     {usageSegments.map((seg) => (
                       <span key={seg.key} className="flex items-center gap-1.5">
                         <span className="w-1.5 h-1.5 rounded-full" style={{ backgroundColor: seg.color }} />
@@ -902,8 +902,8 @@ const ChatInput: React.FC<ChatInputProps> = ({ onSend, onStop, disabled, editing
                 {/* Thinking Level */}
                 <div className="flex flex-col gap-1.5">
                   <div className="flex justify-between items-center text-sm">
-                    <span className="text-gray-300 font-medium">Thinking Level</span>
-                    <span className="text-gray-400 font-mono text-xs capitalize">{modelSettings.thinkingLevel}</span>
+                    <span className="text-textSecondary font-medium">Thinking Level</span>
+                    <span className="text-textSecondary font-mono text-xs capitalize">{modelSettings.thinkingLevel}</span>
                   </div>
                   <div className="grid grid-cols-4 gap-1 p-1 bg-black/30 rounded-xl border border-white/5">
                     {(['off', 'low', 'medium', 'high'] as const).map(level => (
@@ -914,7 +914,7 @@ const ChatInput: React.FC<ChatInputProps> = ({ onSend, onStop, disabled, editing
                         className={`py-1.5 text-sm rounded-lg capitalize transition-colors ${
                           modelSettings.thinkingLevel === level
                             ? 'bg-white/20 text-white font-medium shadow-sm'
-                            : 'text-gray-400 hover:text-gray-200'
+                            : 'text-textSecondary hover:text-gray-200'
                         }`}
                       >
                         {level}
@@ -926,8 +926,8 @@ const ChatInput: React.FC<ChatInputProps> = ({ onSend, onStop, disabled, editing
                 {/* Thinking Timeout */}
                 <div className="flex flex-col gap-1.5">
                   <div className="flex justify-between items-center text-sm">
-                    <span className="text-gray-300 font-medium">Thinking Timeout</span>
-                    <span className="text-gray-400 font-mono text-xs">
+                    <span className="text-textSecondary font-medium">Thinking Timeout</span>
+                    <span className="text-textSecondary font-mono text-xs">
                       {modelSettings.thinkingTimeout === 0 ? 'No timeout' : `${modelSettings.thinkingTimeout}s`}
                     </span>
                   </div>
@@ -946,8 +946,8 @@ const ChatInput: React.FC<ChatInputProps> = ({ onSend, onStop, disabled, editing
                 {/* Model Temperature */}
                 <div className="flex flex-col gap-1.5">
                   <div className="flex justify-between items-center text-sm">
-                    <span className="text-gray-300 font-medium">Model Temperature</span>
-                    <span className="text-gray-400 font-mono text-xs">{modelSettings.temperature.toFixed(2)}</span>
+                    <span className="text-textSecondary font-medium">Model Temperature</span>
+                    <span className="text-textSecondary font-mono text-xs">{modelSettings.temperature.toFixed(2)}</span>
                   </div>
                   <input
                     type="range"
@@ -964,8 +964,8 @@ const ChatInput: React.FC<ChatInputProps> = ({ onSend, onStop, disabled, editing
                 {/* Top-P */}
                 <div className="flex flex-col gap-1.5">
                   <div className="flex justify-between items-center text-sm">
-                    <span className="text-gray-300 font-medium">Top-P</span>
-                    <span className="text-gray-400 font-mono text-xs">{modelSettings.topP.toFixed(2)}</span>
+                    <span className="text-textSecondary font-medium">Top-P</span>
+                    <span className="text-textSecondary font-mono text-xs">{modelSettings.topP.toFixed(2)}</span>
                   </div>
                   <input
                     type="range"
@@ -982,8 +982,8 @@ const ChatInput: React.FC<ChatInputProps> = ({ onSend, onStop, disabled, editing
                 {/* Max Output Length */}
                 <div className="flex flex-col gap-1.5">
                   <div className="flex justify-between items-center text-sm">
-                    <span className="text-gray-300 font-medium">Max Output Length</span>
-                    <span className="text-gray-400 font-mono text-xs">
+                    <span className="text-textSecondary font-medium">Max Output Length</span>
+                    <span className="text-textSecondary font-mono text-xs">
                       {modelSettings.maxOutputLength ? `${modelSettings.maxOutputLength.toLocaleString()} tokens` : 'Default'}
                     </span>
                   </div>
@@ -1002,8 +1002,8 @@ const ChatInput: React.FC<ChatInputProps> = ({ onSend, onStop, disabled, editing
                 {/* Context Window */}
                 <div className="flex flex-col gap-1.5">
                   <div className="flex justify-between items-center text-sm">
-                    <span className="text-gray-300 font-medium">Context Window</span>
-                    <span className="text-gray-400 font-mono text-xs">
+                    <span className="text-textSecondary font-medium">Context Window</span>
+                    <span className="text-textSecondary font-mono text-xs">
                       {contextLimit >= 1024 ? `${Math.round(contextLimit / 1024)}K` : contextLimit} tokens
                     </span>
                   </div>
@@ -1029,7 +1029,7 @@ const ChatInput: React.FC<ChatInputProps> = ({ onSend, onStop, disabled, editing
                   setIsModelMenuOpen(false);
                 }
               }}
-              className="p-2 text-gray-400 hover:text-white rounded-full hover:bg-white/10 transition-all"
+              className="p-2 text-textSecondary hover:text-white rounded-full hover:bg-white/10 transition-all"
               title="Model settings"
             >
               <Settings2 size={20} className={`transition-colors ${isSettingsOpen ? 'text-white' : ''}`} />
@@ -1046,28 +1046,32 @@ const ChatInput: React.FC<ChatInputProps> = ({ onSend, onStop, disabled, editing
                   <button
                     onClick={loadModels}
                     disabled={isLoadingModels}
-                    className="p-1 text-gray-500 hover:text-white rounded-md hover:bg-white/10 transition-colors disabled:opacity-50"
+                    className="p-1 text-textSecondary hover:text-white rounded-md hover:bg-white/10 transition-colors disabled:opacity-50"
                     title="Refresh models"
                   >
                     <RefreshCw size={12} className={isLoadingModels ? 'animate-spin' : ''} />
                   </button>
                 </div>
                 {isLoadingModels ? (
-                  <div className="px-3 py-2 text-sm text-gray-400">Loading...</div>
+                  <div className="px-3 py-2 text-sm text-textSecondary">Loading...</div>
                 ) : allModels.length > 0 ? (
                   allModels.map((model) => (
                     <ModelItem
                       key={`all-${model.id}`}
                       model={model}
                       isSelected={selectedModel?.id === model.id}
-                      onClick={() => { 
-                        setSelectedModel(model); 
-                        setIsModelMenuOpen(false); 
+                      onClick={() => {
+                        if (selectedModel && selectedModel.id !== model.id) {
+                          flushModel(selectedModel);
+                        }
+                        setSelectedModel(model);
+                        setIsModelMenuOpen(false);
+                        primeModel(model);
                       }}
                     />
                   ))
                 ) : (
-                  <div className="px-3 py-2 text-sm text-gray-400">No models found</div>
+                  <div className="px-3 py-2 text-sm text-textSecondary">No models found</div>
                 )}
               </div>
             )}
@@ -1098,7 +1102,7 @@ const ChatInput: React.FC<ChatInputProps> = ({ onSend, onStop, disabled, editing
                   {isLoadingModels ? (
                     <div className="w-4 h-4 rounded-full bg-white/20 animate-pulse" />
                   ) : (
-                    <AlertTriangle size={16} className="text-gray-400" />
+                    <AlertTriangle size={16} className="text-textSecondary" />
                   )}
                   <span className="truncate max-w-[150px]">{isLoadingModels ? 'Loading...' : 'No Models Found'}</span>
                 </>
@@ -1119,7 +1123,7 @@ const ChatInput: React.FC<ChatInputProps> = ({ onSend, onStop, disabled, editing
                   setAttachments([]);
                   if (onCancelEdit) onCancelEdit();
                 }}
-                className="text-gray-400 hover:text-white p-0.5 rounded-md hover:bg-white/10 ml-1"
+                className="text-textSecondary hover:text-white p-0.5 rounded-md hover:bg-white/10 ml-1"
               >
                 <X size={14} />
               </button>

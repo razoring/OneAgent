@@ -79,6 +79,39 @@ export const saveModelSettings = (settings: ModelSettings) => {
   localStorage.setItem('model_settings', JSON.stringify(settings));
 };
 
+// Warm a model into provider memory with a minimal completion to improve TTFT.
+export const primeModel = async (model: LLMModel): Promise<void> => {
+  const provider = getProviders().find(p => p.id === model.provider);
+  if (!provider) return;
+  try {
+    await (window as any).electronAPI.chatComplete({
+      endpoint: provider.endpoint,
+      apiKey: provider.apiKey,
+      payload: {
+        model: model.id,
+        messages: [{ role: 'user', content: 'Hi' }],
+        max_tokens: 1,
+        temperature: 0,
+      },
+    });
+  } catch {
+    // priming is best-effort
+  }
+};
+
+// Best-effort unload of a model from provider memory (Ollama only).
+export const flushModel = async (model: LLMModel): Promise<void> => {
+  if (model.provider !== 'ollama') return;
+  const provider = getProviders().find(p => p.id === 'ollama');
+  if (!provider) return;
+  const baseUrl = provider.endpoint.replace(/\/v1\/?$/, '');
+  try {
+    await (window as any).electronAPI.flushModel({ baseUrl, model: model.id });
+  } catch {
+    // flushing is best-effort
+  }
+};
+
 // Provider-specific reasoning/thinking parameters.
 // 'off' must send an explicit disable signal — several providers (e.g. Ollama)
 // enable thinking by default when no reasoning parameter is present.

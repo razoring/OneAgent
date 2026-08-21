@@ -15,7 +15,7 @@ module.exports = {
         accentHover: 'rgb(var(--accent-hover-rgb) / <alpha-value>)',
         accentBright: 'rgb(var(--accent-bright-rgb) / <alpha-value>)',
         textPrimary: '#ffffff',
-        textSecondary: '#b3b3b3',
+        textSecondary: 'rgb(var(--text-secondary-rgb) / <alpha-value>)',
       },
       fontFamily: {
         sans: ['Inter', 'system-ui', 'sans-serif'],

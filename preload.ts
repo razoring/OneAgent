@@ -7,6 +7,7 @@ const { ipcRenderer, webUtils } = require('electron');
   fetchModels: (config: any) => ipcRenderer.invoke('fetch-models', config),
   chatComplete: (config: any) => ipcRenderer.invoke('chat-complete', config),
   chatStream: (config: any) => ipcRenderer.invoke('chat-stream', config),
+  flushModel: (config: any) => ipcRenderer.invoke('flush-model', config),
   abortChatStream: (streamId: string) => ipcRenderer.send('chat-stream-abort', streamId),
   onStreamDelta: (callback: (data: any) => void) => {
     const handler = (_event: any, data: any) => callback(data);

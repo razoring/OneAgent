@@ -1,7 +1,4 @@
 hotmodel swapping with tab
 auto load model when swapped with estimated TTFT label
-LLM parameters like temp, top-p
-show thinking duration
-change finished thinking icon
 chat history
 mcp servers

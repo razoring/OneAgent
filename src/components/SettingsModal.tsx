@@ -34,7 +34,7 @@ const SettingsModal: React.FC<SettingsModalProps> = ({ onClose }) => {
             <Settings2 size={22} className="text-accentBright" />
             <h2 className="text-xl font-medium">Settings</h2>
           </div>
-          <button onClick={onClose} className="p-2 hover:bg-white/10 rounded-full transition-colors text-gray-400 hover:text-white">
+          <button onClick={onClose} className="p-2 hover:bg-white/10 rounded-full transition-colors text-textSecondary hover:text-white">
             <X size={20} />
           </button>
         </div>
@@ -46,7 +46,7 @@ const SettingsModal: React.FC<SettingsModalProps> = ({ onClose }) => {
             <h3 className="text-white font-medium mb-4 flex items-center gap-2">
               LLM Providers
             </h3>
-            <p className="text-sm text-gray-400 mb-6">
+            <p className="text-sm text-textSecondary mb-6">
               Configure endpoints and API keys for OpenAI-compatible APIs. 
               Local endpoints (Ollama, LM Studio) do not require API keys.
             </p>
@@ -107,7 +107,7 @@ const SettingsModal: React.FC<SettingsModalProps> = ({ onClose }) => {
         <div className="p-5 border-t border-white/10 bg-black/20 flex justify-end gap-3 rounded-b-2xl">
           <button 
             onClick={onClose}
-            className="px-5 py-2 rounded-xl text-sm font-medium text-gray-300 hover:bg-white/10 transition-colors"
+            className="px-5 py-2 rounded-xl text-sm font-medium text-textSecondary hover:bg-white/10 transition-colors"
           >
             Cancel
           </button>

@@ -23,12 +23,12 @@ const MarkdownComponents: any = {
   li: ({node, ...props}: any) => <li className="leading-relaxed" {...props} />,
   a: ({node, ...props}: any) => <a className="text-accentBright hover:underline" target="_blank" rel="noopener noreferrer" {...props} />,
   strong: ({node, ...props}: any) => <strong className="font-bold text-gray-100" {...props} />,
-  blockquote: ({node, ...props}: any) => <blockquote className="border-l-4 border-gray-500 pl-4 py-1 italic text-gray-400 my-4" {...props} />,
+  blockquote: ({node, ...props}: any) => <blockquote className="border-l-4 border-gray-500 pl-4 py-1 italic text-textSecondary my-4" {...props} />,
   code: ({node, inline, className, children, ...props}: any) => {
     const match = /language-(\w+)/.exec(className || '');
     return !inline && match ? (
       <div className="rounded-lg overflow-hidden my-4 border border-white/10 bg-overlay">
-        <div className="bg-black/40 px-4 py-1 text-xs text-gray-400 flex items-center justify-between border-b border-white/10">
+        <div className="bg-black/40 px-4 py-1 text-xs text-textSecondary flex items-center justify-between border-b border-white/10">
           <span>{match[1]}</span>
         </div>
         <SyntaxHighlighter
@@ -41,7 +41,7 @@ const MarkdownComponents: any = {
         />
       </div>
     ) : (
-      <code {...props} className="bg-white/10 px-1.5 py-0.5 rounded text-sm font-mono text-gray-200">
+      <code {...props} className="bg-white/10 px-1.5 py-0.5 rounded text-sm font-mono text-textSecondary">
         {children}
       </code>
     );
@@ -66,22 +66,24 @@ export interface ChatMessage {
 
 const BlockToolbar = ({ onEdit, onRegenerate, onDelete }: { onEdit?: () => void, onRegenerate?: () => void, onDelete?: () => void }) => {
   return (
-    <div className="absolute top-2 right-2 flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity mac-element p-1 rounded-full border border-white/5 z-10 shadow-sm">
-      {onEdit && (
-        <button onClick={onEdit} className="p-1.5 text-gray-400 hover:text-gray-200 hover:bg-white/10 rounded-full transition-colors" title="Edit">
-          <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/><path d="m15 5 4 4"/></svg>
-        </button>
-      )}
-      {onRegenerate && (
-        <button onClick={onRegenerate} className="p-1.5 text-gray-400 hover:text-gray-200 hover:bg-white/10 rounded-full transition-colors" title="Regenerate">
-          <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/></svg>
-        </button>
-      )}
-      {onDelete && (
-        <button onClick={onDelete} className="p-1.5 text-gray-400 hover:text-gray-200 hover:bg-white/10 rounded-full transition-colors" title="Delete">
-          <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M3 6h18"/><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/><line x1="10" x2="10" y1="11" y2="17"/><line x1="14" x2="14" y1="11" y2="17"/></svg>
-        </button>
-      )}
+    <div className="absolute -top-[38px] right-0 pb-1.5 opacity-0 pointer-events-none group-hover:opacity-100 group-hover:pointer-events-auto transition-opacity z-20">
+      <div className="flex items-center gap-1 mac-element p-1 rounded-full border border-white/5 shadow-sm">
+        {onEdit && (
+          <button onClick={onEdit} className="p-1.5 text-textSecondary hover:text-gray-200 hover:bg-white/10 rounded-full transition-colors" title="Edit">
+            <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/><path d="m15 5 4 4"/></svg>
+          </button>
+        )}
+        {onRegenerate && (
+          <button onClick={onRegenerate} className="p-1.5 text-textSecondary hover:text-gray-200 hover:bg-white/10 rounded-full transition-colors" title="Regenerate">
+            <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/></svg>
+          </button>
+        )}
+        {onDelete && (
+          <button onClick={onDelete} className="p-1.5 text-textSecondary hover:text-gray-200 hover:bg-white/10 rounded-full transition-colors" title="Delete">
+            <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M3 6h18"/><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/><line x1="10" x2="10" y1="11" y2="17"/><line x1="14" x2="14" y1="11" y2="17"/></svg>
+          </button>
+        )}
+      </div>
     </div>
   );
 };
@@ -99,8 +101,14 @@ const ChatArea = () => {
   
   // Selection state
   const [selectionContext, setSelectionContext] = useState<{ text: string, x: number, y: number, msgId: string, msgType: 'user' | 'thinking' | 'response' } | null>(null);
-  const [commentInputContext, setCommentInputContext] = useState<{ text: string, msgId: string, msgType: 'user' | 'thinking' | 'response', commentId?: string } | null>(null);
+  const [commentInputContext, setCommentInputContext] = useState<{ text: string, msgId: string, msgType: 'user' | 'thinking' | 'response' } | null>(null);
   const [commentInputValue, setCommentInputValue] = useState('');
+  const [activeComment, setActiveComment] = useState<{ commentId: string, msgId: string, msgType: 'user' | 'thinking' | 'response', quote: string, x: number, y: number } | null>(null);
+  const [isCommentPinned, setIsCommentPinned] = useState(false);
+  const [commentDraft, setCommentDraft] = useState('');
+  const commentPopupHoverRef = useRef(false);
+  const isCommentPinnedRef = useRef(false);
+  const commentTextareaRef = useRef<HTMLTextAreaElement>(null);
   
   const autoScrollEnabled = useRef(true);
   const bottomRef = useRef<HTMLDivElement>(null);
@@ -114,6 +122,67 @@ const ChatArea = () => {
     const isNearBottom = scrollHeight - scrollTop - clientHeight <= 30;
     autoScrollEnabled.current = isNearBottom;
   };
+
+  useEffect(() => {
+    isCommentPinnedRef.current = isCommentPinned;
+    if (isCommentPinned) {
+      commentTextareaRef.current?.focus();
+    }
+  }, [isCommentPinned]);
+
+  const showCommentPopup = (el: Element, pinned: boolean) => {
+    const commentId = el.getAttribute('data-comment-id');
+    const encodedQuote = el.getAttribute('data-encoded-quote');
+    const encodedText = el.getAttribute('data-encoded-text');
+    const messageBlock = el.closest('[data-msg-id]');
+    if (!commentId || !encodedQuote || !encodedText || !messageBlock) return;
+    const msgId = messageBlock.getAttribute('data-msg-id') as string;
+    const msgType = messageBlock.getAttribute('data-msg-type') as 'user' | 'thinking' | 'response';
+    const rect = el.getBoundingClientRect();
+    const half = 152; // half of w-72 panel
+    const x = Math.min(Math.max(rect.left + rect.width / 2, half + 8), window.innerWidth - half - 8);
+    setActiveComment({
+      commentId,
+      msgId,
+      msgType,
+      quote: decodeURIComponent(atob(encodedQuote)),
+      x,
+      y: rect.top - 10,
+    });
+    setCommentDraft(decodeURIComponent(atob(encodedText)));
+    setIsCommentPinned(pinned);
+  };
+
+  // Hover preview for existing comments (same UI as clicked; click pins it)
+  useEffect(() => {
+    const handleMouseOver = (e: MouseEvent) => {
+      if (isCommentPinnedRef.current) return;
+      const mark = (e.target as HTMLElement).closest('.comment-icon-btn');
+      if (mark) showCommentPopup(mark, false);
+    };
+    const handleMouseOut = (e: MouseEvent) => {
+      if (isCommentPinnedRef.current) return;
+      const mark = (e.target as HTMLElement).closest('.comment-icon-btn');
+      if (!mark) return;
+      const commentId = mark.getAttribute('data-comment-id');
+      setTimeout(() => {
+        if (isCommentPinnedRef.current || commentPopupHoverRef.current) return;
+        if ((mark as HTMLElement).matches(':hover')) return;
+        setActiveComment(cur => (cur && cur.commentId === commentId ? null : cur));
+      }, 80);
+    };
+    const handleScrollAway = () => {
+      if (!isCommentPinnedRef.current) setActiveComment(null);
+    };
+    document.addEventListener('mouseover', handleMouseOver);
+    document.addEventListener('mouseout', handleMouseOut);
+    document.addEventListener('scroll', handleScrollAway, true);
+    return () => {
+      document.removeEventListener('mouseover', handleMouseOver);
+      document.removeEventListener('mouseout', handleMouseOut);
+      document.removeEventListener('scroll', handleScrollAway, true);
+    };
+  }, []);
 
   useEffect(() => {
     const handleMouseUp = (e: MouseEvent) => {
@@ -168,34 +237,19 @@ const ChatArea = () => {
       // If clicking inside the comment input or the add comment button, don't clear
       const target = e.target as HTMLElement;
       
-      // Handle click on comment icon
+      // Handle click on comment icon — locks in the popup
       const mark = target.closest('.comment-icon-btn');
       if (mark) {
-        const commentId = mark.getAttribute('data-comment-id');
-        const encodedQuote = mark.getAttribute('data-encoded-quote');
-        const messageBlock = mark.closest('[data-msg-id]');
-        if (commentId && encodedQuote && messageBlock) {
-          const msgId = messageBlock.getAttribute('data-msg-id') as string;
-          const msgType = messageBlock.getAttribute('data-msg-type') as 'user' | 'thinking' | 'response';
-          const quote = decodeURIComponent(atob(encodedQuote));
-          setCommentInputContext({
-            text: quote,
-            msgId,
-            msgType,
-            commentId
-          });
-          const commentObj = messages.find(m => m.id === msgId)?.comments?.find(c => c.id === commentId);
-          setCommentInputValue(commentObj?.text || '');
-        }
+        showCommentPopup(mark, true);
         return;
       }
 
       if (target.closest('.comment-popup-ui')) return;
       if (window.getSelection()?.isCollapsed) {
         setSelectionContext(null);
-        if (!target.closest('.comment-icon-btn')) {
-           setCommentInputContext(null);
-        }
+        setCommentInputContext(null);
+        setIsCommentPinned(false);
+        setActiveComment(null);
       }
     };
     
@@ -207,22 +261,6 @@ const ChatArea = () => {
       document.removeEventListener('mousedown', handleMouseDown);
     };
   }, [commentInputContext]);
-
-  // Bind global function for comment editing
-  useEffect(() => {
-    (window as any).openCommentEdit = (msgId: string, msgType: 'user' | 'thinking' | 'response', commentId: string, encodedQuote: string) => {
-      const quote = decodeURIComponent(atob(encodedQuote));
-      setCommentInputContext({
-        text: quote,
-        msgId,
-        msgType,
-        commentId
-      });
-    };
-    return () => {
-      delete (window as any).openCommentEdit;
-    };
-  }, []);
 
   // Auto-scroll when messages change or generation updates
   useEffect(() => {
@@ -242,6 +280,8 @@ const ChatArea = () => {
 
   const allAttachments = messages.flatMap(m => m.attachments || []);
 
+  const escapeHtml = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+
   const formatMentions = (text: string, msgComments?: ChatComment[]) => {
     let processedText = text;
     if (msgComments && msgComments.length > 0) {
@@ -258,7 +298,7 @@ const ChatArea = () => {
         // Actually, I didn't pass msgId or msgType to formatMentions. I should.
         // Let's just use data attributes and attach an event listener to the container, OR pass msgId and msgType to formatMentions.
         // Use a span with data attributes and we will render a tooltip using CSS or JS
-        processedText = processedText.replace(quoteRegex, `<mark class="bg-accent/20 text-white rounded relative group/comment cursor-pointer comment-icon-btn" data-comment-id="${comment.id}" data-encoded-quote="${btoa(encodeURIComponent(comment.quote))}">$1<span class="absolute -top-2 -right-2 bg-overlay rounded-full border border-accent/30 p-0.5 shadow-md flex items-center justify-center text-accentBright opacity-0 group-hover/comment:opacity-100 transition-opacity"><svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path></svg></span><span class="absolute bottom-full left-1/2 transform -translate-x-1/2 mb-2 w-max max-w-xs bg-overlay border border-white/10 shadow-xl rounded-lg p-2 text-xs text-gray-200 opacity-0 group-hover/comment:opacity-100 pointer-events-none transition-opacity z-50 whitespace-pre-wrap text-left hidden group-hover/comment:block"><b>Comment:</b><br/>${comment.text}</span></mark>`);
+        processedText = processedText.replace(quoteRegex, `<mark class="bg-accent/20 text-white rounded relative group/comment cursor-pointer comment-icon-btn" data-comment-id="${comment.id}" data-encoded-quote="${btoa(encodeURIComponent(comment.quote))}" data-encoded-text="${btoa(encodeURIComponent(comment.text))}">$1<span class="absolute -top-2 -right-2 z-20 flex"><span class="bg-accent text-white rounded-full p-1 shadow-md flex items-center justify-center hover:bg-accentHover transition-colors"><svg xmlns="http://www.w3.org/2000/svg" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path></svg></span></span></mark>`);
       });
     }
 
@@ -553,6 +593,61 @@ const ChatArea = () => {
     setEditPreview(null);
   };
 
+  const handleSaveComment = () => {
+    if (!commentInputContext || !commentInputValue.trim()) return;
+    setMessages(prev => {
+      const newMsgs = [...prev];
+      const msgIdx = newMsgs.findIndex(m => m.id === commentInputContext.msgId);
+      if (msgIdx !== -1) {
+        const msg = newMsgs[msgIdx];
+        const newComments = [...(msg.comments || [])];
+        newComments.push({
+          id: Math.random().toString(36).substring(7),
+          quote: commentInputContext.text,
+          text: commentInputValue
+        });
+        newMsgs[msgIdx] = { ...msg, comments: newComments };
+      }
+      return newMsgs;
+    });
+    setCommentInputContext(null);
+    setCommentInputValue('');
+    window.getSelection()?.removeAllRanges();
+  };
+
+  const handleSaveActiveComment = () => {
+    if (!activeComment || !commentDraft.trim()) return;
+    setMessages(prev => {
+      const newMsgs = [...prev];
+      const msgIdx = newMsgs.findIndex(m => m.id === activeComment.msgId);
+      if (msgIdx !== -1) {
+        const msg = newMsgs[msgIdx];
+        const newComments = (msg.comments || []).map(c =>
+          c.id === activeComment.commentId ? { ...c, text: commentDraft } : c
+        );
+        newMsgs[msgIdx] = { ...msg, comments: newComments };
+      }
+      return newMsgs;
+    });
+    setIsCommentPinned(false);
+    setActiveComment(null);
+  };
+
+  const handleDeleteActiveComment = () => {
+    if (!activeComment) return;
+    setMessages(prev => {
+      const newMsgs = [...prev];
+      const msgIdx = newMsgs.findIndex(m => m.id === activeComment.msgId);
+      if (msgIdx !== -1) {
+        const msg = newMsgs[msgIdx];
+        newMsgs[msgIdx] = { ...msg, comments: (msg.comments || []).filter(c => c.id !== activeComment.commentId) };
+      }
+      return newMsgs;
+    });
+    setIsCommentPinned(false);
+    setActiveComment(null);
+  };
+
   const handleDelete = (id: string, type: 'user' | 'thinking' | 'response') => {
     setMessages(prev => {
       const newMsgs = [...prev];
@@ -627,7 +722,7 @@ const ChatArea = () => {
               
               return (
               <div key={msg.id || idx} className="flex flex-col w-full text-gray-100 gap-2 mb-4">
-                <div className="font-semibold text-sm text-gray-300">
+                <div className="font-semibold text-sm text-textSecondary">
                   {msg.role === 'user' ? 'You' : 'Assistant'}
                 </div>
                 {msg.role === 'user' && (
@@ -657,7 +752,7 @@ const ChatArea = () => {
                             ) : att.thumbnail ? (
                               <img src={att.thumbnail} alt={att.display} className="w-full h-full object-contain p-1 bg-black/20" />
                             ) : (
-                              <div className="w-full h-full bg-white/5 flex items-center justify-center text-xs text-gray-400">File</div>
+                              <div className="w-full h-full bg-white/5 flex items-center justify-center text-xs text-textSecondary">File</div>
                             )}
                           </div>
                         ))}
@@ -667,7 +762,7 @@ const ChatArea = () => {
                 )}
 
                 {msg.role === 'assistant' && (
-                  <div className="w-full text-gray-300 flex flex-col gap-2">
+                  <div className="w-full text-textSecondary flex flex-col gap-2">
                     {(msg.thinking || (msg.isGenerating && !msg.content) || (isEditingThinking && editPreview?.text)) && (
                       <div data-msg-id={msg.id} data-msg-type="thinking" className={`w-full group relative ${isEditingThinking ? 'ring-2 ring-accent rounded-lg p-2 -m-2' : ''}`}>
                         {!isGenerating && !msg.isGenerating && (
@@ -726,7 +821,7 @@ const ChatArea = () => {
               setCommentInputValue('');
               setSelectionContext(null);
             }}
-            className="flex items-center justify-center mac-element text-gray-400 hover:text-gray-200 border border-white/5 shadow-xl p-2 rounded-full transition-transform hover:scale-105"
+            className="flex items-center justify-center mac-element text-textSecondary hover:text-gray-200 border border-white/5 shadow-xl p-2 rounded-full transition-transform hover:scale-105"
             title="Add Comment"
           >
             <MessageSquarePlus size={16} />
@@ -734,20 +829,18 @@ const ChatArea = () => {
         </div>
       )}
 
-      {/* Comment Input Pop-up */}
+      {/* Comment Input Pop-up (creating a new comment) */}
       {commentInputContext && (
-        <div 
+        <div
           className="fixed z-50 transform -translate-x-1/2 -translate-y-full pb-2 comment-popup-ui"
-          style={{ 
-            left: selectionContext ? selectionContext.x : window.innerWidth / 2, 
-            top: selectionContext ? selectionContext.y : window.innerHeight / 2 
+          style={{
+            left: selectionContext ? selectionContext.x : window.innerWidth / 2,
+            top: selectionContext ? selectionContext.y : window.innerHeight / 2
           }}
         >
           <div className="menu-panel rounded-xl p-3 w-72 flex flex-col gap-2">
-            <div className="menu-header">
-              {commentInputContext.commentId ? 'Edit Comment' : 'New Comment'}
-            </div>
-            <div className="text-sm italic text-gray-400 border-l-2 border-gray-600 pl-2 line-clamp-2">
+            <div className="menu-header">New Comment</div>
+            <div className="text-sm italic text-textSecondary border-l-2 border-gray-600 pl-2 line-clamp-2">
               "{commentInputContext.text}"
             </div>
             <textarea
@@ -759,65 +852,72 @@ const ChatArea = () => {
               onKeyDown={(e) => {
                 if (e.key === 'Enter' && !e.shiftKey) {
                   e.preventDefault();
-                  // Save comment
-                  setMessages(prev => {
-                    const newMsgs = [...prev];
-                    const msgIdx = newMsgs.findIndex(m => m.id === commentInputContext.msgId);
-                    if (msgIdx !== -1) {
-                      const msg = newMsgs[msgIdx];
-                      const newComments = [...(msg.comments || [])];
-                      if (commentInputContext.commentId) {
-                        const cIdx = newComments.findIndex(c => c.id === commentInputContext.commentId);
-                        if (cIdx !== -1) newComments[cIdx].text = commentInputValue;
-                      } else {
-                        newComments.push({
-                          id: Math.random().toString(36).substring(7),
-                          quote: commentInputContext.text,
-                          text: commentInputValue
-                        });
-                      }
-                      newMsgs[msgIdx] = { ...msg, comments: newComments };
-                    }
-                    return newMsgs;
-                  });
-                  setCommentInputContext(null);
-                  setCommentInputValue('');
-                  window.getSelection()?.removeAllRanges();
+                  handleSaveComment();
                 }
                 if (e.key === 'Escape') {
                   setCommentInputContext(null);
                 }
               }}
             />
+            <div className="flex justify-end items-center text-sm">
+              <button
+                onClick={handleSaveComment}
+                className="flex items-center gap-1.5 px-3.5 py-1.5 rounded-xl text-sm font-medium bg-accent text-white hover:bg-accentHover transition-colors"
+              >
+                Save
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Existing Comment Pop-up — identical UI on hover and click; clicking locks it in */}
+      {activeComment && (
+        <div
+          className="fixed z-50 transform -translate-x-1/2 -translate-y-full pb-2 comment-popup-ui"
+          style={{ left: activeComment.x, top: activeComment.y }}
+          onMouseEnter={() => { commentPopupHoverRef.current = true; }}
+          onMouseLeave={() => {
+            commentPopupHoverRef.current = false;
+            if (!isCommentPinnedRef.current) setActiveComment(null);
+          }}
+        >
+          <div className="menu-panel rounded-xl p-3 w-72 flex flex-col gap-2">
+            <div className="menu-header">Edit Comment</div>
+            <div className="text-sm italic text-textSecondary border-l-2 border-gray-600 pl-2 line-clamp-2">
+              "{activeComment.quote}"
+            </div>
+            <textarea
+              ref={commentTextareaRef}
+              readOnly={!isCommentPinned}
+              value={commentDraft}
+              onChange={(e) => setCommentDraft(e.target.value)}
+              placeholder="Write your comment..."
+              className={`input-field resize-none min-h-[60px] ${!isCommentPinned ? 'cursor-default' : ''}`}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && !e.shiftKey) {
+                  e.preventDefault();
+                  handleSaveActiveComment();
+                }
+                if (e.key === 'Escape') {
+                  setIsCommentPinned(false);
+                  setActiveComment(null);
+                }
+              }}
+            />
             <div className="flex justify-between items-center text-sm">
-              <span className="text-gray-500">Press <kbd className="bg-white/10 px-1 rounded">Enter</kbd> to save</span>
-              <div className="flex gap-2">
-                {commentInputContext.commentId && (
-                  <button 
-                    onClick={() => {
-                      setMessages(prev => {
-                        const newMsgs = [...prev];
-                        const msgIdx = newMsgs.findIndex(m => m.id === commentInputContext.msgId);
-                        if (msgIdx !== -1) {
-                          const msg = newMsgs[msgIdx];
-                          newMsgs[msgIdx] = { ...msg, comments: (msg.comments || []).filter(c => c.id !== commentInputContext.commentId) };
-                        }
-                        return newMsgs;
-                      });
-                      setCommentInputContext(null);
-                    }}
-                    className="text-gray-400 hover:text-white px-2 py-1 rounded"
-                  >
-                    Delete
-                  </button>
-                )}
-                <button 
-                  onClick={() => setCommentInputContext(null)}
-                  className="text-gray-400 hover:text-gray-300 px-2 py-1 rounded"
-                >
-                  Cancel
-                </button>
-              </div>
+              <button
+                onClick={handleDeleteActiveComment}
+                className="text-textSecondary hover:text-white px-2 py-1 rounded"
+              >
+                Delete
+              </button>
+              <button
+                onClick={handleSaveActiveComment}
+                className="flex items-center gap-1.5 px-3.5 py-1.5 rounded-xl text-sm font-medium bg-accent text-white hover:bg-accentHover transition-colors"
+              >
+                Save
+              </button>
             </div>
           </div>
         </div>
@@ -840,7 +940,7 @@ const ChatArea = () => {
             onEditPreview={(text, attachments) => setEditPreview({ text, attachments })}
             messages={messages}
           />
-          <div className="text-center text-xs text-gray-500 mt-3">
+          <div className="text-center text-xs text-textSecondary mt-3">
             AI models can make mistakes. Verify important information.
           </div>
         </div>

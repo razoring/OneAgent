@@ -1,5 +1,5 @@
-import React, { useState, useEffect } from 'react';
-import { ChevronDown, ChevronRight, Brain, Copy, Check, Loader2 } from 'lucide-react';
+import React, { useState, useEffect, useRef } from 'react';
+import { ChevronDown, ChevronRight, Copy, Check, Loader2 } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 
@@ -11,11 +11,23 @@ interface ThinkingBlockProps {
 export const ThinkingBlock: React.FC<ThinkingBlockProps> = ({ thinking, isGenerating }) => {
   const [isExpanded, setIsExpanded] = useState<boolean>(!!isGenerating);
   const [copied, setCopied] = useState(false);
+  const [elapsed, setElapsed] = useState(0);
+  const [finalDuration, setFinalDuration] = useState<number | null>(null);
+  const startRef = useRef<number | null>(null);
 
   // Auto-expand when generating starts, auto-collapse when generating finishes if not manually modified
   useEffect(() => {
     if (isGenerating) {
       setIsExpanded(true);
+      if (startRef.current === null) {
+        startRef.current = Date.now();
+      }
+      const interval = setInterval(() => {
+        setElapsed(Math.floor((Date.now() - (startRef.current ?? Date.now())) / 1000));
+      }, 500);
+      return () => clearInterval(interval);
+    } else if (startRef.current !== null) {
+      setFinalDuration(Math.max(1, Math.round((Date.now() - startRef.current) / 1000)));
     }
   }, [isGenerating]);
 
@@ -33,19 +45,16 @@ export const ThinkingBlock: React.FC<ThinkingBlockProps> = ({ thinking, isGenera
       {/* Header */}
       <div 
         onClick={() => setIsExpanded(!isExpanded)}
-        className="flex items-center justify-between px-3 py-2 cursor-pointer hover:bg-white/[0.05] transition-colors select-none text-xs text-gray-400 group"
+        className="flex items-center justify-between px-3 py-2 cursor-pointer hover:bg-white/[0.05] transition-colors select-none text-xs text-textSecondary group"
       >
         <div className="flex items-center gap-2">
-          {isGenerating ? (
-            <Loader2 className="w-3.5 h-3.5 text-accentBright animate-spin" />
-          ) : (
-            <Brain className="w-3.5 h-3.5 text-gray-400 group-hover:text-gray-300 transition-colors" />
-          )}
-          <span className="font-medium text-gray-300 group-hover:text-white transition-colors">
-            {isGenerating ? 'Thinking...' : 'Thought Process'}
-          </span>
-          <span className="text-[10px] text-gray-400 bg-white/5 px-1.5 py-0.5 rounded border border-white/5">
-            {isExpanded ? 'Hide' : 'Show'}
+          {isGenerating && <Loader2 className="w-3.5 h-3.5 text-accentBright animate-spin" />}
+          <span className="font-medium text-textSecondary group-hover:text-white transition-colors">
+            {isGenerating
+              ? `Thinking for ${elapsed}s`
+              : finalDuration !== null
+                ? `Thought for ${finalDuration}s`
+                : 'Thought Process'}
           </span>
         </div>
 
@@ -54,22 +63,22 @@ export const ThinkingBlock: React.FC<ThinkingBlockProps> = ({ thinking, isGenera
             <button
               onClick={handleCopy}
               title="Copy thinking process"
-              className="p-1 rounded hover:bg-white/10 text-gray-400 hover:text-gray-200 transition-colors"
+              className="p-1 rounded hover:bg-white/10 text-textSecondary hover:text-gray-200 transition-colors"
             >
               {copied ? <Check className="w-3 h-3 text-white" /> : <Copy className="w-3 h-3" />}
             </button>
           )}
           {isExpanded ? (
-            <ChevronDown className="w-4 h-4 text-gray-400 group-hover:text-gray-200 transition-transform" />
+            <ChevronDown className="w-4 h-4 text-textSecondary group-hover:text-gray-200 transition-transform" />
           ) : (
-            <ChevronRight className="w-4 h-4 text-gray-400 group-hover:text-gray-200 transition-transform" />
+            <ChevronRight className="w-4 h-4 text-textSecondary group-hover:text-gray-200 transition-transform" />
           )}
         </div>
       </div>
 
       {/* Collapsible Content */}
       {isExpanded && (
-        <div className="px-3.5 py-2.5 border-t border-white/5 text-xs text-gray-300 font-mono leading-relaxed max-h-[350px] overflow-y-auto whitespace-pre-wrap bg-black/20 select-text">
+        <div className="px-3.5 py-2.5 border-t border-white/5 text-xs text-textSecondary font-mono leading-relaxed max-h-[350px] overflow-y-auto whitespace-pre-wrap bg-black/20 select-text">
           <ReactMarkdown remarkPlugins={[remarkGfm]}>
             {thinking || '...'}
           </ReactMarkdown>
