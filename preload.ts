@@ -46,4 +46,8 @@ const { ipcRenderer, webUtils } = require('electron');
   runCommand: (command: string, cwd?: string) => ipcRenderer.invoke('run-command', { command, cwd }),
   grepSearch: (options: any) => ipcRenderer.invoke('grep-search', options),
   searchWeb: (query: string, limit?: number) => ipcRenderer.invoke('search-web', { query, limit }),
+  
+  takeScreenshot: () => ipcRenderer.invoke('take-screenshot'),
+  desktopClick: (x: number, y: number) => ipcRenderer.invoke('desktop-click', { x, y }),
+  desktopType: (text: string) => ipcRenderer.invoke('desktop-type', { text }),
 };

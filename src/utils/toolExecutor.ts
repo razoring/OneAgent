@@ -66,6 +66,21 @@ export const executeToolCall = async (toolCallRaw: string): Promise<{ toolName: 
         const success = await interactWithElement(args.id, args.action, args.value);
         resStr = success ? "Interaction successful" : "Interaction failed or element not found";
         break;
+      
+      // Desktop Tools
+      case 'desktop_screenshot':
+        const screenRes = await electronAPI.takeScreenshot();
+        resStr = JSON.stringify(screenRes);
+        break;
+      case 'desktop_click':
+        const clickRes = await electronAPI.desktopClick(args.x, args.y);
+        resStr = JSON.stringify(clickRes);
+        break;
+      case 'desktop_type':
+        const typeRes = await electronAPI.desktopType(args.text);
+        resStr = JSON.stringify(typeRes);
+        break;
+        
       default:
         resStr = "Unknown tool: " + toolName;
     }

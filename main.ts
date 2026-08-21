@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, nativeImage, shell } from 'electron';
+import { app, BrowserWindow, ipcMain, nativeImage, shell, desktopCapturer, screen } from 'electron';
 import * as path from 'path';
 import * as fs from 'fs';
 import * as officeParser from 'officeparser';
@@ -463,8 +463,44 @@ ipcMain.handle('get-file-thumbnail', async (event, filePath) => {
 });
 
 import { exec } from 'child_process';
+const { keyboard, mouse, Point } = require('@nut-tree-fork/nut-js');
 
 // --- AGENT DESKTOP TOOLS IPC HANDLERS ---
+ipcMain.handle('take-screenshot', async () => {
+  try {
+    const primaryDisplay = screen.getPrimaryDisplay();
+    const { width, height } = primaryDisplay.size;
+    const sources = await desktopCapturer.getSources({ 
+      types: ['screen'], 
+      thumbnailSize: { width, height } 
+    });
+    if (sources.length > 0) {
+      return { success: true, image: sources[0].thumbnail.toDataURL() };
+    }
+    return { success: false, error: 'No screen found' };
+  } catch (err: any) {
+    return { success: false, error: err.message };
+  }
+});
+
+ipcMain.handle('desktop-click', async (event, { x, y }) => {
+  try {
+    await mouse.setPosition(new Point(x, y));
+    await mouse.leftClick();
+    return { success: true };
+  } catch (err: any) {
+    return { success: false, error: err.message };
+  }
+});
+
+ipcMain.handle('desktop-type', async (event, { text }) => {
+  try {
+    await keyboard.type(text);
+    return { success: true };
+  } catch (err: any) {
+    return { success: false, error: err.message };
+  }
+});
 ipcMain.handle('view-file', async (event, filePath) => {
   try {
     const content = fs.readFileSync(filePath, 'utf-8');
