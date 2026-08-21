@@ -303,6 +303,8 @@ export interface StreamUpdate {
   content: string;
   thinking: string;
   isGenerating: boolean;
+  toolCalls?: string[];
+  isCallingTool?: boolean;
 }
 
 // Generates a streaming chat completion, feeding thinking and response deltas in real-time
@@ -332,6 +334,8 @@ export const generateChatStream = async (
       content: finalContent,
       thinking: combinedThinking,
       isGenerating: true,
+      toolCalls: parsed.toolCalls,
+      isCallingTool: parsed.isCallingTool
     });
   };
 
@@ -359,6 +363,8 @@ export const generateChatStream = async (
             content: parsed.content,
             thinking: combinedThinking,
             isGenerating: false,
+            toolCalls: parsed.toolCalls,
+            isCallingTool: parsed.isCallingTool
           });
           resolve({ content: parsed.content, thinking: combinedThinking });
         }, modelSettings.thinkingTimeout * 1000);
@@ -396,6 +402,8 @@ export const generateChatStream = async (
           content: parsed.content,
           thinking: combinedThinking,
           isGenerating: false,
+          toolCalls: parsed.toolCalls,
+          isCallingTool: parsed.isCallingTool
         });
         resolve({ content: parsed.content, thinking: combinedThinking });
       });
@@ -441,6 +449,8 @@ export const generateChatStream = async (
     content: parsed.content,
     thinking: parsed.thinking,
     isGenerating: false,
+    toolCalls: parsed.toolCalls,
+    isCallingTool: parsed.isCallingTool
   });
   return parsed;
 };

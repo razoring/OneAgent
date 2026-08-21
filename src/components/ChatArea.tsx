@@ -1,6 +1,7 @@
 import React, { useState, useRef, useEffect } from 'react';
 import ChatInput from './ChatInput';
 import ThinkingBlock from './ThinkingBlock';
+import ToolCallBlock from './ToolCallBlock';
 import { generateChatStream, LLMModel, fileToBase64, parseAttachmentDocument } from '../utils/llm';
 import DEFAULT_SYSTEM_PROMPT from '../utils/systemPrompt.md?raw';
 import ReactMarkdown from 'react-markdown';
@@ -62,6 +63,8 @@ export interface ChatMessage {
   attachments?: any[];
   isGenerating?: boolean;
   comments?: ChatComment[];
+  toolCalls?: string[];
+  isCallingTool?: boolean;
 }
 
 const BlockToolbar = ({ onEdit, onRegenerate, onDelete }: { onEdit?: () => void, onRegenerate?: () => void, onDelete?: () => void }) => {
@@ -531,7 +534,9 @@ const ChatArea = () => {
               ...newMsgs[targetIdx],
               content: update.content,
               thinking: keepThinking ? keepThinking : update.thinking,
-              isGenerating: update.isGenerating
+              isGenerating: update.isGenerating,
+              toolCalls: update.toolCalls,
+              isCallingTool: update.isCallingTool
             };
           }
           return newMsgs;
@@ -772,9 +777,28 @@ const ChatArea = () => {
                             onDelete={() => handleDelete(msg.id, 'thinking')} 
                           />
                         )}
-                        <ThinkingBlock thinking={(isEditingThinking && editPreview) ? editPreview.text : (msg.thinking || '')} isGenerating={msg.isGenerating && !msg.content} />
+                        <ThinkingBlock content={msg.thinking} isGenerating={!!msg.isGenerating && !msg.content && !msg.isCallingTool} />
                       </div>
                     )}
+                    
+                    {msg.toolCalls && msg.toolCalls.map((tc, idx) => {
+                      let parsed: any;
+                      let toolName = 'unknown_tool';
+                      let args: any = tc;
+                      try {
+                        parsed = JSON.parse(tc);
+                        if (parsed.toolName || parsed.name) toolName = parsed.toolName || parsed.name;
+                        if (parsed.arguments || parsed.args) args = parsed.arguments || parsed.args;
+                      } catch {}
+                      return (
+                        <ToolCallBlock 
+                          key={`tc-${msg.id}-${idx}`} 
+                          toolName={toolName} 
+                          args={args} 
+                          status={msg.isGenerating && idx === msg.toolCalls!.length - 1 ? 'executing' : 'completed'} 
+                        />
+                      );
+                    })}
                     
                     {(msg.content || (msg.isGenerating && !msg.thinking) || (isEditingResponse && editPreview?.text)) && (
                       <div data-msg-id={msg.id} data-msg-type="response" className={`w-full group relative ${isEditingResponse ? 'ring-2 ring-accent rounded-lg p-2 -m-2' : ''}`}>

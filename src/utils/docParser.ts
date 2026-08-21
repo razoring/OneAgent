@@ -100,29 +100,59 @@ export interface ParsedThinkingResult {
   thinking: string;
   content: string;
   isThinking: boolean;
+  toolCalls: string[];
+  isCallingTool: boolean;
 }
 
 export function extractThinkingAndContent(raw: string): ParsedThinkingResult {
-  if (!raw) return { thinking: '', content: '', isThinking: false };
+  if (!raw) return { thinking: '', content: '', isThinking: false, toolCalls: [], isCallingTool: false };
 
-  const thinkOpenIndex = raw.indexOf('<think>');
-  if (thinkOpenIndex === -1) {
-    return { thinking: '', content: raw, isThinking: false };
+  let thinking = '';
+  let content = raw;
+  let isThinking = false;
+  
+  // 1. Extract Thinking
+  const thinkOpenIndex = content.indexOf('<think>');
+  if (thinkOpenIndex !== -1) {
+    const thinkCloseIndex = content.indexOf('</think>');
+    if (thinkCloseIndex === -1) {
+      thinking = content.slice(thinkOpenIndex + 7).trim();
+      content = content.slice(0, thinkOpenIndex).trim();
+      isThinking = true;
+    } else {
+      thinking = content.slice(thinkOpenIndex + 7, thinkCloseIndex).trim();
+      const beforeThink = content.slice(0, thinkOpenIndex).trim();
+      const afterThink = content.slice(thinkCloseIndex + 8).trim();
+      content = [beforeThink, afterThink].filter(Boolean).join('\n\n');
+    }
   }
 
-  const thinkCloseIndex = raw.indexOf('</think>');
-  if (thinkCloseIndex === -1) {
-    // Currently still thinking (streaming inside <think>)
-    const thinking = raw.slice(thinkOpenIndex + 7).trim();
-    const content = raw.slice(0, thinkOpenIndex).trim();
-    return { thinking, content, isThinking: true };
+  // 2. Extract Tool Calls
+  const toolCalls: string[] = [];
+  let isCallingTool = false;
+  
+  while (true) {
+    const toolOpenIndex = content.indexOf('<tool_call>');
+    if (toolOpenIndex === -1) break;
+    
+    const toolCloseIndex = content.indexOf('</tool_call>', toolOpenIndex);
+    if (toolCloseIndex === -1) {
+      // Incomplete tool call at the end of the stream
+      isCallingTool = true;
+      const rawCall = content.slice(toolOpenIndex + 11).trim();
+      if (rawCall) toolCalls.push(rawCall);
+      content = content.slice(0, toolOpenIndex).trim();
+      break;
+    }
+    
+    // Complete tool call
+    const callStr = content.slice(toolOpenIndex + 11, toolCloseIndex).trim();
+    if (callStr) toolCalls.push(callStr);
+    
+    const beforeTool = content.slice(0, toolOpenIndex).trim();
+    const afterTool = content.slice(toolCloseIndex + 12).trim();
+    content = [beforeTool, afterTool].filter(Boolean).join('\n\n');
   }
 
-  // Completed think block
-  const thinking = raw.slice(thinkOpenIndex + 7, thinkCloseIndex).trim();
-  const beforeThink = raw.slice(0, thinkOpenIndex).trim();
-  const afterThink = raw.slice(thinkCloseIndex + 8).trim();
-  const content = [beforeThink, afterThink].filter(Boolean).join('\n\n');
-
-  return { thinking, content, isThinking: false };
+  return { thinking, content, isThinking, toolCalls, isCallingTool };
 }

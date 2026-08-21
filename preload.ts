@@ -37,4 +37,12 @@ const { ipcRenderer, webUtils } = require('electron');
     } catch (e) {}
     return (file as any).path || '';
   },
+  // Agent Tools
+  viewFile: (filePath: string) => ipcRenderer.invoke('view-file', filePath),
+  listDir: (dirPath: string) => ipcRenderer.invoke('list-dir', dirPath),
+  writeToFile: (options: any) => ipcRenderer.invoke('write-to-file', options),
+  replaceFileContent: (options: any) => ipcRenderer.invoke('replace-file-content', options),
+  deleteFile: (filePath: string) => ipcRenderer.invoke('delete-file', filePath),
+  runCommand: (command: string, cwd?: string) => ipcRenderer.invoke('run-command', { command, cwd }),
+  grepSearch: (options: any) => ipcRenderer.invoke('grep-search', options),
 };

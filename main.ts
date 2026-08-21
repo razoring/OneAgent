@@ -461,6 +461,78 @@ ipcMain.handle('get-file-thumbnail', async (event, filePath) => {
   return null;
 });
 
+import { exec } from 'child_process';
+
+// --- AGENT DESKTOP TOOLS IPC HANDLERS ---
+ipcMain.handle('view-file', async (event, filePath) => {
+  try {
+    const content = fs.readFileSync(filePath, 'utf-8');
+    return { success: true, content };
+  } catch (err: any) {
+    return { success: false, error: err.message };
+  }
+});
+
+ipcMain.handle('list-dir', async (event, dirPath) => {
+  try {
+    const items = fs.readdirSync(dirPath, { withFileTypes: true });
+    const result = items.map(item => ({
+      name: item.name,
+      isDir: item.isDirectory(),
+      sizeBytes: item.isFile() ? fs.statSync(path.join(dirPath, item.name)).size.toString() : undefined
+    }));
+    return { success: true, items: result };
+  } catch (err: any) {
+    return { success: false, error: err.message };
+  }
+});
+
+ipcMain.handle('write-to-file', async (event, options) => {
+  try {
+    const { targetFile, codeContent, overwrite } = options;
+    if (fs.existsSync(targetFile) && !overwrite) {
+      return { success: false, error: 'File already exists and overwrite is false' };
+    }
+    fs.mkdirSync(path.dirname(targetFile), { recursive: true });
+    fs.writeFileSync(targetFile, codeContent, 'utf-8');
+    return { success: true };
+  } catch (err: any) {
+    return { success: false, error: err.message };
+  }
+});
+
+ipcMain.handle('replace-file-content', async (event, options) => {
+  try {
+    const { targetFile, targetContent, replacementContent } = options;
+    let content = fs.readFileSync(targetFile, 'utf-8');
+    if (!content.includes(targetContent)) {
+      return { success: false, error: 'Target content not found in file' };
+    }
+    content = content.replace(targetContent, replacementContent);
+    fs.writeFileSync(targetFile, content, 'utf-8');
+    return { success: true };
+  } catch (err: any) {
+    return { success: false, error: err.message };
+  }
+});
+
+ipcMain.handle('delete-file', async (event, filePath) => {
+  try {
+    fs.unlinkSync(filePath);
+    return { success: true };
+  } catch (err: any) {
+    return { success: false, error: err.message };
+  }
+});
+
+ipcMain.handle('run-command', async (event, { command, cwd }) => {
+  return new Promise((resolve) => {
+    exec(command, { cwd: cwd || process.cwd() }, (error, stdout, stderr) => {
+      resolve({ success: !error, stdout, stderr, error: error?.message });
+    });
+  });
+});
+
 app.on('ready', createWindow);
 
 app.on('window-all-closed', () => {
