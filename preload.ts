@@ -45,4 +45,5 @@ const { ipcRenderer, webUtils } = require('electron');
   deleteFile: (filePath: string) => ipcRenderer.invoke('delete-file', filePath),
   runCommand: (command: string, cwd?: string) => ipcRenderer.invoke('run-command', { command, cwd }),
   grepSearch: (options: any) => ipcRenderer.invoke('grep-search', options),
+  searchWeb: (query: string, limit?: number) => ipcRenderer.invoke('search-web', { query, limit }),
 };

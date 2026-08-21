@@ -1,37 +1,82 @@
-import React from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import { ChevronLeft, ChevronRight, RotateCw, Home, Shield } from 'lucide-react';
 
 const BrowserShell = () => {
+  const [url, setUrl] = useState('https://html.duckduckgo.com/');
+  const [inputUrl, setInputUrl] = useState(url);
+  const webviewRef = useRef<any>(null);
+
+  useEffect(() => {
+    const webview = webviewRef.current;
+    if (!webview) return;
+    
+    (window as any).activeWebview = webview;
+
+    const handleDidFinishLoad = () => {
+      setInputUrl(webview.getURL());
+    };
+
+    webview.addEventListener('did-finish-load', handleDidFinishLoad);
+    return () => {
+      if ((window as any).activeWebview === webview) {
+        (window as any).activeWebview = null;
+      }
+      webview.removeEventListener('did-finish-load', handleDidFinishLoad);
+    };
+  }, []);
+
+  const handleNavigate = (e: React.FormEvent) => {
+    e.preventDefault();
+    let target = inputUrl.trim();
+    if (!target.startsWith('http://') && !target.startsWith('https://')) {
+      if (target.includes('.') && !target.includes(' ')) {
+        target = 'https://' + target;
+      } else {
+        target = 'https://html.duckduckgo.com/html/?q=' + encodeURIComponent(target);
+      }
+    }
+    setUrl(target);
+  };
+
+  const goBack = () => webviewRef.current?.goBack();
+  const goForward = () => webviewRef.current?.goForward();
+  const reload = () => webviewRef.current?.reload();
+  const goHome = () => setUrl('https://html.duckduckgo.com/');
+
   return (
     <div className="w-[500px] border-l border-white/10 bg-black flex flex-col no-drag-region">
       {/* Browser Toolbar */}
       <div className="h-12 bg-surface flex items-center px-3 gap-2 border-b border-white/10 z-10 shadow-sm">
         <div className="flex items-center gap-1">
-          <button className="p-1.5 text-textSecondary hover:text-white hover:bg-white/10 rounded-md transition-colors"><ChevronLeft size={18}/></button>
-          <button className="p-1.5 text-textSecondary/30 rounded-md"><ChevronRight size={18}/></button>
-          <button className="p-1.5 text-textSecondary hover:text-white hover:bg-white/10 rounded-md transition-colors"><RotateCw size={16}/></button>
+          <button onClick={goBack} className="p-1.5 text-textSecondary hover:text-white hover:bg-white/10 rounded-md transition-colors"><ChevronLeft size={18}/></button>
+          <button onClick={goForward} className="p-1.5 text-textSecondary hover:text-white hover:bg-white/10 rounded-md transition-colors"><ChevronRight size={18}/></button>
+          <button onClick={reload} className="p-1.5 text-textSecondary hover:text-white hover:bg-white/10 rounded-md transition-colors"><RotateCw size={16}/></button>
         </div>
         
-        <div className="flex-1 ml-2 flex items-center bg-black/40 border border-white/5 rounded-md px-3 py-1.5 gap-2">
+        <form onSubmit={handleNavigate} className="flex-1 ml-2 flex items-center bg-black/40 border border-white/5 rounded-md px-3 py-1.5 gap-2 focus-within:ring-1 focus-within:ring-accent focus-within:border-accent">
           <Shield size={14} className="text-accentBright" />
-          <div className="text-sm text-textSecondary truncate font-medium">https://www.expedia.com</div>
-        </div>
+          <input 
+            type="text"
+            value={inputUrl}
+            onChange={(e) => setInputUrl(e.target.value)}
+            className="flex-1 bg-transparent border-none outline-none text-sm text-gray-200 font-medium"
+            placeholder="Search or enter URL"
+          />
+        </form>
 
-        <button className="p-1.5 text-textSecondary hover:text-white hover:bg-white/10 rounded-md transition-colors ml-1"><Home size={18}/></button>
+        <button onClick={goHome} className="p-1.5 text-textSecondary hover:text-white hover:bg-white/10 rounded-md transition-colors ml-1"><Home size={18}/></button>
       </div>
 
-      {/* Browser Content Area Placeholder */}
-      <div className="flex-1 relative bg-white flex items-center justify-center overflow-hidden">
-        {/* Placeholder image of a website or a loading state */}
-        <div className="absolute inset-0 bg-gray-100 flex flex-col items-center justify-center text-textSecondary">
-          <div className="h-12 w-12 border-4 border-gray-300 border-t-accent rounded-full animate-spin mb-4"></div>
-          <p className="font-medium text-sm">Loading webview...</p>
-        </div>
-        
-        {/* Fake Set-of-Mark Overlay Demo */}
-        <div className="absolute top-20 left-10 bg-neutral-800 text-white text-xs font-bold px-1.5 py-0.5 rounded shadow-sm border border-white/50">1</div>
-        <div className="absolute top-20 right-32 bg-neutral-800 text-white text-xs font-bold px-1.5 py-0.5 rounded shadow-sm border border-white/50">2</div>
-        <div className="absolute top-48 left-1/4 bg-neutral-800 text-white text-xs font-bold px-1.5 py-0.5 rounded shadow-sm border border-white/50">3</div>
+      {/* Browser Content Area */}
+      <div className="flex-1 relative bg-white flex flex-col overflow-hidden">
+        {/* @ts-ignore - webview is a custom element in Electron */}
+        <webview
+          ref={webviewRef}
+          src={url}
+          className="flex-1 w-full h-full"
+          partition="persist:oneagent_browser"
+          webpreferences="contextIsolation=yes,javascript=yes"
+        />
       </div>
     </div>
   );

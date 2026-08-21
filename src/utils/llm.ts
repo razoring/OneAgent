@@ -366,7 +366,7 @@ export const generateChatStream = async (
             toolCalls: parsed.toolCalls,
             isCallingTool: parsed.isCallingTool
           });
-          resolve({ content: parsed.content, thinking: combinedThinking });
+          resolve({ content: parsed.content, thinking: combinedThinking, toolCalls: parsed.toolCalls, isCallingTool: parsed.isCallingTool });
         }, modelSettings.thinkingTimeout * 1000);
       }
 
@@ -405,7 +405,7 @@ export const generateChatStream = async (
           toolCalls: parsed.toolCalls,
           isCallingTool: parsed.isCallingTool
         });
-        resolve({ content: parsed.content, thinking: combinedThinking });
+        resolve({ content: parsed.content, thinking: combinedThinking, toolCalls: parsed.toolCalls, isCallingTool: parsed.isCallingTool });
       });
 
       cleanupError = (window as any).electronAPI.onStreamError((data: any) => {
@@ -452,7 +452,7 @@ export const generateChatStream = async (
     toolCalls: parsed.toolCalls,
     isCallingTool: parsed.isCallingTool
   });
-  return parsed;
+  return { content: parsed.content, thinking: parsed.thinking, toolCalls: parsed.toolCalls, isCallingTool: parsed.isCallingTool };
 };
 
 export const generateChatResponse = async (

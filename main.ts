@@ -14,6 +14,7 @@ const createWindow = () => {
       preload: path.join(import.meta.dirname, 'preload.js'),
       nodeIntegration: true,
       contextIsolation: false,
+      webviewTag: true,
     },
   });
 
@@ -531,6 +532,41 @@ ipcMain.handle('run-command', async (event, { command, cwd }) => {
       resolve({ success: !error, stdout, stderr, error: error?.message });
     });
   });
+});
+
+ipcMain.handle('search-web', async (event, { query, limit = 5 }) => {
+  try {
+    const response = await fetch('https://html.duckduckgo.com/html/?q=' + encodeURIComponent(query), {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+      }
+    });
+    const html = await response.text();
+    
+    const results = [];
+    const blockRegex = /<div class="result__body">([\s\S]*?)<\/div>\s*<\/div>/g;
+    let blockMatch;
+    let count = 0;
+    
+    while ((blockMatch = blockRegex.exec(html)) !== null && count < limit) {
+       const block = blockMatch[1];
+       const url = block.match(/<a class="result__url" href="([^"]+)">/)?.[1];
+       let title = block.match(/<h2 class="result__title">[\s\S]*?<a[^>]*>([\s\S]*?)<\/a>/)?.[1] || '';
+       let snippet = block.match(/<a class="result__snippet[^>]*>([\s\S]*?)<\/a>/)?.[1] || '';
+       
+       title = title.replace(/<[^>]+>/g, '').trim();
+       snippet = snippet.replace(/<[^>]+>/g, '').trim();
+       
+       if (url && title) {
+           results.push({ url, title, snippet });
+           count++;
+       }
+    }
+    
+    return { success: true, results };
+  } catch (err: any) {
+    return { success: false, error: err.message };
+  }
 });
 
 app.on('ready', createWindow);
