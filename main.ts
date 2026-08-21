@@ -84,6 +84,16 @@ ipcMain.handle('fetch-models', async (event, config) => {
   }
 });
 
+// Some providers reject unknown reasoning params (or don't support thinking on a given model).
+// Retry once without them when the 400 error mentions reasoning/thinking.
+const stripReasoningParams = (payload: any): any => {
+  const { reasoning_effort, reasoning, enable_thinking, ...rest } = payload || {};
+  return rest;
+};
+
+const shouldRetryWithoutReasoning = (status: number, errText: string): boolean =>
+  status === 400 && /reasoning|thinking/i.test(errText);
+
 ipcMain.handle('chat-complete', async (event, config) => {
   try {
     const { endpoint, apiKey, payload } = config;
@@ -113,14 +123,26 @@ ipcMain.handle('chat-complete', async (event, config) => {
     console.log('[chat-complete] Payload structure:', JSON.stringify(debugPayload, null, 2));
 
     const url = endpoint.endsWith('/') ? `${endpoint}chat/completions` : `${endpoint}/chat/completions`;
-    const response = await fetch(url, {
+    let response = await fetch(url, {
       method: 'POST',
       headers,
       body: JSON.stringify(payload),
     });
     if (!response.ok) {
       const errText = await response.text();
-      throw new Error(`HTTP error! status: ${response.status} - ${errText}`);
+      if (shouldRetryWithoutReasoning(response.status, errText)) {
+        console.warn('[chat-complete] Provider rejected reasoning params, retrying without them');
+        response = await fetch(url, {
+          method: 'POST',
+          headers,
+          body: JSON.stringify(stripReasoningParams(payload)),
+        });
+        if (!response.ok) {
+          throw new Error(`HTTP error! status: ${response.status} - ${await response.text()}`);
+        }
+      } else {
+        throw new Error(`HTTP error! status: ${response.status} - ${errText}`);
+      }
     }
     const data = await response.json();
     return { success: true, data };
@@ -152,7 +174,7 @@ ipcMain.handle('chat-stream', async (event, { endpoint, apiKey, payload, streamI
     const url = endpoint.endsWith('/') ? `${endpoint}chat/completions` : `${endpoint}/chat/completions`;
     const streamPayload = { ...payload, stream: true };
 
-    const response = await fetch(url, {
+    let response = await fetch(url, {
       method: 'POST',
       headers,
       body: JSON.stringify(streamPayload),
@@ -161,7 +183,20 @@ ipcMain.handle('chat-stream', async (event, { endpoint, apiKey, payload, streamI
 
     if (!response.ok) {
       const errText = await response.text();
-      throw new Error(`HTTP error! status: ${response.status} - ${errText}`);
+      if (shouldRetryWithoutReasoning(response.status, errText)) {
+        console.warn('[chat-stream] Provider rejected reasoning params, retrying without them');
+        response = await fetch(url, {
+          method: 'POST',
+          headers,
+          body: JSON.stringify(stripReasoningParams(streamPayload)),
+          signal: controller.signal,
+        });
+        if (!response.ok) {
+          throw new Error(`HTTP error! status: ${response.status} - ${await response.text()}`);
+        }
+      } else {
+        throw new Error(`HTTP error! status: ${response.status} - ${errText}`);
+      }
     }
 
     if (!response.body) {

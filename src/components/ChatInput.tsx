@@ -1004,7 +1004,7 @@ const ChatInput: React.FC<ChatInputProps> = ({ onSend, onStop, disabled, editing
                   <div className="flex justify-between items-center text-sm">
                     <span className="text-gray-300 font-medium">Context Window</span>
                     <span className="text-gray-400 font-mono text-xs">
-                      {modelSettings.contextWindow >= 1024 ? `${Math.round(modelSettings.contextWindow / 1024)}K` : modelSettings.contextWindow} tokens
+                      {contextLimit >= 1024 ? `${Math.round(contextLimit / 1024)}K` : contextLimit} tokens
                     </span>
                   </div>
                   <input

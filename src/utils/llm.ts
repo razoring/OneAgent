@@ -63,7 +63,11 @@ export const getModelSettings = (): ModelSettings => {
   const stored = localStorage.getItem('model_settings');
   if (stored) {
     try {
-      return { ...DEFAULT_MODEL_SETTINGS, ...JSON.parse(stored) };
+      const parsed = JSON.parse(stored) as Record<string, unknown>;
+      const cleaned = Object.fromEntries(
+        Object.entries(parsed).filter(([, v]) => v !== null && v !== undefined)
+      );
+      return { ...DEFAULT_MODEL_SETTINGS, ...cleaned } as ModelSettings;
     } catch (e) {
       console.error('Failed to parse model settings', e);
     }
@@ -73,6 +77,28 @@ export const getModelSettings = (): ModelSettings => {
 
 export const saveModelSettings = (settings: ModelSettings) => {
   localStorage.setItem('model_settings', JSON.stringify(settings));
+};
+
+// Provider-specific reasoning/thinking parameters.
+// 'off' must send an explicit disable signal — several providers (e.g. Ollama)
+// enable thinking by default when no reasoning parameter is present.
+export const applyThinkingParams = (payload: any, providerId: string, level?: string): void => {
+  const isOff = !level || level === 'off';
+  switch (providerId) {
+    case 'openrouter':
+      payload.reasoning = isOff ? { enabled: false } : { effort: level };
+      break;
+    case 'together':
+      if (isOff) payload.enable_thinking = false;
+      break;
+    case 'lmstudio':
+      // LM Studio ignores reasoning_effort on /v1/chat/completions; sending it can cause errors
+      break;
+    default:
+      // Ollama, OpenAI, Gemini, Groq and other OpenAI-compatible servers
+      payload.reasoning_effort = isOff ? 'none' : level;
+      break;
+  }
 };
 
 export interface LLMModel {
@@ -361,9 +387,7 @@ export const generateChatStream = async (
       if (modelSettings.maxOutputLength && modelSettings.maxOutputLength > 0) {
         payload.max_tokens = modelSettings.maxOutputLength;
       }
-      if (modelSettings.thinkingLevel && modelSettings.thinkingLevel !== 'off') {
-        payload.reasoning_effort = modelSettings.thinkingLevel;
-      }
+      applyThinkingParams(payload, provider.id, modelSettings.thinkingLevel);
 
       (window as any).electronAPI.chatStream({
         endpoint: provider.endpoint,
@@ -412,9 +436,7 @@ export const generateChatResponse = async (
   if (modelSettings.maxOutputLength && modelSettings.maxOutputLength > 0) {
     payload.max_tokens = modelSettings.maxOutputLength;
   }
-  if (modelSettings.thinkingLevel && modelSettings.thinkingLevel !== 'off') {
-    payload.reasoning_effort = modelSettings.thinkingLevel;
-  }
+  applyThinkingParams(payload, provider.id, modelSettings.thinkingLevel);
 
   const response = await (window as any).electronAPI.chatComplete({
     endpoint: provider.endpoint,
