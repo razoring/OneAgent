@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, nativeImage, shell, desktopCapturer, screen } from 'electron';
+import { app, BrowserWindow, ipcMain, nativeImage, shell, desktopCapturer, screen, webContents } from 'electron';
 import * as path from 'path';
 import * as fs from 'fs';
 import * as officeParser from 'officeparser';
@@ -224,6 +224,7 @@ ipcMain.handle('chat-stream', async (event, { endpoint, apiKey, payload, streamI
     const reader = response.body.getReader();
     const decoder = new TextDecoder();
     let buffer = '';
+    let lastUsage: any = null;
 
     while (true) {
       const { done, value } = await reader.read();
@@ -241,6 +242,8 @@ ipcMain.handle('chat-stream', async (event, { endpoint, apiKey, payload, streamI
 
         try {
           const parsed = JSON.parse(dataStr);
+          // Final chunk from most providers carries token usage for accounting.
+          if (parsed.usage) lastUsage = parsed.usage;
           const choice = parsed.choices?.[0];
           if (choice) {
             const content = choice.delta?.content || '';
@@ -254,7 +257,7 @@ ipcMain.handle('chat-stream', async (event, { endpoint, apiKey, payload, streamI
       }
     }
 
-    event.sender.send('chat-stream-end', { streamId });
+    event.sender.send('chat-stream-end', { streamId, usage: lastUsage });
     return { success: true };
   } catch (error: any) {
     if (error.name === 'AbortError') {
@@ -465,7 +468,32 @@ ipcMain.handle('get-file-thumbnail', async (event, filePath) => {
 
 import { exec } from 'child_process';
 import nutJs from '@nut-tree-fork/nut-js';
-const { keyboard, mouse, Point } = nutJs;
+const { keyboard, mouse, Point, Button, Key } = nutJs;
+
+// Maps friendly key names ("control", "enter", "arrowup") onto the provider's
+// Key enum, falling back to case variants so single letters/keys just work.
+const KEY_ALIASES: Record<string, string> = {
+  control: 'LeftControl', ctrl: 'LeftControl',
+  alt: 'LeftAlt', option: 'LeftAlt',
+  shift: 'LeftShift',
+  cmd: 'LeftCmd', command: 'LeftCmd', meta: 'LeftCmd',
+  win: 'LeftWindows', super: 'LeftSuper',
+  enter: 'Return', return: 'Return',
+  esc: 'Escape', space: 'Space',
+  arrowup: 'Up', arrowdown: 'Down', arrowleft: 'Left', arrowright: 'Right',
+  pageup: 'PageUp', pagedown: 'PageDown'
+};
+
+const resolveNutKey = (name: string) => {
+  const n = String(name).trim();
+  const alias = KEY_ALIASES[n.toLowerCase()];
+  const candidates = [alias, n, n.charAt(0).toUpperCase() + n.slice(1), n.toUpperCase()].filter(Boolean);
+  for (const c of candidates) {
+    const k = (Key as any)[c];
+    if (k !== undefined) return k;
+  }
+  throw new Error(`Unknown key "${name}"`);
+};
 
 // --- AGENT DESKTOP TOOLS IPC HANDLERS ---
 ipcMain.handle('take-screenshot', async () => {
@@ -485,10 +513,51 @@ ipcMain.handle('take-screenshot', async () => {
   }
 });
 
-ipcMain.handle('desktop-click', async (event, { x, y }) => {
+ipcMain.handle('desktop-click', async (event, opts) => {
   try {
-    await mouse.setPosition(new Point(x, y));
-    await mouse.leftClick();
+    const btnName = String(opts.button || 'left').toLowerCase();
+    const Btn = btnName === 'right' ? Button.RIGHT : btnName === 'middle' ? Button.MIDDLE : Button.LEFT;
+    await mouse.setPosition(new Point(opts.x, opts.y));
+    await new Promise(r => setTimeout(r, 60));
+    if (opts.double) {
+      await mouse.doubleClick(Btn);
+    } else {
+      await mouse.click(Btn);
+    }
+    return { success: true };
+  } catch (err: any) {
+    return { success: false, error: err.message };
+  }
+});
+
+ipcMain.handle('desktop-hotkey', async (event, { keys }) => {
+  try {
+    if (!Array.isArray(keys) || keys.length === 0) {
+      return { success: false, error: "desktop_hotkey requires a non-empty 'keys' array" };
+    }
+    await keyboard.pressKey(...keys.map(resolveNutKey));
+    await keyboard.releaseKey(...keys.map(resolveNutKey));
+    return { success: true };
+  } catch (err: any) {
+    return { success: false, error: err.message };
+  }
+});
+
+ipcMain.handle('desktop-drag', async (event, { fromX, fromY, toX, toY }) => {
+  try {
+    await mouse.setPosition(new Point(fromX, fromY));
+    await new Promise(r => setTimeout(r, 100));
+    await mouse.pressButton(Button.LEFT);
+    const steps = 15;
+    for (let i = 1; i <= steps; i++) {
+      await mouse.setPosition(new Point(
+        Math.round(fromX + (toX - fromX) * i / steps),
+        Math.round(fromY + (toY - fromY) * i / steps)
+      ));
+      await new Promise(r => setTimeout(r, 20));
+    }
+    await new Promise(r => setTimeout(r, 100));
+    await mouse.releaseButton(Button.LEFT);
     return { success: true };
   } catch (err: any) {
     return { success: false, error: err.message };
@@ -566,7 +635,6 @@ ipcMain.handle('delete-file', async (event, filePath) => {
 
 ipcMain.handle('browser-send-input-event', async (event, { webContentsId, type, x, y, button, clickCount, modifiers, keyCode }) => {
   try {
-    const { webContents } = require('electron');
     const wc = webContents.fromId(webContentsId);
     if (!wc) return { success: false, error: 'WebContents not found' };
     wc.sendInputEvent({ type, x, y, button, clickCount, modifiers, keyCode });
@@ -578,7 +646,6 @@ ipcMain.handle('browser-send-input-event', async (event, { webContentsId, type, 
 
 ipcMain.handle('browser-insert-text', async (event, { webContentsId, text }) => {
   try {
-    const { webContents } = require('electron');
     const wc = webContents.fromId(webContentsId);
     if (!wc) return { success: false, error: 'WebContents not found' };
     wc.insertText(text);
@@ -588,9 +655,25 @@ ipcMain.handle('browser-insert-text', async (event, { webContentsId, text }) => 
   }
 });
 
-ipcMain.handle('run-command', async (event, { command, cwd }) => {
+// Captures only the agent browser webview page (used by browser_screenshot).
+ipcMain.handle('browser-capture', async (event, webContentsId) => {
+  try {
+    const wc = webContents.fromId(webContentsId);
+    if (!wc) return { success: false, error: 'WebContents not found' };
+    const image = await wc.capturePage();
+    return { success: true, image: image.toDataURL() };
+  } catch (err: any) {
+    return { success: false, error: err.message };
+  }
+});
+
+ipcMain.handle('run-command', async (event, { command, cwd, timeoutMs }) => {
   return new Promise((resolve) => {
-    exec(command, { cwd: cwd || process.cwd() }, (error, stdout, stderr) => {
+    exec(command, {
+      cwd: cwd || process.cwd(),
+      timeout: Number(timeoutMs) > 0 ? Number(timeoutMs) : 120000,
+      maxBuffer: 10 * 1024 * 1024
+    }, (error, stdout, stderr) => {
       resolve({ success: !error, stdout, stderr, error: error?.message });
     });
   });
@@ -622,6 +705,268 @@ ipcMain.handle('search-web', async (event, { endpoint, apiKey, query, limit = 5 
   } catch (err: any) {
     return { success: false, error: err.message };
   }
+});
+
+// Recursive content search across a directory tree (the agent's `search_files`).
+ipcMain.handle('grep-search', async (event, { query, path: rootDir, isRegex, maxResults }) => {
+  try {
+    if (!query || !String(query).trim()) return { success: false, error: 'Empty query' };
+    const root = rootDir && String(rootDir).trim() ? path.resolve(String(rootDir)) : process.cwd();
+    if (!fs.existsSync(root)) return { success: false, error: `Path not found: ${root}` };
+
+    let rx: RegExp | null = null;
+    let needle = '';
+    if (isRegex) {
+      try { rx = new RegExp(query, 'i'); } catch (e: any) { return { success: false, error: 'Invalid regex: ' + e.message }; }
+    } else {
+      needle = String(query).toLowerCase();
+    }
+
+    const SKIP_DIRS = new Set(['node_modules', '.git', 'dist', 'dist-electron', 'out', 'build', '.next', 'coverage', '__pycache__', '.venv']);
+    const MAX_FILE_BYTES = 2 * 1024 * 1024;
+    const cap = Math.min(Math.max(Number(maxResults) || 200, 1), 1000);
+    const matches: any[] = [];
+    let filesScanned = 0;
+
+    const walk = (dir: string, depth: number): void => {
+      if (depth > 12 || matches.length >= cap || filesScanned > 8000) return;
+      let entries: fs.Dirent[];
+      try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
+      for (const ent of entries) {
+        if (matches.length >= cap) return;
+        const full = path.join(dir, ent.name);
+        if (ent.isDirectory()) {
+          if (!SKIP_DIRS.has(ent.name)) walk(full, depth + 1);
+          continue;
+        }
+        if (!ent.isFile()) continue;
+        let st: fs.Stats;
+        try { st = fs.statSync(full); } catch { continue; }
+        if (st.size === 0 || st.size > MAX_FILE_BYTES) continue;
+        let content: string;
+        try { content = fs.readFileSync(full, 'utf-8'); } catch { continue; }
+        if (content.includes('\u0000')) continue; // binary file
+        filesScanned++;
+        const lines = content.split('\n');
+        for (let i = 0; i < lines.length; i++) {
+          const hit = rx ? rx.test(lines[i]) : lines[i].toLowerCase().includes(needle);
+          if (hit) {
+            matches.push({ file: full, lineNumber: i + 1, line: lines[i].slice(0, 300) });
+            if (matches.length >= cap) return;
+          }
+        }
+      }
+    };
+
+    walk(root, 0);
+    return { success: true, matches, truncated: matches.length >= cap || undefined, scannedFiles: filesScanned };
+  } catch (err: any) {
+    return { success: false, error: err.message };
+  }
+});
+
+// Cookie inspection/management for the agent browser session.
+ipcMain.handle('browser-cookies', async (event, { webContentsId, op = 'get', name, value, domain, url, expirationDate }) => {
+  try {
+    const wc = webContents.fromId(webContentsId);
+    if (!wc) return { success: false, error: 'WebContents not found' };
+    const cookies = wc.session.cookies;
+
+    if (op === 'get') {
+      const filter: any = {};
+      if (name) filter.name = name;
+      if (domain) filter.domain = domain;
+      const list = await cookies.get(filter);
+      return {
+        success: true,
+        count: list.length,
+        cookies: list.slice(0, 150).map(c => ({
+          name: c.name,
+          value: c.value.length > 120 ? c.value.slice(0, 120) + '…' : c.value,
+          domain: c.domain,
+          path: c.path,
+          secure: c.secure,
+          httpOnly: c.httpOnly,
+          expirationDate: c.expirationDate
+        }))
+      };
+    }
+
+    if (op === 'set') {
+      if (!name) return { success: false, error: "Cookie set requires 'name'" };
+      const cookieUrl = url || (domain ? `https://${domain.replace(/^\./, '')}` : wc.getURL());
+      await cookies.set({
+        url: cookieUrl,
+        name,
+        value: value ?? '',
+        domain: domain || undefined,
+        expirationDate: expirationDate ? Number(expirationDate) : undefined,
+        secure: cookieUrl.startsWith('https')
+      });
+      return { success: true, set: name };
+    }
+
+    if (op === 'delete') {
+      if (!name) return { success: false, error: "Cookie delete requires 'name'" };
+      const list = await cookies.get({ name });
+      for (const c of list) {
+        await cookies.remove(`http${c.secure ? 's' : ''}://${(c.domain || '').replace(/^\./, '')}${c.path}`, name);
+      }
+      return { success: true, removed: list.length };
+    }
+
+    if (op === 'clear') {
+      const list = await cookies.get({});
+      for (const c of list) {
+        await cookies.remove(`http${c.secure ? 's' : ''}://${(c.domain || '').replace(/^\./, '')}${c.path}`, c.name);
+      }
+      return { success: true, removed: list.length };
+    }
+
+    return { success: false, error: `Unknown op "${op}"` };
+  } catch (err: any) {
+    return { success: false, error: err.message };
+  }
+});
+
+// Navigation history of the embedded browser.
+ipcMain.handle('browser-history', async (event, { webContentsId, op = 'list', index }) => {
+  try {
+    const wc = webContents.fromId(webContentsId);
+    if (!wc) return { success: false, error: 'WebContents not found' };
+    const nav = (wc as any).navigationHistory;
+
+    if (op === 'list') {
+      const entries = nav.getAllEntries();
+      const activeIndex = nav.getActiveIndex();
+      return {
+        success: true,
+        activeIndex,
+        entries: entries.map((e: any, i: number) => ({ index: i, url: e.url, title: e.title, active: i === activeIndex }))
+      };
+    }
+    if (op === 'back') { wc.goBack(); return { success: true, moved: 'back' }; }
+    if (op === 'forward') { wc.goForward(); return { success: true, moved: 'forward' }; }
+    if (op === 'goto_index') {
+      const idx = Number(index);
+      if (!Number.isInteger(idx)) return { success: false, error: "goto_index requires numeric 'index'" };
+      nav.restore?.(idx);
+      return { success: true, movedToIndex: idx };
+    }
+    return { success: false, error: `Unknown op "${op}"` };
+  } catch (err: any) {
+    return { success: false, error: err.message };
+  }
+});
+
+// Native find-in-page with match counting and viewport highlight.
+ipcMain.handle('find-in-page', async (event, { webContentsId, text, forward = true }) => {
+  try {
+    const wc = webContents.fromId(webContentsId);
+    if (!wc) return { success: false, error: 'WebContents not found' };
+    if (!text) return { success: false, error: "find_in_page requires 'text'" };
+    return await new Promise((resolve) => {
+      const timer = setTimeout(() => resolve({ success: false, error: 'find timed out' }), 4000);
+      wc.once('found-in-page' as any, (_e: any, result: any) => {
+        clearTimeout(timer);
+        resolve({ success: true, matches: result.matches, activeMatchOrdinal: result.activeMatchOrdinal });
+      });
+      wc.findInPage(text, { forward: forward !== false });
+    });
+  } catch (err: any) {
+    return { success: false, error: err.message };
+  }
+});
+
+// Downloads a URL through the agent browser session, waiting for completion.
+ipcMain.handle('browser-download', async (event, { webContentsId, url, savePath }) => {
+  try {
+    const wc = webContents.fromId(webContentsId);
+    if (!wc) return { success: false, error: 'WebContents not found' };
+    if (!url) return { success: false, error: "browser_download requires 'url'" };
+
+    return await new Promise((resolve) => {
+      const session = wc.session;
+      const timer = setTimeout(() => {
+        cleanup();
+        resolve({ success: false, error: 'Download timed out after 180s' });
+      }, 180000);
+
+      const handler = (_e: any, item: any) => {
+        try {
+          const targetPath = savePath || path.join(app.getPath('downloads'), item.getFilename());
+          item.setSavePath(targetPath);
+          item.once('done', (_e2: any, state: string) => {
+            cleanup();
+            resolve({
+              success: state === 'completed',
+              state,
+              path: item.getSavePath(),
+              filename: item.getFilename()
+            });
+          });
+        } catch (err: any) {
+          cleanup();
+          resolve({ success: false, error: err.message });
+        }
+      };
+
+      const cleanup = () => {
+        clearTimeout(timer);
+        session.removeListener('will-download', handler);
+      };
+
+      session.on('will-download', handler);
+      wc.downloadURL(url);
+    });
+  } catch (err: any) {
+    return { success: false, error: err.message };
+  }
+});
+
+// Reports which models are resident in local provider memory (VRAM / load
+// state). Ollama exposes /api/ps; LM Studio has its v0 REST API. Cloud
+// providers are metered by tokens — nothing to report.
+ipcMain.handle('provider-status', async (event, { providers }) => {
+  const status: Record<string, any> = {};
+
+  await Promise.all((providers || []).map(async (p: any) => {
+    try {
+      if (p.id === 'ollama') {
+        const base = p.endpoint.replace(/\/v1\/?$/, '');
+        const res = await fetch(`${base}/api/ps`);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+        status[p.id] = {
+          kind: 'vram',
+          summary: `${data.models?.length || 0} model(s) in memory`,
+          models: (data.models || []).map((m: any) => ({
+            id: m.name,
+            sizeBytes: m.size,
+            vramBytes: m.size_vram,
+            expiresAt: m.expires_at
+          }))
+        };
+      } else if (p.id === 'lmstudio') {
+        const base = p.endpoint.replace(/\/v1\/?$/, '');
+        const res = await fetch(`${base}/api/v0/models`);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+        const loaded = (data.data || []).filter((m: any) => m.state === 'loaded');
+        status[p.id] = {
+          kind: 'load-state',
+          summary: `${loaded.length}/${data.data?.length || 0} model(s) loaded`,
+          models: loaded.map((m: any) => ({ id: m.id, maxContextLength: m.max_context_length }))
+        };
+      } else {
+        status[p.id] = { kind: 'cloud', summary: 'Token-metered API — no memory stats' };
+      }
+    } catch (err: any) {
+      status[p.id] = { kind: 'unavailable', summary: `Status unavailable: ${err.message}` };
+    }
+  }));
+
+  return { success: true, status };
 });
 
 app.on('ready', createWindow);

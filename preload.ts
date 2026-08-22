@@ -49,8 +49,16 @@ const { ipcRenderer, webUtils } = require('electron');
   
   browserSendInputEvent: (options: any) => ipcRenderer.invoke('browser-send-input-event', options),
   browserInsertText: (options: any) => ipcRenderer.invoke('browser-insert-text', options),
-  
+  browserCapture: (webContentsId: number) => ipcRenderer.invoke('browser-capture', webContentsId),
+  browserCookies: (options: any) => ipcRenderer.invoke('browser-cookies', options),
+  browserHistory: (options: any) => ipcRenderer.invoke('browser-history', options),
+  findInPage: (options: any) => ipcRenderer.invoke('find-in-page', options),
+  browserDownload: (options: any) => ipcRenderer.invoke('browser-download', options),
+  providerStatus: (options: any) => ipcRenderer.invoke('provider-status', options),
+
   takeScreenshot: () => ipcRenderer.invoke('take-screenshot'),
-  desktopClick: (x: number, y: number) => ipcRenderer.invoke('desktop-click', { x, y }),
+  desktopClick: (opts: { x: number, y: number, button?: string, double?: boolean }) => ipcRenderer.invoke('desktop-click', opts),
+  desktopDrag: (opts: { fromX: number, fromY: number, toX: number, toY: number }) => ipcRenderer.invoke('desktop-drag', opts),
   desktopType: (text: string) => ipcRenderer.invoke('desktop-type', { text }),
+  desktopHotkey: (opts: { keys: string[] }) => ipcRenderer.invoke('desktop-hotkey', opts),
 };

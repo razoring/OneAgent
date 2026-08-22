@@ -2,3 +2,4 @@ hotmodel swapping with tab
 auto load model when swapped with estimated TTFT label
 chat history
 mcp servers
+unify the tools to be simpler, encapsulated, and idiot-proof.

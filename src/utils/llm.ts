@@ -75,8 +75,50 @@ export const getModelSettings = (): ModelSettings => {
   return DEFAULT_MODEL_SETTINGS;
 };
 
+// Central settings write: persists and notifies every listener (ChatInput
+// sliders, agent tools) so the whole app reflects the change instantly.
 export const saveModelSettings = (settings: ModelSettings) => {
   localStorage.setItem('model_settings', JSON.stringify(settings));
+  window.dispatchEvent(new Event('model-settings-updated'));
+};
+
+const clamp = (v: number, min: number, max: number) => Math.min(max, Math.max(min, v));
+
+// Validates + applies a partial settings update coming from the agent's
+// update_settings tool. Unknown keys are dropped; numbers are clamped to sane
+// ranges. Returns the applied diff so the tool result can show what changed.
+export const applySettingsUpdate = (partial: Record<string, any>): { applied: Partial<ModelSettings>, rejected: string[] } => {
+  const current = getModelSettings();
+  const applied: Partial<ModelSettings> = {};
+  const rejected: string[] = [];
+
+  const num = (key: keyof ModelSettings, min: number, max: number, int = false) => {
+    const raw = partial[key];
+    if (raw === undefined || raw === null) return;
+    let v = Number(raw);
+    if (!Number.isFinite(v)) {
+      rejected.push(String(key));
+      return;
+    }
+    if (int) v = Math.round(v);
+    applied[key] = clamp(v, min, max) as never;
+  };
+
+  if (partial.thinkingLevel !== undefined) {
+    const lvl = String(partial.thinkingLevel).toLowerCase();
+    if (['off', 'low', 'medium', 'high'].includes(lvl)) applied.thinkingLevel = lvl as ModelSettings['thinkingLevel'];
+    else rejected.push('thinkingLevel');
+  }
+  num('thinkingTimeout', 0, 600, true);
+  num('temperature', 0, 2);
+  num('topP', 0.01, 1);
+  num('maxOutputLength', 256, 200000, true);
+  num('contextWindow', 1024, 2097152, true);
+
+  if (Object.keys(applied).length > 0) {
+    saveModelSettings({ ...current, ...applied });
+  }
+  return { applied, rejected };
 };
 
 export interface WebSearchSettings {
@@ -147,6 +189,79 @@ export const flushModel = async (model: LLMModel): Promise<void> => {
   } catch {
     // flushing is best-effort
   }
+};
+
+// --- Session token usage tracking -------------------------------------------
+// Accumulated per provider/model as responses come back so the agent can query
+// its own consumption via get_model_stats and make informed switching decisions.
+export interface UsageRecord {
+  promptTokens: number;
+  completionTokens: number;
+  calls: number;
+}
+
+const usageByModel = new Map<string, UsageRecord>();
+
+export const recordUsage = (
+  providerId: string,
+  modelId: string,
+  usage?: { prompt_tokens?: number | string, completion_tokens?: number | string } | null
+): void => {
+  if (!usage) return;
+  const p = Number(usage.prompt_tokens || 0);
+  const c = Number(usage.completion_tokens || 0);
+  if (!p && !c) return;
+  const key = `${providerId}/${modelId}`;
+  const rec = usageByModel.get(key) || { promptTokens: 0, completionTokens: 0, calls: 0 };
+  rec.promptTokens += p;
+  rec.completionTokens += c;
+  rec.calls += 1;
+  usageByModel.set(key, rec);
+};
+
+export const getSessionUsage = () => {
+  const byModel: Record<string, UsageRecord> = {};
+  let totalPrompt = 0;
+  let totalCompletion = 0;
+  usageByModel.forEach((v, k) => {
+    byModel[k] = { ...v };
+    totalPrompt += v.promptTokens;
+    totalCompletion += v.completionTokens;
+  });
+  return {
+    totals: { promptTokens: totalPrompt, completionTokens: totalCompletion },
+    byModel
+  };
+};
+
+// Cloud providers only include `usage` in streamed responses when explicitly
+// requested. Local servers (Ollama/LM Studio) send it natively in the final chunk.
+const PROVIDERS_NEEDING_USAGE_FLAG = new Set(['openai', 'openrouter', 'groq', 'together', 'gemini']);
+
+// Asks the main process which models are currently resident in provider memory
+// (VRAM for Ollama via /api/ps, load state for LM Studio). Cloud providers report
+// nothing — they are metered by tokens, not memory.
+export const getProviderStatus = async (): Promise<Record<string, any>> => {
+  try {
+    const providers = getProviders().filter(p => p.enabled);
+    const api = (window as any).electronAPI;
+    if (!api?.providerStatus) return {};
+    const res = await api.providerStatus({ providers });
+    return res?.success ? (res.status || {}) : {};
+  } catch {
+    return {};
+  }
+};
+
+// Combined self-stats snapshot consumed by the get_model_stats tool.
+export const getModelStats = async (activeModel?: LLMModel | null) => {
+  const [loaded] = await Promise.all([getProviderStatus()]);
+  return {
+    activeModel: activeModel ? { id: activeModel.id, provider: activeModel.provider } : null,
+    settings: getModelSettings(),
+    tokenUsage: getSessionUsage(),
+    loadedModels: loaded
+  };
 };
 
 // Provider-specific reasoning/thinking parameters.
@@ -260,6 +375,33 @@ export const fileToBase64 = (file: File): Promise<string> => {
     reader.onerror = error => reject(error);
   });
 };
+
+// Downscale an existing base64 data-url image (e.g. tool screenshots) so vision
+// payloads stay small. Resolves with the original if decoding/canvas fails.
+export const downscaleDataUrl = (dataUrl: string, maxDim = 1280, quality = 0.85): Promise<string> =>
+  new Promise((resolve) => {
+    const img = new Image();
+    img.onload = () => {
+      let { width, height } = img;
+      if (width > maxDim || height > maxDim) {
+        const ratio = Math.min(maxDim / width, maxDim / height);
+        width = Math.round(width * ratio);
+        height = Math.round(height * ratio);
+      }
+      const canvas = document.createElement('canvas');
+      canvas.width = width;
+      canvas.height = height;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) {
+        resolve(dataUrl);
+        return;
+      }
+      ctx.drawImage(img, 0, 0, width, height);
+      resolve(canvas.toDataURL('image/jpeg', quality));
+    };
+    img.onerror = () => resolve(dataUrl);
+    img.src = dataUrl;
+  });
 
 export interface DocumentChunk {
   text: string;
@@ -468,6 +610,7 @@ export const generateChatStream = async (
       cleanupEnd = (window as any).electronAPI.onStreamEnd((data: any) => {
         if (data.streamId !== streamId) return;
         cleanup();
+        recordUsage(provider.id, model.id, data.usage);
         const parsed = extractThinkingAndContent(accumulatedContent);
         const combinedThinking = [accumulatedReasoning, parsed.thinking].filter(Boolean).join('\n\n').trim();
         
@@ -520,6 +663,9 @@ export const generateChatStream = async (
       }
       if (modelSettings.maxOutputLength && modelSettings.maxOutputLength > 0) {
         payload.max_tokens = modelSettings.maxOutputLength;
+      }
+      if (PROVIDERS_NEEDING_USAGE_FLAG.has(provider.id)) {
+        payload.stream_options = { include_usage: true };
       }
       applyThinkingParams(payload, provider.id, modelSettings.thinkingLevel);
 
@@ -581,6 +727,7 @@ export const generateChatResponse = async (
   });
 
   if (response.success && response.data) {
+    recordUsage(provider.id, model.id, response.data.usage);
     const choice = response.data.choices?.[0];
     const reasoning = choice?.message?.reasoning_content || choice?.message?.reasoning || '';
     const content = choice?.message?.content || '';

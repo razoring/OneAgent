@@ -2,8 +2,10 @@ import React, { useState, useRef, useEffect } from 'react';
 import ChatInput from './ChatInput';
 import ThinkingBlock from './ThinkingBlock';
 import ToolCallBlock from './ToolCallBlock';
+import AgentBrowser from './AgentBrowser';
 import { generateChatStream, LLMModel, fileToBase64, parseAttachmentDocument } from '../utils/llm';
-import { executeToolCall } from '../utils/toolExecutor';
+import { executeToolCalls, ToolContext } from '../utils/toolExecutor';
+import { spawnSubAgent, getAgentsSnapshot, waitForAgents } from '../utils/subAgents';
 import DEFAULT_SYSTEM_PROMPT from '../utils/systemPrompt.md?raw';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -13,8 +15,9 @@ import rehypeKatex from 'rehype-katex';
 import 'katex/dist/katex.min.css';
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
 import { vscDarkPlus } from 'react-syntax-highlighter/dist/esm/styles/prism';
-import { MessageSquarePlus, MessageSquare, X, Check } from 'lucide-react';
+import { MessageSquarePlus, MessageSquare, X, Check, Globe, ChevronDown, ChevronRight } from 'lucide-react';
 import { getSystemTools } from '../utils/tools';
+import ApprovalCard, { PendingApproval } from './ApprovalCard';
 
 const MarkdownComponents: any = {
   p: ({node, ...props}: any) => <p className="mb-2 last:mb-0" {...props} />,
@@ -64,6 +67,7 @@ export interface ToolCall {
   status: 'executing' | 'completed' | 'error';
   result?: string;
   raw?: string;
+  image?: string;
 }
 
 export interface ChatMessage {
@@ -134,6 +138,56 @@ const ChatArea = () => {
   const bottomRef = useRef<HTMLDivElement>(null);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
+  const [isBrowserExpanded, setIsBrowserExpanded] = useState(true);
+
+  // Permission-gated tool approvals (self-modification, shell, deletion, desktop input)
+  const [pendingApprovals, setPendingApprovals] = useState<PendingApproval[]>([]);
+  // The model the agent loop should use — switchable mid-conversation by the agent itself.
+  const activeModelRef = useRef<LLMModel | null>(null);
+  useEffect(() => {
+    activeModelRef.current = currentModel || lastUsedModel;
+  }, [currentModel, lastUsedModel]);
+
+  const requestApproval = (toolName: string, summary: string): Promise<boolean> =>
+    new Promise<boolean>((resolve) => {
+      const id = Math.random().toString(36).substring(7);
+      setPendingApprovals(prev => [...prev, {
+        id,
+        toolName,
+        summary,
+        onDecision: (approved: boolean) => {
+          setPendingApprovals(prev2 => prev2.filter(p => p.id !== id));
+          resolve(approved);
+        }
+      }]);
+    });
+
+  const flushPendingApprovals = (approved: boolean) => {
+    setPendingApprovals(prev => {
+      prev.forEach(p => p.onDecision(approved));
+      return [];
+    });
+  };
+
+  const switchActiveModel = (model: LLMModel) => {
+    activeModelRef.current = model;
+    setCurrentModel(model);
+    window.dispatchEvent(new CustomEvent('agent-model-changed', { detail: model }));
+  };
+
+  const createToolContext = (): ToolContext => ({
+    getModel: () => activeModelRef.current || lastUsedModel,
+    setModel: switchActiveModel,
+    requestApproval,
+    spawnAgent: (spec) => spawnSubAgent(spec, {
+      requestApproval,
+      getModel: () => activeModelRef.current || lastUsedModel,
+      signal: abortControllerRef.current?.signal
+    }),
+    getAgents: getAgentsSnapshot,
+    waitForAgents,
+    signal: abortControllerRef.current?.signal
+  });
 
   const handleScroll = () => {
     if (!scrollContainerRef.current) return;
@@ -295,6 +349,7 @@ const ChatArea = () => {
       abortControllerRef.current.abort();
       abortControllerRef.current = null;
     }
+    flushPendingApprovals(false);
     setIsGenerating(false);
   };
 
@@ -550,7 +605,9 @@ const ChatArea = () => {
       while (round < MAX_TOOL_ROUNDS) {
         round++;
 
-        const streamResult = await generateChatStream(targetModel, formattedMessages, update => {
+        // Read the active model fresh each round so switch_model applies mid-conversation
+        const roundModel = activeModelRef.current || targetModel;
+        const streamResult = await generateChatStream(roundModel, formattedMessages, update => {
           const currentToolCalls: ToolCall[] = (update.toolCalls || []).map((tc, i) => {
             try {
               const parsed = JSON.parse(tc);
@@ -603,63 +660,63 @@ const ChatArea = () => {
           break;
         }
 
-        const roundToolCalls: ToolCall[] = [];
-        const toolResponses: string[] = [];
-
-        for (let i = 0; i < rawCalls.length; i++) {
-          const raw = rawCalls[i];
-          let toolName = 'unknown_tool';
+        // Surface every call in this round as executing immediately
+        const roundToolCalls: ToolCall[] = rawCalls.map((raw, i) => {
+          let name = 'tool';
           let args: any = {};
           try {
             const parsed = JSON.parse(raw);
-            toolName = parsed.name || parsed.toolName || 'tool';
+            name = parsed.name || parsed.toolName || 'tool';
             args = parsed.arguments || parsed.args || {};
           } catch {
-            toolName = 'tool';
             args = raw;
           }
+          return { id: `${assistantMsgId}-tc-${round}-${i}`, name, args, status: 'executing' as const, raw };
+        });
+        setMessages(prev => {
+          const newMsgs = [...prev];
+          const targetIdx = newMsgs.findIndex(m => m.id === assistantMsgId);
+          if (targetIdx !== -1) {
+            newMsgs[targetIdx] = {
+              ...newMsgs[targetIdx],
+              toolCalls: [...allToolCalls, ...roundToolCalls],
+              isGenerating: true
+            };
+          }
+          return newMsgs;
+        });
 
-          const tcObj: ToolCall = {
-            id: `${assistantMsgId}-tc-${round}-${i}`,
-            name: toolName,
-            args,
-            status: 'executing',
-            raw
-          };
-          roundToolCalls.push(tcObj);
+        // Parallel-safe execution: independent calls run concurrently while
+        // browser/desktop calls serialize through shared locks.
+        const execResults = await executeToolCalls(rawCalls, createToolContext());
 
-          const currentCombined = [...allToolCalls, ...roundToolCalls];
-          setMessages(prev => {
-            const newMsgs = [...prev];
-            const targetIdx = newMsgs.findIndex(m => m.id === assistantMsgId);
-            if (targetIdx !== -1) {
-              newMsgs[targetIdx] = {
-                ...newMsgs[targetIdx],
-                toolCalls: currentCombined,
-                isGenerating: true
-              };
-            }
-            return newMsgs;
-          });
+        execResults.forEach((er, i) => {
+          const tcObj = roundToolCalls[i];
+          tcObj.status = er.error ? 'error' : 'completed';
+          tcObj.result = er.result;
+          if (er.imageDataUrl) tcObj.image = er.imageDataUrl;
+        });
 
-          const execRes = await executeToolCall(raw);
-          tcObj.status = execRes.result.startsWith('Execution error:') || execRes.result.startsWith('Failed to parse') ? 'error' : 'completed';
-          tcObj.result = execRes.result;
+        setMessages(prev => {
+          const newMsgs = [...prev];
+          const targetIdx = newMsgs.findIndex(m => m.id === assistantMsgId);
+          if (targetIdx !== -1) {
+            newMsgs[targetIdx] = {
+              ...newMsgs[targetIdx],
+              toolCalls: [...allToolCalls, ...roundToolCalls],
+              isGenerating: true
+            };
+          }
+          return newMsgs;
+        });
 
-          setMessages(prev => {
-            const newMsgs = [...prev];
-            const targetIdx = newMsgs.findIndex(m => m.id === assistantMsgId);
-            if (targetIdx !== -1) {
-              newMsgs[targetIdx] = {
-                ...newMsgs[targetIdx],
-                toolCalls: [...allToolCalls, ...roundToolCalls],
-                isGenerating: true
-              };
-            }
-            return newMsgs;
-          });
-
-          toolResponses.push(`<tool_response tool="${toolName}">\n${truncateForContext(execRes.result)}\n</tool_response>`);
+        const roundToolParts: any[] = [];
+        for (const er of execResults) {
+          roundToolParts.push({ type: 'text', text: `<tool_response tool="${er.toolName}"${er.error ? ' error="true"' : ''}>\n${truncateForContext(er.result)}\n</tool_response>` });
+          if (er.imageDataUrl) {
+            roundToolParts.push({ type: 'text', text: `[${er.toolName} screenshot attached below]` });
+            roundToolParts.push({ type: 'image_url', image_url: { url: er.imageDataUrl } });
+          }
         }
 
         allToolCalls.push(...roundToolCalls);
@@ -669,9 +726,10 @@ const ChatArea = () => {
           content: rawCalls.map((c: string) => `<tool_call>\n${c}\n</tool_call>`).join('\n\n')
         });
 
+        const hasImagePart = roundToolParts.some(p => p.type === 'image_url');
         formattedMessages.push({
           role: 'user',
-          content: toolResponses.join('\n\n')
+          content: hasImagePart ? roundToolParts : roundToolParts.map(p => p.text).join('\n\n')
         });
       }
 
@@ -853,12 +911,14 @@ const ChatArea = () => {
 
   // The most recent browser tool call across the conversation hosts the live embedded browser
   let liveBrowserToolId: string | null = null;
+  let liveBrowserMsgIdx: number = -1;
   for (let i = messages.length - 1; i >= 0; i--) {
     const tcs = messages[i].toolCalls;
     if (tcs && tcs.length > 0) {
       for (let j = tcs.length - 1; j >= 0; j--) {
         if ((tcs[j].name || '').startsWith('browser')) {
           liveBrowserToolId = tcs[j].id;
+          liveBrowserMsgIdx = i;
           break;
         }
       }
@@ -870,7 +930,43 @@ const ChatArea = () => {
     <div className="flex-1 flex flex-col bg-surface relative">
       
       {/* Main Content */}
-      <div ref={scrollContainerRef} onScroll={handleScroll} className="flex-1 flex flex-col items-center overflow-y-auto w-full">
+      <div ref={scrollContainerRef} onScroll={handleScroll} className="flex-1 flex flex-col items-center overflow-y-auto w-full relative">
+        
+        {/* The persistent AgentBrowser, ordered immediately after its host message */}
+        {liveBrowserToolId && (
+          <div
+            className="w-full max-w-3xl px-4 pb-4 shrink-0 transition-all duration-300 -mt-8"
+            style={{ order: liveBrowserMsgIdx * 2 + 1 }}
+          >
+            <div className="w-full overflow-hidden rounded-xl border border-white/10 shadow-lg bg-white/[0.03] backdrop-blur-md">
+              <div
+                onClick={() => setIsBrowserExpanded(!isBrowserExpanded)}
+                className="flex items-center justify-between px-3 py-2 cursor-pointer hover:bg-white/[0.05] transition-colors select-none text-xs text-textSecondary group border-b border-white/5"
+              >
+                <div className="flex items-center gap-2 min-w-0">
+                  <Globe size={14} className="text-blue-400 shrink-0" />
+                  <span className="font-medium text-textSecondary group-hover:text-white transition-colors shrink-0">Live Browser Session</span>
+                  <span className="font-mono truncate text-textSecondary/80">Active</span>
+                </div>
+                <div className="flex items-center gap-2 shrink-0 ml-2">
+                  <div className="w-2 h-2 rounded-full bg-green-500 animate-pulse" />
+                  {isBrowserExpanded ? (
+                    <ChevronDown size={14} className="text-textSecondary group-hover:text-gray-200 transition-transform" />
+                  ) : (
+                    <ChevronRight size={14} className="text-textSecondary group-hover:text-gray-200 transition-transform" />
+                  )}
+                </div>
+              </div>
+              
+              {isBrowserExpanded && (
+                <div className="w-full h-[340px] relative bg-black/40">
+                  <AgentBrowser />
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
         {messages.length === 0 ? (
           <div className="flex-1 flex flex-col items-center justify-center w-full px-4">
             <div className="flex flex-col items-center max-w-3xl w-full mt-10">
@@ -888,7 +984,7 @@ const ChatArea = () => {
               const isEditingResponse = editingBlock?.id === msg.id && editingBlock?.type === 'response';
               
               return (
-              <div key={msg.id || idx} className="flex flex-col w-full text-gray-100 gap-2 mb-4 group/msg relative">
+              <div key={msg.id || idx} className="flex flex-col w-full text-gray-100 gap-2 mb-4 group/msg relative shrink-0" style={{ order: idx * 2 }}>
                 <div className="flex items-center justify-between font-semibold text-sm text-textSecondary">
                   <span>{msg.role === 'user' ? 'You' : 'Assistant'}</span>
                 </div>
@@ -949,12 +1045,13 @@ const ChatArea = () => {
                       const status = tc.status || (msg.isGenerating && idx === msg.toolCalls!.length - 1 ? 'executing' : 'completed');
                       const result = tc.result;
                       return (
-                        <ToolCallBlock 
-                          key={`${tc.id || 'tc-' + msg.id}-${idx}`} 
-                          toolName={toolName} 
-                          args={args} 
+                        <ToolCallBlock
+                          key={`${tc.id || 'tc-' + msg.id}-${idx}`}
+                          toolName={toolName}
+                          args={args}
                           status={status}
                           result={result}
+                          imageDataUrl={tc.image}
                           isBrowserHost={!!tc.id && tc.id === liveBrowserToolId}
                         />
                       );
@@ -985,10 +1082,19 @@ const ChatArea = () => {
               </div>
             );
           })}
-            <div ref={bottomRef} />
+            <div ref={bottomRef} className="w-full shrink-0" style={{ order: 999999 }} />
           </div>
         )}
       </div>
+
+      {/* Tool permission approvals */}
+      {pendingApprovals.length > 0 && (
+        <div className="fixed bottom-6 right-6 z-[400] flex flex-col gap-3 items-end">
+          {pendingApprovals.map(pa => (
+            <ApprovalCard key={pa.id} approval={pa} />
+          ))}
+        </div>
+      )}
 
       {/* Selection Pop-up */}
       {selectionContext && !commentInputContext && (

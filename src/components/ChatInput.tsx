@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react';
-import { ArrowUp, ChevronUp, ChevronRight, Plus, FileText, Image as ImageIcon, Folder, X, FileSpreadsheet, MonitorPlay, AlertTriangle, Square, Check, RefreshCw, Settings2 } from 'lucide-react';
+import { ArrowUp, ChevronUp, ChevronRight, Plus, FileText, Image as ImageIcon, Folder, X, FileSpreadsheet, MonitorPlay, AlertTriangle, Square, Check, RefreshCw, Settings2, GripHorizontal } from 'lucide-react';
 import CodeMirror, { ReactCodeMirrorRef } from '@uiw/react-codemirror';
 import { markdown } from '@codemirror/lang-markdown';
 import { EditorView, Decoration, DecorationSet, WidgetType, ViewPlugin, ViewUpdate, keymap } from '@codemirror/view';
@@ -23,8 +23,8 @@ const ModelItem = ({ model, isSelected, onClick }: { model: any, isSelected: boo
   <button
     onClick={onClick}
     className={`menu-item ${isSelected
-        ? 'bg-white/10 text-white font-medium'
-        : 'text-textSecondary hover:bg-white/5 hover:text-white'
+      ? 'bg-white/10 text-white font-medium'
+      : 'text-textSecondary hover:bg-white/5 hover:text-white'
       }`}
   >
     <img
@@ -35,6 +35,46 @@ const ModelItem = ({ model, isSelected, onClick }: { model: any, isSelected: boo
     />
     <span className="truncate">{model.name}</span>
   </button>
+);
+
+const useMenuDrag = (active: boolean) => {
+  const [offset, setOffset] = useState({ x: 0, y: 0 });
+  const offsetRef = useRef(offset);
+  useEffect(() => { offsetRef.current = offset; }, [offset]);
+
+  useEffect(() => {
+    setOffset({ x: 0, y: 0 });
+  }, [active]);
+
+  const onGripMouseDown = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const start = { x: e.clientX, y: e.clientY, baseX: offsetRef.current.x, baseY: offsetRef.current.y };
+    const onMove = (ev: MouseEvent) => {
+      setOffset({ x: start.baseX + ev.clientX - start.x, y: start.baseY + ev.clientY - start.y });
+    };
+    const onUp = () => {
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+    };
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+  }, []);
+
+  const reset = useCallback(() => setOffset({ x: 0, y: 0 }), []);
+
+  return { offset, onGripMouseDown, reset };
+};
+
+const MenuGrip = ({ onMouseDown, onReset }: { onMouseDown: (e: React.MouseEvent) => void, onReset: () => void }) => (
+  <div
+    onMouseDown={onMouseDown}
+    onDoubleClick={onReset}
+    className="absolute bottom-1 left-1/2 -translate-x-1/2 z-10 p-1 rounded-md cursor-grab active:cursor-grabbing text-textSecondary/50 hover:text-white hover:bg-white/10 transition-colors select-none"
+    title="Drag to move · double-click to reset"
+  >
+    <GripHorizontal size={14} />
+  </div>
 );
 
 interface ChatInputProps {
@@ -187,6 +227,9 @@ const ChatInput: React.FC<ChatInputProps> = ({ onSend, onStop, disabled, editing
 
   const [isAttachMenuOpen, setIsAttachMenuOpen] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  const attachMenuDrag = useMenuDrag(isAttachMenuOpen);
+  const settingsMenuDrag = useMenuDrag(isSettingsOpen);
+  const modelMenuDrag = useMenuDrag(isModelMenuOpen);
   const [modelSettings, setModelSettings] = useState<ModelSettings>(() => getModelSettings());
   const [estimatedTokens, setEstimatedTokens] = useState<{ total: number; prompt: number; history: number; system: number } | null>(null);
   const [attachments, setAttachments] = useState<any[]>([]);
@@ -246,7 +289,7 @@ const ChatInput: React.FC<ChatInputProps> = ({ onSend, onStop, disabled, editing
     { key: 'history', label: 'History', tokens: estimatedTokens?.history ?? 0, color: 'color-mix(in srgb, rgb(var(--accent-rgb)) 70%, white)' },
     { key: 'system', label: 'System', tokens: estimatedTokens?.system ?? 0, color: 'rgb(var(--accent-rgb))' },
   ];
-  
+
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const [canScrollRight, setCanScrollRight] = useState(false);
 
@@ -285,11 +328,11 @@ const ChatInput: React.FC<ChatInputProps> = ({ onSend, onStop, disabled, editing
       }
     }
   }, [editingBlock]);
-  
+
   const getAllAttachments = useCallback(() => {
     const messageAttachments = messages ? messages.flatMap((m: any) => m.attachments || []) : [];
     const all = [...messageAttachments, ...attachments];
-    
+
     // Deduplicate by display name
     const unique: any[] = [];
     const seen = new Set();
@@ -306,7 +349,7 @@ const ChatInput: React.FC<ChatInputProps> = ({ onSend, onStop, disabled, editing
   useEffect(() => {
     allAttachmentsRef.current = getAllAttachments();
   }, [getAllAttachments]);
-  
+
   const attachmentsRef = useRef(attachments);
 
   useEffect(() => {
@@ -324,6 +367,24 @@ const ChatInput: React.FC<ChatInputProps> = ({ onSend, onStop, disabled, editing
       onModelChange(selectedModel);
     }
   }, [selectedModel, onModelChange]);
+
+  // Stay in sync when the AGENT switches its own model or tunes parameters
+  // via tools (switch_model / update_settings dispatch these events).
+  useEffect(() => {
+    const onSettingsChanged = () => setModelSettings(getModelSettings());
+    const onAgentModelChanged = (e: Event) => {
+      const detail = (e as CustomEvent).detail;
+      if (detail && detail.id && detail.provider) {
+        setSelectedModel(detail);
+      }
+    };
+    window.addEventListener('model-settings-updated', onSettingsChanged);
+    window.addEventListener('agent-model-changed', onAgentModelChanged);
+    return () => {
+      window.removeEventListener('model-settings-updated', onSettingsChanged);
+      window.removeEventListener('agent-model-changed', onAgentModelChanged);
+    };
+  }, []);
 
   const loadModels = async () => {
     setIsLoadingModels(true);
@@ -391,7 +452,7 @@ const ChatInput: React.FC<ChatInputProps> = ({ onSend, onStop, disabled, editing
 
   const handleSend = () => {
     if ((!value.trim() && attachments.length === 0) || !selectedModel || disabled) return;
-    
+
     if (editingBlock && onSaveEdit) {
       onSaveEdit(editingBlock.id, editingBlock.type, value, attachments);
       setValue('');
@@ -500,7 +561,7 @@ const ChatInput: React.FC<ChatInputProps> = ({ onSend, onStop, disabled, editing
       const isImage = file.type.startsWith('image/') || /\.(png|jpe?g|gif|webp|bmp|svg)$/i.test(file.name);
       const isVideo = file.type.startsWith('video/') || /\.(mp4|webm|ogg|mov)$/i.test(file.name);
       const isPdf = file.type === 'application/pdf' || /\.pdf$/i.test(file.name);
-      
+
       let filePath = '';
       if ((window as any).electronAPI?.getPathForFile) {
         filePath = (window as any).electronAPI.getPathForFile(file);
@@ -510,27 +571,27 @@ const ChatInput: React.FC<ChatInputProps> = ({ onSend, onStop, disabled, editing
 
       let thumbnail = null;
       const objectUrl = URL.createObjectURL(file);
-      
+
       if (isPdf) {
         try {
           const pdfjsLib = await import('pdfjs-dist');
           pdfjsLib.GlobalWorkerOptions.workerSrc = `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/${pdfjsLib.version}/pdf.worker.min.mjs`;
-          
+
           const loadingTask = pdfjsLib.getDocument({ url: objectUrl });
           const pdfDocument = await loadingTask.promise;
           const page = await pdfDocument.getPage(1);
-          
+
           const viewport = page.getViewport({ scale: 1.0 });
           const canvas = document.createElement('canvas');
           const context = canvas.getContext('2d');
-          
+
           if (context) {
             // target max 256px dimension
             const scale = Math.min(256 / viewport.width, 256 / viewport.height, 1);
             const scaledViewport = page.getViewport({ scale });
             canvas.width = scaledViewport.width;
             canvas.height = scaledViewport.height;
-            
+
             await page.render({ canvasContext: context, viewport: scaledViewport } as any).promise;
             thumbnail = canvas.toDataURL('image/jpeg', 0.8);
           }
@@ -544,7 +605,7 @@ const ChatInput: React.FC<ChatInputProps> = ({ onSend, onStop, disabled, editing
             video.src = objectUrl;
             video.crossOrigin = 'anonymous';
             video.currentTime = 1.0; // Seek to 1 second
-            
+
             video.onloadeddata = () => {
               const canvas = document.createElement('canvas');
               const ctx = canvas.getContext('2d');
@@ -564,7 +625,7 @@ const ChatInput: React.FC<ChatInputProps> = ({ onSend, onStop, disabled, editing
           console.error('Failed to generate Video thumbnail', e);
         }
       }
-      
+
       // Fallback to electron getFileThumbnail for others
       if (!thumbnail && !isImage && filePath && (window as any).electronAPI?.getFileThumbnail) {
         try {
@@ -573,7 +634,7 @@ const ChatInput: React.FC<ChatInputProps> = ({ onSend, onStop, disabled, editing
           console.error('Failed to get thumbnail for', file.name, e);
         }
       }
-      
+
       return {
         id: Math.random().toString(36).substring(7),
         display: file.name,
@@ -845,7 +906,14 @@ const ChatInput: React.FC<ChatInputProps> = ({ onSend, onStop, disabled, editing
               onChange={handleFileChange}
             />
             {isAttachMenuOpen && (
-              <div className="absolute bottom-full left-0 mb-3 w-40 menu-panel rounded-[24px] p-2 z-50 flex flex-col">
+              <div
+                className="absolute bottom-full left-0 mb-3 w-40 menu-panel rounded-[24px] p-2 pb-7 z-50 flex flex-col"
+                style={{ transform: `translate3d(${attachMenuDrag.offset.x}px, ${attachMenuDrag.offset.y}px, 0)` }}
+              >
+                <MenuGrip onMouseDown={attachMenuDrag.onGripMouseDown} onReset={attachMenuDrag.reset} />
+                <div className="px-3 pt-1.5 pb-1.5">
+                  <span className="menu-header">Context</span>
+                </div>
                 <button onClick={handleAttachClick} className="menu-item">
                   <FileText size={18} className="text-textSecondary" />
                   Attach Files
@@ -853,11 +921,7 @@ const ChatInput: React.FC<ChatInputProps> = ({ onSend, onStop, disabled, editing
               </div>
             )}
             <button
-              onClick={() => {
-                setIsAttachMenuOpen(!isAttachMenuOpen);
-                setIsSettingsOpen(false);
-                setIsModelMenuOpen(false);
-              }}
+              onClick={() => setIsAttachMenuOpen(!isAttachMenuOpen)}
               className="p-2 text-textSecondary hover:text-white rounded-full hover:bg-white/10 transition-all"
               title="Attach file"
             >
@@ -868,7 +932,11 @@ const ChatInput: React.FC<ChatInputProps> = ({ onSend, onStop, disabled, editing
           {/* Settings-2 Model Adjustments Drop-up */}
           <div className="relative">
             {isSettingsOpen && (
-              <div className="absolute bottom-full left-0 mb-3 w-80 menu-panel rounded-[24px] p-4 z-50 flex flex-col gap-3.5 text-textSecondary">
+              <div
+                className="absolute bottom-full left-0 mb-3 w-80 menu-panel rounded-[24px] p-4 pb-8 z-50 flex flex-col gap-3.5 text-textSecondary"
+                style={{ transform: `translate3d(${settingsMenuDrag.offset.x}px, ${settingsMenuDrag.offset.y}px, 0)` }}
+              >
+                <MenuGrip onMouseDown={settingsMenuDrag.onGripMouseDown} onReset={settingsMenuDrag.reset} />
                 {/* Header + Context Usage Chart */}
                 <div className="flex flex-col gap-2">
                   <span className="menu-header">Model Parameters</span>
@@ -911,11 +979,10 @@ const ChatInput: React.FC<ChatInputProps> = ({ onSend, onStop, disabled, editing
                         key={level}
                         type="button"
                         onClick={() => updateSettings({ thinkingLevel: level })}
-                        className={`py-1.5 text-sm rounded-lg capitalize transition-colors ${
-                          modelSettings.thinkingLevel === level
+                        className={`py-1.5 text-sm rounded-lg capitalize transition-colors ${modelSettings.thinkingLevel === level
                             ? 'bg-white/20 text-white font-medium shadow-sm'
                             : 'text-textSecondary hover:text-gray-200'
-                        }`}
+                          }`}
                       >
                         {level}
                       </button>
@@ -1021,14 +1088,7 @@ const ChatInput: React.FC<ChatInputProps> = ({ onSend, onStop, disabled, editing
               </div>
             )}
             <button
-              onClick={() => {
-                const next = !isSettingsOpen;
-                setIsSettingsOpen(next);
-                if (next) {
-                  setIsAttachMenuOpen(false);
-                  setIsModelMenuOpen(false);
-                }
-              }}
+              onClick={() => setIsSettingsOpen(!isSettingsOpen)}
               className="p-2 text-textSecondary hover:text-white rounded-full hover:bg-white/10 transition-all"
               title="Model settings"
             >
@@ -1039,7 +1099,11 @@ const ChatInput: React.FC<ChatInputProps> = ({ onSend, onStop, disabled, editing
           {/* Model Selector Drop-up */}
           <div className="relative">
             {isModelMenuOpen && (
-              <div className="absolute bottom-full left-0 mb-3 w-64 menu-panel rounded-[24px] p-2 z-50 flex flex-col">
+              <div
+                className="absolute bottom-full left-0 mb-3 w-64 menu-panel rounded-[24px] p-2 pb-7 z-50 flex flex-col"
+                style={{ transform: `translate3d(${modelMenuDrag.offset.x}px, ${modelMenuDrag.offset.y}px, 0)` }}
+              >
+                <MenuGrip onMouseDown={modelMenuDrag.onGripMouseDown} onReset={modelMenuDrag.reset} />
 
                 <div className="flex items-center justify-between px-3 pt-3 pb-2">
                   <span className="menu-header">Models</span>
@@ -1082,11 +1146,7 @@ const ChatInput: React.FC<ChatInputProps> = ({ onSend, onStop, disabled, editing
             )}
 
             <button
-              onClick={() => {
-                setIsModelMenuOpen(!isModelMenuOpen);
-                setIsAttachMenuOpen(false);
-                setIsSettingsOpen(false);
-              }}
+              onClick={() => setIsModelMenuOpen(!isModelMenuOpen)}
               className="flex items-center gap-2.5 px-3.5 py-2 rounded-2xl mac-element mac-element-hover text-gray-200 font-medium text-sm transition-all"
             >
               {selectedModel ? (
@@ -1116,7 +1176,7 @@ const ChatInput: React.FC<ChatInputProps> = ({ onSend, onStop, disabled, editing
           {editingBlock && (
             <div className="flex items-center gap-2.5 mr-auto px-3.5 py-2 rounded-2xl mac-element text-gray-200 font-medium text-sm transition-all border border-white/5">
               <span className="flex items-center gap-1.5">
-                <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/><path d="m15 5 4 4"/></svg>
+                <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z" /><path d="m15 5 4 4" /></svg>
                 Editing
               </span>
               <button
@@ -1137,10 +1197,10 @@ const ChatInput: React.FC<ChatInputProps> = ({ onSend, onStop, disabled, editing
         {/* Scrollable Append Area */}
         {children && (
           <div className="flex-1 overflow-hidden relative flex items-center h-[36px] z-0">
-            <div 
+            <div
               ref={scrollContainerRef}
               onScroll={checkScroll}
-              className="flex-1 h-full overflow-x-auto flex items-center gap-2 px-1 scroll-smooth" 
+              className="flex-1 h-full overflow-x-auto flex items-center gap-2 px-1 scroll-smooth"
               style={{ scrollbarWidth: 'none', msOverflowStyle: 'none' }}
             >
               <style>{`
@@ -1165,7 +1225,7 @@ const ChatInput: React.FC<ChatInputProps> = ({ onSend, onStop, disabled, editing
             )}
           </div>
         )}
-        
+
         {!children && <div className="flex-1" />}
 
         {/* Right Action: Send/Stop Button */}
