@@ -81,8 +81,8 @@ interface ChatInputProps {
   onSend: (text: string, attachments: any[], model: LLMModel) => void;
   onStop?: () => void;
   disabled: boolean;
-  editingBlock?: { id: string, type: 'user' | 'thinking' | 'response' } | null;
-  onSaveEdit?: (id: string, type: 'user' | 'thinking' | 'response', text: string, attachments: any[]) => void;
+  editingBlock?: { id: string, type: 'user' | 'thinking' | 'response' | 'tools' } | null;
+  onSaveEdit?: (id: string, type: 'user' | 'thinking' | 'response' | 'tools', text: string, attachments: any[]) => void;
   onCancelEdit?: () => void;
   onModelChange?: (model: LLMModel | null) => void;
   onEditPreview?: (text: string, attachments: any[]) => void;
@@ -323,6 +323,11 @@ const ChatInput: React.FC<ChatInputProps> = ({ onSend, onStop, disabled, editing
         } else if (editingBlock.type === 'thinking') {
           attachmentsRef.current = [];
           setValue(msg.thinking || '');
+          setAttachments([]);
+        } else if (editingBlock.type === 'tools') {
+          // Tools block is not directly editable in the input area
+          attachmentsRef.current = [];
+          setValue('');
           setAttachments([]);
         }
       }

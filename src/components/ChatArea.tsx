@@ -2,7 +2,6 @@ import React, { useState, useRef, useEffect } from 'react';
 import ChatInput from './ChatInput';
 import ThinkingBlock from './ThinkingBlock';
 import ToolCallBlock from './ToolCallBlock';
-import AgentBrowser from './AgentBrowser';
 import { generateChatStream, LLMModel, fileToBase64, parseAttachmentDocument } from '../utils/llm';
 import { executeToolCalls, ToolContext } from '../utils/toolExecutor';
 import { spawnSubAgent, getAgentsSnapshot, waitForAgents } from '../utils/subAgents';
@@ -15,10 +14,8 @@ import rehypeKatex from 'rehype-katex';
 import 'katex/dist/katex.min.css';
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
 import { vscDarkPlus } from 'react-syntax-highlighter/dist/esm/styles/prism';
-import { MessageSquarePlus, MessageSquare, X, Check, Globe, ChevronDown, ChevronRight, Trash2 } from 'lucide-react';
+import { MessageSquarePlus, Terminal } from 'lucide-react';
 import { getSystemTools } from '../utils/tools';
-import { agentBrowserStore } from '../utils/agentBrowserStore';
-import { terminateBrowserSession } from '../utils/browserTools';
 import ApprovalCard, { PendingApproval } from './ApprovalCard';
 
 const MarkdownComponents: any = {
@@ -121,7 +118,7 @@ const ChatArea = () => {
   const [isGenerating, setIsGenerating] = useState(false);
   
   // Edit mode tracking
-  const [editingBlock, setEditingBlock] = useState<{ id: string, type: 'user' | 'thinking' | 'response' } | null>(null);
+  const [editingBlock, setEditingBlock] = useState<{ id: string, type: 'user' | 'thinking' | 'response' | 'tools' } | null>(null);
   const [editPreview, setEditPreview] = useState<{ text: string, attachments: any[] } | null>(null);
   
   const [currentModel, setCurrentModel] = useState<LLMModel | null>(null);
@@ -135,7 +132,6 @@ const ChatArea = () => {
   const [isCommentPinned, setIsCommentPinned] = useState(false);
   const [commentDraft, setCommentDraft] = useState('');
   const [isBrowserExpanded, setIsBrowserExpanded] = useState(false);
-  const [terminatedSnapshot, setTerminatedSnapshot] = useState<string | null>(() => agentBrowserStore.getTerminatedSnapshot());
   const commentPopupHoverRef = useRef(false);
   const isCommentPinnedRef = useRef(false);
   const commentTextareaRef = useRef<HTMLTextAreaElement>(null);
@@ -208,11 +204,6 @@ const ChatArea = () => {
       commentTextareaRef.current?.focus();
     }
   }, [isCommentPinned]);
-
-  // Subscribe to terminated snapshot changes for instant UI update
-  useEffect(() => {
-    return agentBrowserStore.subscribeSnapshot(setTerminatedSnapshot);
-  }, []);
 
   const showCommentPopup = (el: Element, pinned: boolean) => {
     const commentId = el.getAttribute('data-comment-id');
@@ -806,7 +797,7 @@ const ChatArea = () => {
     }
   };
 
-  const handleSaveEdit = (id: string, type: 'user' | 'thinking' | 'response', text: string, attachments: any[]) => {
+  const handleSaveEdit = (id: string, type: 'user' | 'thinking' | 'response' | 'tools', text: string, attachments: any[]) => {
     setMessages(prev => {
       const newMsgs = [...prev];
       const idx = newMsgs.findIndex(m => m.id === id);
@@ -816,6 +807,7 @@ const ChatArea = () => {
         } else if (type === 'thinking') {
           newMsgs[idx] = { ...newMsgs[idx], thinking: text };
         }
+        // 'tools' type is not directly editable in the input area
       }
       return newMsgs;
     });
@@ -878,7 +870,7 @@ const ChatArea = () => {
     setActiveComment(null);
   };
 
-  const handleDelete = (id: string, type?: 'user' | 'thinking' | 'response') => {
+  const handleDelete = (id: string, type?: 'user' | 'thinking' | 'response' | 'tools') => {
     setMessages(prev => {
       const newMsgs = [...prev];
       const idx = newMsgs.findIndex(m => m.id === id);
@@ -891,6 +883,9 @@ const ChatArea = () => {
         if (!newMsgs[idx].content && (!newMsgs[idx].toolCalls || newMsgs[idx].toolCalls.length === 0)) newMsgs.splice(idx, 1);
       } else if (type === 'response') {
         newMsgs.splice(idx, 1);
+      } else if (type === 'tools') {
+        newMsgs[idx] = { ...newMsgs[idx], toolCalls: [] };
+        if (!newMsgs[idx].content && (!newMsgs[idx].thinking || newMsgs[idx].thinking.trim() === '')) newMsgs.splice(idx, 1);
       }
       return newMsgs;
     });
@@ -899,7 +894,7 @@ const ChatArea = () => {
     }
   };
 
-  const handleRegenerate = async (id: string, type: 'user' | 'thinking' | 'response') => {
+  const handleRegenerate = async (id: string, type: 'user' | 'thinking' | 'response' | 'tools') => {
     const targetModel = currentModel || lastUsedModel;
     if (!targetModel) return;
     const msgIdx = messages.findIndex(m => m.id === id);
@@ -924,6 +919,12 @@ const ChatArea = () => {
       const contextMsgs = messages.slice(0, msgIdx);
       setMessages(contextMsgs);
       triggerGeneration(contextMsgs, targetModel, msg.thinking || '', msg.comments);
+    } else if (type === 'tools') {
+      // For tools, we keep the context but clear tool calls and regenerate from that point
+      const contextMsgs = messages.slice(0, msgIdx);
+      const msgWithoutTools = { ...msg, toolCalls: [] };
+      setMessages([...contextMsgs, msgWithoutTools]);
+      triggerGeneration([...contextMsgs, msgWithoutTools], targetModel, msg.thinking || '', msg.comments);
     }
     setEditingBlock(null);
   };
@@ -931,17 +932,11 @@ const ChatArea = () => {
   // User-initiated kill of the embedded browser (trash icon in Live Browser).
   // The flag is consumed by the agent's next webview tool call so it learns
   // why its session died.
-  const handleUserKillBrowser = async () => {
-    agentBrowserStore.markUserKilled();
-    await terminateBrowserSession();
-  };
-
   // Build unified chronological activity feed from all messages
   // Each activity: { type, messageId, messageIdx, toolCallIdx?, data }
-  // Order: user msg → thinking → tool calls → response (per message), messages in array order
+  // Order: user msg → thinking → tools block → response (per message), messages in array order
   const activityFeed = React.useMemo(() => {
     const activities: any[] = [];
-    let lastBrowserActivityIdx = -1;
     
     messages.forEach((msg, msgIdx) => {
       if (msg.role === 'user') {
@@ -969,15 +964,10 @@ const ChatArea = () => {
           if (partText.trim() || isLivePart) {
             activities.push({ type: 'thinking', messageId: msg.id, messageIdx: msgIdx, partIdx: slot, text: partText, live: isLivePart, data: msg });
           }
-          const roundTools = toolsByRound.get(slot + 1) || [];
-          roundTools.forEach(({ tc, tcIdx }) => {
-            const toolName = tc.name || tc.toolName || 'tool';
-            const isBrowser = toolName.startsWith('browser');
-            activities.push({ type: 'tool', messageId: msg.id, messageIdx: msgIdx, toolCallIdx: tcIdx, toolCount: tcs.length, messageIsGenerating: msg.isGenerating, data: { ...tc, toolName, isBrowser } });
-            if (isBrowser) {
-              lastBrowserActivityIdx = activities.length - 1;
-            }
-          });
+        }
+        // Tools block (unified) — only if there are tool calls
+        if (tcs.length > 0) {
+          activities.push({ type: 'tools', messageId: msg.id, messageIdx: msgIdx, data: { toolCalls: tcs, isGenerating: msg.isGenerating } });
         }
         // Response content
         if (msg.content || (msg.isGenerating && !msg.thinking && !tcs.length)) {
@@ -986,7 +976,7 @@ const ChatArea = () => {
       }
     });
     
-    return { activities, lastBrowserActivityIdx };
+    return { activities };
   }, [messages]);
 
   return (
@@ -1007,7 +997,6 @@ const ChatArea = () => {
         ) : (
           <div className="w-full max-w-3xl flex flex-col gap-4 py-6 px-4">
             {activityFeed.activities.map((activity, idx) => {
-              const isLastBrowser = idx === activityFeed.lastBrowserActivityIdx;
 
               if (activity.type === 'user') {
                 const msg = activity.data;
@@ -1067,22 +1056,47 @@ const ChatArea = () => {
                 );
               }
               
-              if (activity.type === 'tool') {
-                const tc = activity.data;
-                const toolName = tc.toolName;
-                const args = tc.args || tc.arguments || tc;
-                const status = tc.status || (activity.messageIsGenerating && activity.toolCallIdx === activity.toolCount - 1 ? 'executing' : 'completed');
-                const result = tc.result;
+              if (activity.type === 'tools') {
+                const { toolCalls, isGenerating: msgIsGenerating } = activity.data;
                 return (
-                  <div key={`tc-${activity.messageId}-${activity.toolCallIdx}`} className="flex flex-col w-full text-gray-100 gap-2 group/msg relative shrink-0" style={{ order: idx * 2 }}>
-                    <ToolCallBlock
-                      toolName={toolName}
-                      args={args}
-                      status={status}
-                      result={result}
-                      imageDataUrl={tc.image}
-                      isLiveBrowser={isLastBrowser}
-                    />
+                  <div key={`tools-${activity.messageId}`} className="flex flex-col w-full text-gray-100 gap-2 group/msg relative shrink-0" style={{ order: idx * 2 }}>
+                    <div className="w-full group relative">
+                      {!isGenerating && !msgIsGenerating && (
+                        <BlockToolbar 
+                          onEdit={() => setEditingBlock({ id: activity.messageId, type: 'tools' })} 
+                          onRegenerate={() => handleRegenerate(activity.messageId, 'tools')} 
+                          onDelete={() => handleDelete(activity.messageId, 'tools')} 
+                        />
+                      )}
+                      <div className="w-full rounded-xl border border-white/10 bg-white/[0.03] backdrop-blur-md overflow-hidden transition-all duration-200">
+                        <div className="px-3 py-2 text-xs text-textSecondary flex items-center gap-2 border-b border-white/5">
+                          <Terminal size={14} className="text-gray-400" />
+                          <span className="font-medium">Tool Calls</span>
+                          <span className="font-mono text-textSecondary/80">{toolCalls.length} call{toolCalls.length !== 1 ? 's' : ''}</span>
+                        </div>
+                        <div className="flex flex-col">
+                          {toolCalls.map((tc: any, i: number) => {
+                            const toolName = tc.name || tc.toolName || 'tool';
+                            const args = tc.args || tc.arguments || tc;
+                            const status = tc.status || (msgIsGenerating && i === toolCalls.length - 1 ? 'executing' : 'completed');
+                            const result = tc.result;
+                            const isBrowser = toolName.startsWith('browser');
+                            const isLastBrowser = isBrowser && i === toolCalls.findLastIndex((t: any) => (t.name || t.toolName || '').startsWith('browser'));
+                            return (
+                              <ToolCallBlock
+                                key={`tc-${activity.messageId}-${i}`}
+                                toolName={toolName}
+                                args={args}
+                                status={status}
+                                result={result}
+                                imageDataUrl={tc.image}
+                                isLiveBrowser={isLastBrowser}
+                              />
+                            );
+                          })}
+                        </div>
+                      </div>
+                    </div>
                   </div>
                 );
               }
@@ -1114,61 +1128,8 @@ const ChatArea = () => {
                 );
               }
               
-              return null;
+return null;
             })}
-            
-            {activityFeed.lastBrowserActivityIdx !== -1 && (
-              <div 
-                className="w-full shrink-0 transition-all duration-300"
-                style={{ order: activityFeed.lastBrowserActivityIdx * 2 + 1 }}
-              >
-                <div className="w-full overflow-hidden rounded-xl border border-white/10 shadow-lg bg-white/[0.03] backdrop-blur-md">
-                  <div
-                    onClick={() => setIsBrowserExpanded(!isBrowserExpanded)}
-                    className="flex items-center justify-between px-3 py-2 cursor-pointer hover:bg-white/[0.05] transition-colors select-none text-xs text-textSecondary group border-b border-white/5"
-                  >
-                    <div className="flex items-center gap-2 min-w-0">
-                      <Globe size={14} className="text-blue-400 shrink-0" />
-                      <span className="font-medium text-textSecondary group-hover:text-white transition-colors shrink-0">Live Browser Session</span>
-                    </div>
-                    <div className="flex items-center gap-2 shrink-0 ml-2">
-                      {terminatedSnapshot ? (
-                        <div className="w-2 h-2 rounded-full bg-red-500" title="Browser terminated" />
-                      ) : (
-                        <>
-                          <button
-                            onClick={(e) => { e.stopPropagation(); handleUserKillBrowser(); }}
-                            className="p-1 rounded hover:bg-red-500/20 text-textSecondary hover:text-red-400 transition-colors"
-                            title="Kill browser session"
-                          >
-                            <Trash2 size={14} />
-                          </button>
-                          <div className="w-2 h-2 rounded-full bg-green-500 animate-pulse" />
-                        </>
-                      )}
-                      {isBrowserExpanded ? (
-                        <ChevronDown size={14} className="text-textSecondary group-hover:text-gray-200 transition-transform" />
-                      ) : (
-                        <ChevronRight size={14} className="text-textSecondary group-hover:text-gray-200 transition-transform" />
-                      )}
-                    </div>
-                  </div>
-                  
-<div className={`transition-all duration-300 ease-in-out origin-top ${isBrowserExpanded ? 'h-[340px] opacity-100 scale-y-100' : 'h-0 opacity-0 scale-y-0'}`}>
-                      <div className="w-full h-full relative bg-black/40">
-                        {terminatedSnapshot && (
-                          <img
-                            src={terminatedSnapshot}
-                            alt="Terminated browser session"
-                            className="w-full h-full object-cover grayscale opacity-60"
-                          />
-                        )}
-                        {!terminatedSnapshot && <AgentBrowser />}
-                      </div>
-                    </div>
-                </div>
-              </div>
-            )}
 
             <div ref={bottomRef} className="w-full shrink-0" style={{ order: 999999 }} />
           </div>
