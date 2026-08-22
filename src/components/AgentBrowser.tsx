@@ -4,9 +4,7 @@ import { agentBrowserStore } from '../utils/agentBrowserStore';
 
 // Live embedded browser driven by the agent's browser_* tools.
 // Registers itself as window.activeWebview so browserTools.ts can drive it.
-// Receives `incarnation` as a prop (used as React key by parent) to force
-// a full remount when the browser is killed.
-const AgentBrowser: React.FC<{ incarnation?: number }> = ({ incarnation }) => {
+const AgentBrowser: React.FC = () => {
   // Frozen at mount: navigation is driven imperatively (loadURL) by
   // browserTools — rewriting the src attribute mid-flight causes ERR_ABORTED.
   const [initialSrc] = useState(() => agentBrowserStore.getUrl());
@@ -15,7 +13,7 @@ const AgentBrowser: React.FC<{ incarnation?: number }> = ({ incarnation }) => {
 
   useEffect(() => agentBrowserStore.subscribe(url => setDisplayUrl(url)), []);
 
-  // Reset scale on every mount (including remounts after kill)
+  // Reset scale on every mount
   useEffect(() => {
     (window as any).__oneagentBrowserScale = 0.5;
   }, []);
@@ -95,7 +93,7 @@ const AgentBrowser: React.FC<{ incarnation?: number }> = ({ incarnation }) => {
           className="w-full h-full"
           partition="persist:oneagent_browser"
           webpreferences="contextIsolation=yes,javascript=yes"
-          allowpopups
+          allowpopups={"true" as any}
         />
       </div>
     </div>

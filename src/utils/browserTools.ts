@@ -744,26 +744,25 @@ export const executeBrowserNavigation = async (action: string, url?: string): Pr
   return "OK";
 };
 
-// Kills the live webview session: stops in-flight loads, terminates the
-// renderer process, blanks the page and syncs the URL store. Used by both
-// the agent's browser_terminate tool and the user-facing trash button.
+// Kills the live webview session: captures a final screenshot, stops in-flight
+// loads, blanks the page and syncs the URL store. Used by both the agent's
+// browser_terminate tool and the user-facing trash button in the Live Browser header.
 export const terminateBrowserSession = async (): Promise<void> => {
   const wv = getActiveWebview();
   if (!wv) return;
-  try { wv.stop(); } catch {}
+  // Capture final screenshot before killing
   try {
-    // Terminate the renderer process — forces a fresh WebView on next mount
-    const wc = wv.getWebContents?.();
-    if (wc && typeof wc.terminate === 'function') {
-      wc.terminate();
+    const electronAPI = (window as any).electronAPI;
+    const res = await electronAPI?.browserCapture?.(wv.getWebContentsId());
+    if (res?.success && res.image) {
+      agentBrowserStore.setTerminatedSnapshot(res.image);
     }
   } catch {}
+  try { wv.stop(); } catch {}
   try {
     Promise.resolve(wv.loadURL('about:blank')).catch(() => {});
   } catch {}
   agentBrowserStore.navigate('about:blank');
-  // Bump incarnation so AgentBrowser remounts with a fresh <webview>
-  agentBrowserStore.bumpIncarnation?.();
 };
 
 export const executeBrowserTerminate = async (): Promise<string> => {
@@ -783,13 +782,79 @@ const resolveTargetPoint = async (
   x?: number | null,
   y?: number | null
 ): Promise<{ x: number, y: number } | null> => {
+  let targetX: number | undefined, targetY: number | undefined;
   if (id !== undefined && id !== null) {
-    return getElementCenter(wv, Number(id));
+    const c = await getElementCenter(wv, Number(id));
+    if (!c) return null;
+    targetX = c.x;
+    targetY = c.y;
+  } else {
+    const nx = Number(x);
+    const ny = Number(y);
+    if (!Number.isFinite(nx) || !Number.isFinite(ny)) return null;
+    targetX = Math.round(nx);
+    targetY = Math.round(ny);
   }
-  const nx = Number(x);
-  const ny = Number(y);
-  if (!Number.isFinite(nx) || !Number.isFinite(ny)) return null;
-  return { x: Math.round(nx), y: Math.round(ny) };
+
+  const code = `
+    (function() {
+      return new Promise((resolve) => {
+        const targetX = ${targetX};
+        const targetY = ${targetY};
+        let computedCursor = 'default';
+        try {
+          const el = document.elementFromPoint(targetX, targetY);
+          if (el) computedCursor = window.getComputedStyle(el).cursor;
+        } catch(e) {}
+        
+        let svgContent = '';
+        if (computedCursor === 'pointer') {
+          svgContent = '<svg width="32" height="40" viewBox="0 0 24 30" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M12 1L12 15" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><path d="M15.5 5V15" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><path d="M19 8V15" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><path d="M8.5 7V17" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><path d="M8.5 17L5.5 15.5C4 14.5 2 15.5 2.5 17L5 22C6 24 8 26 10 27C12 28 16 28 18 26C20 24 21 21 21 18V13.5C21 11.5 19 11.5 19 13.5" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><path d="M8.5 17L5.5 15.5C4 14.5 2 15.5 2.5 17L5 22C6 24 8 26 10 27C12 28 16 28 18 26C20 24 21 21 21 18V13.5C21 11.5 19 11.5 19 13.5" fill="black"/></svg>';
+        } else if (computedCursor === 'text') {
+          svgContent = '<svg width="24" height="40" viewBox="0 0 16 32" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M3 3H13M8 3V29M3 29H13" stroke="white" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/><path d="M4 4H12M8 4V28M4 28H12" stroke="black" stroke-width="1" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+        } else {
+          svgContent = '<svg width="32" height="48" viewBox="0 0 24 36" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M5.65376 2.15376C5.42103 1.92103 5.06847 1.8385 4.75338 1.94314C4.4383 2.04778 4.22019 2.31885 4.19702 2.65171L2.03035 33.8517C2.00844 34.1673 2.1969 34.4636 2.49603 34.5843C2.79517 34.7049 3.13653 34.6231 3.34032 34.3813L10.3704 26.0355L16.2731 34.8021C16.4805 35.1097 16.8906 35.1884 17.1889 34.978L22.4206 31.2872C22.7188 31.0768 22.7845 30.666 22.5663 30.3621L16.2238 21.5303H24.3333C24.6468 21.5303 24.9312 21.3414 25.0482 21.0558C25.1652 20.7702 25.0906 20.4431 24.8604 20.2319L5.65376 2.15376Z" fill="black" stroke="white" stroke-width="2" stroke-linejoin="round"/></svg>';
+        }
+
+        const cursor = document.createElement('img');
+        cursor.src = 'data:image/svg+xml;utf8,' + encodeURIComponent(svgContent);
+        Object.assign(cursor.style, {
+          position: 'fixed',
+          zIndex: '2147483647',
+          pointerEvents: 'none',
+          transition: 'all 0.6s cubic-bezier(0.25, 1, 0.5, 1)',
+          left: window.innerWidth + 'px',
+          top: window.innerHeight + 'px',
+          transform: 'translate(-4px, -4px)',
+          filter: 'drop-shadow(1px 2px 3px rgba(0,0,0,0.4))'
+        });
+        document.documentElement.appendChild(cursor);
+
+        setTimeout(() => {
+          cursor.style.left = targetX + 'px';
+          cursor.style.top = targetY + 'px';
+        }, 50);
+
+        setTimeout(() => {
+          cursor.style.transform = 'translate(-4px, -4px) scale(0.8)';
+          setTimeout(() => cursor.style.transform = 'translate(-4px, -4px) scale(1)', 150);
+
+          setTimeout(() => {
+            cursor.style.opacity = '0';
+            setTimeout(() => {
+              cursor.remove();
+              resolve(null);
+            }, 300);
+          }, 300);
+        }, 650);
+      });
+    })();
+  `;
+  try {
+    await wv.executeJavaScript(code);
+  } catch(e) {}
+
+  return { x: targetX, y: targetY };
 };
 
 const notFoundMsg = (id?: number | null) =>
@@ -1032,13 +1097,41 @@ export const browserSetUserAgent = async (args: any): Promise<string> => {
 
 // One-call page observation: annotated screenshot + Set-of-Mark list + trimmed
 // DOM text. The default way for the agent to look at a page.
-export const browserObservePage = async (): Promise<{ image: string, markers: any[], dom: string }> => {
+export const browserObservePage = async (): Promise<{ image: string, markers: any[], dom: string, meta: any }> => {
+  const wv = await waitForActiveWebview();
+  if (!wv) throw new Error("No active webview available");
+
   const shot = await captureBrowserScreenshot();
   let dom = '';
   try {
     dom = (await getSemanticDOM()).substring(0, 6000);
   } catch {}
-  return { image: shot.image, markers: shot.markers, dom };
+
+  // Collect viewport & scroll metadata to help the model understand page state
+  let meta: any = {};
+  try {
+    const scrollInfo = await wv.executeJavaScript(`(function() {
+      const d = document.scrollingElement || document.documentElement;
+      const vp = { width: window.innerWidth, height: window.innerHeight };
+      const scroll = { x: Math.round(d.scrollLeft), y: Math.round(d.scrollTop) };
+      const max = { x: Math.round(d.scrollWidth - d.clientWidth), y: Math.round(d.scrollHeight - d.clientHeight) };
+      return {
+        url: window.location.href,
+        title: document.title,
+        viewport: vp,
+        scroll,
+        maxScroll: max,
+        atTop: scroll.y <= 0,
+        atBottom: scroll.y >= max.y - 1,
+        atLeft: scroll.x <= 0,
+        atRight: scroll.x >= max.x - 1,
+        scrollPercent: max.y > 0 ? Math.round((scroll.y / max.y) * 100) : 0
+      };
+    })()`);
+    meta = scrollInfo;
+  } catch {}
+
+  return { image: shot.image, markers: shot.markers, dom, meta };
 };
 
 // Legacy mega-tool kept for old conversation replays. Routes onto the modern

@@ -1127,14 +1127,20 @@ const ChatArea = () => {
                       <span className="font-mono truncate text-textSecondary/80">Active</span>
                     </div>
                     <div className="flex items-center gap-2 shrink-0 ml-2">
-                      <button
-                        onClick={(e) => { e.stopPropagation(); handleUserKillBrowser(); }}
-                        className="p-1 rounded hover:bg-red-500/20 text-textSecondary hover:text-red-400 transition-colors"
-                        title="Kill browser session"
-                      >
-                        <Trash2 size={14} />
-                      </button>
-                      <div className="w-2 h-2 rounded-full bg-green-500 animate-pulse" />
+                      {agentBrowserStore.getTerminatedSnapshot() ? (
+                        <div className="w-2 h-2 rounded-full bg-red-500" title="Browser terminated" />
+                      ) : (
+                        <>
+                          <button
+                            onClick={(e) => { e.stopPropagation(); handleUserKillBrowser(); }}
+                            className="p-1 rounded hover:bg-red-500/20 text-textSecondary hover:text-red-400 transition-colors"
+                            title="Kill browser session"
+                          >
+                            <Trash2 size={14} />
+                          </button>
+                          <div className="w-2 h-2 rounded-full bg-green-500 animate-pulse" />
+                        </>
+                      )}
                       {isBrowserExpanded ? (
                         <ChevronDown size={14} className="text-textSecondary group-hover:text-gray-200 transition-transform" />
                       ) : (
@@ -1143,11 +1149,18 @@ const ChatArea = () => {
                     </div>
                   </div>
                   
-                  <div className={`transition-all duration-300 ease-in-out origin-top ${isBrowserExpanded ? 'h-[340px] opacity-100 scale-y-100' : 'h-0 opacity-0 scale-y-0'}`}>
-                    <div className="w-full h-full relative bg-black/40">
-                      <AgentBrowser />
-                    </div>
-                  </div>
+<div className={`transition-all duration-300 ease-in-out origin-top ${isBrowserExpanded ? 'h-[340px] opacity-100 scale-y-100' : 'h-0 opacity-0 scale-y-0'}`}>
+                     <div className="w-full h-full relative bg-black/40">
+                       {agentBrowserStore.getTerminatedSnapshot() && (
+                         <img
+                           src={agentBrowserStore.getTerminatedSnapshot()!}
+                           alt="Terminated browser session"
+                           className="w-full h-full object-cover grayscale opacity-60"
+                         />
+                       )}
+                       {!agentBrowserStore.getTerminatedSnapshot() && <AgentBrowser />}
+                     </div>
+                   </div>
                 </div>
               </div>
             )}

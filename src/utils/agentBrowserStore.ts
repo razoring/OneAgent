@@ -11,15 +11,17 @@ const listeners = new Set<Listener>();
 // by the next browser_* tool call so the agent learns why its session died.
 let userKilledBrowser = false;
 
-// Incremented each time the browser is killed — AgentBrowser uses this as
-// a React key to force a full remount (fresh <webview> process).
-let browserIncarnation = 0;
+// Grayscale snapshot displayed after kill — agent restarts with browser_navigate.
+let terminatedSnapshot: string | null = null;
 
 export const agentBrowserStore = {
   getUrl: () => currentUrl,
-  getIncarnation: () => browserIncarnation,
+  getTerminatedSnapshot: () => terminatedSnapshot,
   navigate: (url: string) => {
     if (!url || currentUrl === url) return;
+    // Starting a fresh navigation — clear any terminated snapshot so the
+    // live webview shows instead of the grayscale image.
+    if (url !== 'about:blank') terminatedSnapshot = null;
     currentUrl = url;
     listeners.forEach(l => l(url));
   },
@@ -33,5 +35,5 @@ export const agentBrowserStore = {
     userKilledBrowser = false;
     return true;
   },
-  bumpIncarnation: () => { browserIncarnation++; },
+  setTerminatedSnapshot: (img: string | null) => { terminatedSnapshot = img; },
 };

@@ -132,7 +132,7 @@ export const SYSTEM_TOOLS = [
     }),
 
   // ── Embedded browser: observation & internals (instant) ───────────────────
-  fn('browser_observe', 'One-call page observation: screenshot with red numbered Set-of-Mark badges + element list + trimmed DOM text. Your default way to look at a page.',
+  fn('browser_observe', 'One-call page observation: screenshot with red numbered Set-of-Mark badges + element list + trimmed DOM text + **viewport/scroll metadata** (`meta` object with scroll position, max scroll, viewport size, atTop/atBottom/atLeft/atRight booleans, scrollPercent). Your default way to look at a page.',
     {}),
   fn('browser_screenshot', 'Screenshot of ONLY the embedded browser viewport, annotated with Set-of-Mark IDs. Use browser_observe instead unless you specifically want pixels only.',
     {}),
