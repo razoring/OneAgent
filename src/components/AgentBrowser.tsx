@@ -4,7 +4,9 @@ import { agentBrowserStore } from '../utils/agentBrowserStore';
 
 // Live embedded browser driven by the agent's browser_* tools.
 // Registers itself as window.activeWebview so browserTools.ts can drive it.
-const AgentBrowser: React.FC = () => {
+// Receives `incarnation` as a prop (used as React key by parent) to force
+// a full remount when the browser is killed.
+const AgentBrowser: React.FC<{ incarnation?: number }> = ({ incarnation }) => {
   // Frozen at mount: navigation is driven imperatively (loadURL) by
   // browserTools — rewriting the src attribute mid-flight causes ERR_ABORTED.
   const [initialSrc] = useState(() => agentBrowserStore.getUrl());
@@ -13,6 +15,11 @@ const AgentBrowser: React.FC = () => {
 
   useEffect(() => agentBrowserStore.subscribe(url => setDisplayUrl(url)), []);
 
+  // Reset scale on every mount (including remounts after kill)
+  useEffect(() => {
+    (window as any).__oneagentBrowserScale = 0.5;
+  }, []);
+
   useEffect(() => {
     const webview = webviewRef.current;
     if (!webview) return;
@@ -20,9 +27,6 @@ const AgentBrowser: React.FC = () => {
     (window as any).activeWebview = webview;
 
     const handleDomReady = () => {
-      // Advertised to browserTools so virtual-input coordinates can be
-      // converted from page CSS space into widget space.
-      (window as any).__oneagentBrowserScale = 0.5;
       const electronAPI = (window as any).electronAPI;
       if (electronAPI?.browserEmulateDevice) {
         electronAPI.browserEmulateDevice(webview.getWebContentsId(), {

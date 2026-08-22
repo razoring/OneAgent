@@ -11,8 +11,13 @@ const listeners = new Set<Listener>();
 // by the next browser_* tool call so the agent learns why its session died.
 let userKilledBrowser = false;
 
+// Incremented each time the browser is killed — AgentBrowser uses this as
+// a React key to force a full remount (fresh <webview> process).
+let browserIncarnation = 0;
+
 export const agentBrowserStore = {
   getUrl: () => currentUrl,
+  getIncarnation: () => browserIncarnation,
   navigate: (url: string) => {
     if (!url || currentUrl === url) return;
     currentUrl = url;
@@ -27,5 +32,6 @@ export const agentBrowserStore = {
     if (!userKilledBrowser) return false;
     userKilledBrowser = false;
     return true;
-  }
+  },
+  bumpIncarnation: () => { browserIncarnation++; },
 };

@@ -744,17 +744,26 @@ export const executeBrowserNavigation = async (action: string, url?: string): Pr
   return "OK";
 };
 
-// Kills the live webview session: stops in-flight loads, blanks the page and
-// syncs the URL store. Used by both the agent's browser_terminate tool and the
-// user-facing trash button in the Live Browser header.
+// Kills the live webview session: stops in-flight loads, terminates the
+// renderer process, blanks the page and syncs the URL store. Used by both
+// the agent's browser_terminate tool and the user-facing trash button.
 export const terminateBrowserSession = async (): Promise<void> => {
   const wv = getActiveWebview();
   if (!wv) return;
   try { wv.stop(); } catch {}
   try {
+    // Terminate the renderer process — forces a fresh WebView on next mount
+    const wc = wv.getWebContents?.();
+    if (wc && typeof wc.terminate === 'function') {
+      wc.terminate();
+    }
+  } catch {}
+  try {
     Promise.resolve(wv.loadURL('about:blank')).catch(() => {});
   } catch {}
   agentBrowserStore.navigate('about:blank');
+  // Bump incarnation so AgentBrowser remounts with a fresh <webview>
+  agentBrowserStore.bumpIncarnation?.();
 };
 
 export const executeBrowserTerminate = async (): Promise<string> => {
