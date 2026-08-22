@@ -505,7 +505,9 @@ export const browserKeystrokes = async (args: any): Promise<string> => {
   return `Unknown action "${action}"`;
 };
 
-// Dedicated wheel-scrolling tool for the embedded browser.
+// Dedicated wheel-scrolling tool for the embedded browser. Relative
+// directions ride real wheel events (keeps lazy-load/infinite-scroll pages
+// honest); "top"/"bottom" jump absolutely via scrollTo/scrollIntoView.
 export const browserScroll = async (args: any): Promise<string> => {
   const wv = await waitForActiveWebview();
   if (!wv) throw new Error("No active webview available");
@@ -514,14 +516,33 @@ export const browserScroll = async (args: any): Promise<string> => {
   const webContentsId = wv.getWebContentsId();
   const dir = String(args.direction || args.Direction || 'down').toLowerCase();
   const amount = Number(args.amount ?? args.Amount ?? 600) || 600;
+  const id = args.id ?? args.Id;
+  const hasId = id !== undefined && id !== null && id !== '';
+
+  // Absolute jumps bypass wheel physics so they always land exactly.
+  if (dir === 'top' || dir === 'bottom') {
+    if (hasId) {
+      const intoView = await wv.executeJavaScript(
+        `(() => { const el = window.__oneagentElements[${Number(id)}]; if (!el) return false; el.scrollIntoView({ block: '${dir === 'top' ? 'start' : 'end'}', behavior: 'instant' }); return true; })()`
+      );
+      if (!intoView) return `Element ${id} not found — take a browser_observe to re-label the page and retry`;
+    } else {
+      await wv.executeJavaScript(
+        `window.scrollTo({ top: ${dir === 'top' ? '0' : 'document.documentElement.scrollHeight'}, behavior: 'instant' }); true`
+      );
+    }
+    await new Promise(res => setTimeout(res, 300));
+    const pos = await readScrollState(wv);
+    return `Scrolled to ${dir}${hasId ? ` of element ${id}` : ' of page'}${pos ? ` — ${pos}` : ''}`;
+  }
+
   const dx = dir === 'left' ? -amount : dir === 'right' ? amount : 0;
   const dy = dir === 'up' ? -amount : dir === 'down' ? amount : 0;
 
   let x: number, y: number;
-  const id = args.id ?? args.Id;
-  if (id !== undefined && id !== null && id !== '') {
+  if (hasId) {
     const c = await getElementCenter(wv, Number(id));
-    if (!c) return `Element ${id} not found — take a browser_screenshot to re-label the page and retry`;
+    if (!c) return `Element ${id} not found — take a browser_observe to re-label the page and retry`;
     ({ x, y } = c);
   } else {
     ({ x, y } = await wv.executeJavaScript(`({ x: Math.round(window.innerWidth / 2), y: Math.round(window.innerHeight / 2) })`));
@@ -530,7 +551,24 @@ export const browserScroll = async (args: any): Promise<string> => {
   const r = await electronAPI.browserSendInputEvent({ webContentsId, type: 'mouseWheel', x, y, deltaX: dx, deltaY: dy });
   if (r && r.success === false) return `Scroll failed: ${r.error}`;
   await new Promise(res => setTimeout(res, 300));
-  return `Scrolled ${dir} ${amount}px${(id !== undefined && id !== null && id !== '') ? ` at element ${id}` : ''}`;
+  const pos = await readScrollState(wv);
+  return `Scrolled ${dir} ${amount}px${hasId ? ` at element ${id}` : ''}${pos ? ` — now at ${pos}` : ''}`;
+};
+
+// Post-scroll position report so the model knows whether more page remains.
+const readScrollState = async (wv: any): Promise<string | null> => {
+  try {
+    const s = await wv.executeJavaScript(`(() => {
+      const d = document.scrollingElement || document.documentElement;
+      const max = d.scrollHeight - d.clientHeight;
+      return { y: Math.round(d.scrollTop), max: Math.round(max) };
+    })()`);
+    if (!s) return null;
+    if (s.max <= 0) return 'page fits viewport (nothing more to scroll)';
+    return `y=${s.y}/${s.max}px${s.y >= s.max - 2 ? ' [at bottom]' : s.y <= 2 ? ' [at top]' : ''}`;
+  } catch {
+    return null;
+  }
 };
 
 // Dedicated, model-friendly typing tool: focuses the field (optionally by

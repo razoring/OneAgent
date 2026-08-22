@@ -123,11 +123,11 @@ export const SYSTEM_TOOLS = [
       id: num('Set-of-Mark element ID to focus first. Omit to use the currently focused field.'),
       submit: bool('Press Enter after typing (default false).')
     }, ['text']),
-  fn('browser_scroll', 'Scroll the page (or a specific scrollable element) with real wheel events.',
+  fn('browser_scroll', 'Scroll the embedded browser. Relative directions ride real wheel events (triggers lazy-loading); "top"/"bottom" jump instantly. Reports resulting scroll position so you know when you hit the end.',
     {
-      direction: { type: 'string', enum: ['up', 'down', 'left', 'right'], description: 'Default down.' },
-      amount: num('Pixels (default 600).'),
-      id: num('Scroll over/into this Set-of-Mark element instead of the whole page.')
+      direction: { type: 'string', enum: ['down', 'up', 'left', 'right', 'top', 'bottom'], description: 'Default down.' },
+      amount: num('Pixels for relative scrolling (default 600).'),
+      id: num('With up/down/left/right: wheel over this Set-of-Mark element. With top/bottom: scroll this element into view.')
     }),
 
   // ── Embedded browser: observation & internals (instant) ───────────────────

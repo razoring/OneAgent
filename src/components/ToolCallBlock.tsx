@@ -1,6 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { ChevronRight, ChevronDown, Check, X, Terminal, FileCode, Search, Globe, MousePointer2, Loader2, Bot, SlidersHorizontal } from 'lucide-react';
-import AgentBrowser from './AgentBrowser';
 
 interface ToolCallBlockProps {
   toolName: string;
@@ -8,7 +7,6 @@ interface ToolCallBlockProps {
   status: 'executing' | 'completed' | 'error';
   result?: string;
   imageDataUrl?: string;
-  isBrowserHost?: boolean;
 }
 
 const TOOL_LABELS: Record<string, string> = {
@@ -174,7 +172,7 @@ const formatOutput = (result?: string): string => {
   return result;
 };
 
-const ToolCallBlock: React.FC<ToolCallBlockProps> = ({ toolName, args, status, result, imageDataUrl, isBrowserHost }) => {
+const ToolCallBlock: React.FC<ToolCallBlockProps> = ({ toolName, args, status, result, imageDataUrl }) => {
   const [expanded, setExpanded] = useState(false);
   const userToggled = useRef(false);
   const isScreenshotTool = toolName === 'desktop_screenshot' || toolName === 'browser_screenshot' || toolName === 'browser_observe';
@@ -226,12 +224,9 @@ const ToolCallBlock: React.FC<ToolCallBlockProps> = ({ toolName, args, status, r
         </div>
       )}
 
-      {/* Collapsible body — live browser view (host block only) + exact input + output */}
+      {/* Collapsible body — exact input + output */}
       {expanded && (
         <div className="border-t border-white/5 bg-black/20">
-          {toolName.startsWith('browser') && isBrowserHost && (
-            <AgentBrowser />
-          )}
 
           <div className="px-3.5 py-2.5">
             <div className="text-[10px] font-semibold uppercase tracking-wider text-textSecondary mb-1.5">Input</div>

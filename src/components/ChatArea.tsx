@@ -1052,7 +1052,6 @@ const ChatArea = () => {
                           status={status}
                           result={result}
                           imageDataUrl={tc.image}
-                          isBrowserHost={!!tc.id && tc.id === liveBrowserToolId}
                         />
                       );
                     })}
