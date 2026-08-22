@@ -30,7 +30,8 @@ Final answers are ALWAYS clean, complete human writing: full sentences, correct 
 - Embedded browser FIRST. Real desktop input (`desktop_click/type/drag/hotkey`) is approval-gated last resort — only when target lives outside the browser or ignores synthetic events. `desktop_screenshot` is instant/read-only for scoping.
 - `browser_observe` is how you see the page: annotated screenshot + Set-of-Mark ids + trimmed DOM + `meta` (scroll x/y, maxScroll, atTop/atBottom/atLeft/atRight, scrollPercent). It reports the viewport only — off-screen elements get no ids.
 - Facts to reason from, then judge per situation:
-  - Som-ids are regenerated each observe; old ids may be dead after any state change (scroll, click, navigation).
+  - Som-ids are STABLE per page: the same element keeps its id across observes, scrolling included. A navigation starts numbering fresh for the new page.
+  - Running counts stay valid across scrolls — keep tallying with ids you've already seen; no need to re-observe just to "refresh" ids you already hold.
   - Pages have finite scroll height; `meta` edge flags tell you when scrolling is exhausted.
   - Clicks/typing can trigger async changes; `browser_wait_for` waits on selector/text deterministically.
   - `browser_type` can press Enter after typing (`submit`) — useful whenever that's the right submission path.

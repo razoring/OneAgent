@@ -52,19 +52,49 @@ export const injectSetOfMark = async (): Promise<any> => {
 
       const elements = Array.from(document.querySelectorAll(interactiveSelectors));
       const markers = [];
-      let nextId = 1;
 
-      elements.forEach(el => {
+      // Persistent element identity within this page document: an element keeps
+      // its som-id across observations (scrolling included), so counts and
+      // references stay valid. Navigating creates a fresh JS context here,
+      // which resets numbering to 1 for the new page automatically.
+      window.__oneagentSom = window.__oneagentSom || { nextId: 1, byFingerprint: {} };
+      const somState = window.__oneagentSom;
+
+      function somBaseFingerprint(el) {
+        const tag = el.tagName.toLowerCase();
+        const text = ((el.textContent || el.value || el.alt || el.getAttribute('aria-label') || '') + '')
+          .trim().replace(/\\s+/g, ' ').substring(0, 80);
+        const href = (tag === 'a' && el.getAttribute('href')) ? el.getAttribute('href').substring(0, 120) : '';
+        const extra = (el.getAttribute('type') || '') + '|' + (el.getAttribute('name') || '');
+        return tag + '|' + text + '|' + href + '|' + extra;
+      }
+
+      // Fingerprints are computed over ALL matched elements (visible or not),
+      // so duplicate texts like "Read more" get stable occurrence indices no
+      // matter what the viewport happens to contain this round.
+      const seenCounts = {};
+      const fullFingerprints = elements.map(el => {
+        const base = somBaseFingerprint(el);
+        seenCounts[base] = (seenCounts[base] || 0);
+        return base + '#' + (seenCounts[base]++);
+      });
+
+      elements.forEach((el, idx) => {
         // Skip hidden elements
         const style = window.getComputedStyle(el);
         if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return;
         const rect = el.getBoundingClientRect();
         if (rect.width === 0 || rect.height === 0) return;
-        
+
         // Only label elements that intersect with the current viewport
         if (rect.bottom < 0 || rect.right < 0 || rect.top > window.innerHeight || rect.left > window.innerWidth) return;
 
-        const id = nextId++;
+        const fullFp = fullFingerprints[idx];
+        let id = somState.byFingerprint[fullFp];
+        if (!id) {
+          id = somState.nextId++;
+          somState.byFingerprint[fullFp] = id;
+        }
         
         // Create or get container to ensure absolute coordinates match perfectly
         let container = document.getElementById('oneagent-som-container');
@@ -318,7 +348,10 @@ const clickElementCenter = async (wv: any, id: number, highlight: boolean): Prom
     (function() {
       return new Promise((resolve) => {
         const el = window.__oneagentElements && window.__oneagentElements[${id}];
-        if (!el) {
+        if (!el || !el.isConnected) {
+          // Detached by a page update — prune so the next observe re-labels
+          // the replacement and reports a fresh, valid id.
+          if (el) delete window.__oneagentElements[${id}];
           resolve(null);
           return;
         }
@@ -406,6 +439,7 @@ export const getElementCenter = async (wv: any, id: number): Promise<{ x: number
   wv.executeJavaScript(`(function(){
     var el = window.__oneagentElements && window.__oneagentElements[${id}];
     if (!el) return null;
+    if (!el.isConnected) { delete window.__oneagentElements[${id}]; return null; }
     el.scrollIntoView({ block: 'center', inline: 'center' });
     var r = el.getBoundingClientRect();
     return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) };
@@ -550,7 +584,7 @@ export const browserScroll = async (args: any): Promise<string> => {
   if (dir === 'top' || dir === 'bottom') {
     if (hasId) {
       const intoView = await wv.executeJavaScript(
-        `(() => { const el = window.__oneagentElements[${Number(id)}]; if (!el) return false; el.scrollIntoView({ block: '${dir === 'top' ? 'start' : 'end'}', behavior: 'instant' }); return true; })()`
+        `(() => { const el = window.__oneagentElements[${Number(id)}]; if (!el || !el.isConnected) return false; el.scrollIntoView({ block: '${dir === 'top' ? 'start' : 'end'}', behavior: 'instant' }); return true; })()`
       );
       if (!intoView) return `Element ${id} not found — take a browser_observe to re-label the page and retry`;
     } else {
@@ -1038,6 +1072,7 @@ export const browserSelectOptionById = async (args: any): Promise<string> => {
     (function() {
       var el = window.__oneagentElements && window.__oneagentElements[${id}];
       if (!el || el.tagName !== 'SELECT') return { ok: false, reason: 'no select element with that id' };
+      if (!el.isConnected) { delete window.__oneagentElements[${id}]; return { ok: false, reason: 'element left the page — re-observe for a fresh id' }; }
       var wanted = ${JSON.stringify(value)};
       var opt = Array.from(el.options).find(o => o.value === wanted)
              || Array.from(el.options).find(o => (o.textContent || '').trim().toLowerCase() === wanted.toLowerCase());
