@@ -10,15 +10,20 @@ interface ThinkingBlockProps {
 
 export const ThinkingBlock: React.FC<ThinkingBlockProps> = ({ thinking, isGenerating }) => {
   const [isExpanded, setIsExpanded] = useState<boolean>(!!isGenerating);
+  const [userToggled, setUserToggled] = useState<boolean>(false);
   const [copied, setCopied] = useState(false);
   const [elapsed, setElapsed] = useState(0);
   const [finalDuration, setFinalDuration] = useState<number | null>(null);
   const startRef = useRef<number | null>(null);
 
-  // Auto-expand when generating starts, auto-collapse when generating finishes if not manually modified
+  // Open while thinking, fold back into the stack when done — unless the user took control
+  useEffect(() => {
+    if (!userToggled) setIsExpanded(!!isGenerating);
+  }, [isGenerating, userToggled]);
+
+  // Track thinking duration
   useEffect(() => {
     if (isGenerating) {
-      setIsExpanded(true);
       if (startRef.current === null) {
         startRef.current = Date.now();
       }
@@ -38,13 +43,18 @@ export const ThinkingBlock: React.FC<ThinkingBlockProps> = ({ thinking, isGenera
     setTimeout(() => setCopied(false), 2000);
   };
 
+  const handleToggle = () => {
+    setUserToggled(true);
+    setIsExpanded(!isExpanded);
+  };
+
   if (!thinking && !isGenerating) return null;
 
   return (
     <div className="w-full my-2 rounded-xl border border-white/10 bg-white/[0.03] backdrop-blur-md overflow-hidden transition-all duration-200">
       {/* Header */}
       <div 
-        onClick={() => setIsExpanded(!isExpanded)}
+        onClick={handleToggle}
         className="flex items-center justify-between px-3 py-2 cursor-pointer hover:bg-white/[0.05] transition-colors select-none text-xs text-textSecondary group"
       >
         <div className="flex items-center gap-2">

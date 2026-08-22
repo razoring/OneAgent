@@ -2,7 +2,6 @@ import React, { useState, useRef, useEffect } from 'react';
 import ChatInput from './ChatInput';
 import ThinkingBlock from './ThinkingBlock';
 import ToolCallBlock from './ToolCallBlock';
-import AgentBrowser from './AgentBrowser';
 import { generateChatStream, LLMModel, fileToBase64, parseAttachmentDocument } from '../utils/llm';
 import { executeToolCalls, ToolContext } from '../utils/toolExecutor';
 import { spawnSubAgent, getAgentsSnapshot, waitForAgents } from '../utils/subAgents';
@@ -15,7 +14,7 @@ import rehypeKatex from 'rehype-katex';
 import 'katex/dist/katex.min.css';
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
 import { vscDarkPlus } from 'react-syntax-highlighter/dist/esm/styles/prism';
-import { MessageSquarePlus, MessageSquare, X, Check, Globe, ChevronDown, ChevronRight } from 'lucide-react';
+import { MessageSquarePlus, MessageSquare, X, Check } from 'lucide-react';
 import { getSystemTools } from '../utils/tools';
 import ApprovalCard, { PendingApproval } from './ApprovalCard';
 
@@ -138,7 +137,6 @@ const ChatArea = () => {
   const bottomRef = useRef<HTMLDivElement>(null);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
-  const [isBrowserExpanded, setIsBrowserExpanded] = useState(true);
 
   // Permission-gated tool approvals (self-modification, shell, deletion, desktop input)
   const [pendingApprovals, setPendingApprovals] = useState<PendingApproval[]>([]);
@@ -909,22 +907,42 @@ const ChatArea = () => {
     setEditingBlock(null);
   };
 
-  // The most recent browser tool call across the conversation hosts the live embedded browser
-  let liveBrowserToolId: string | null = null;
-  let liveBrowserMsgIdx: number = -1;
-  for (let i = messages.length - 1; i >= 0; i--) {
-    const tcs = messages[i].toolCalls;
-    if (tcs && tcs.length > 0) {
-      for (let j = tcs.length - 1; j >= 0; j--) {
-        if ((tcs[j].name || '').startsWith('browser')) {
-          liveBrowserToolId = tcs[j].id;
-          liveBrowserMsgIdx = i;
-          break;
+  // Build unified chronological activity feed from all messages
+  // Each activity: { type, messageId, messageIdx, toolCallIdx?, data }
+  // Order: user msg → thinking → tool calls → response (per message), messages in array order
+  const activityFeed = React.useMemo(() => {
+    const activities: any[] = [];
+    let lastBrowserActivityIdx = -1;
+    
+    messages.forEach((msg, msgIdx) => {
+      if (msg.role === 'user') {
+        activities.push({ type: 'user', messageId: msg.id, messageIdx: msgIdx, data: msg });
+      } else if (msg.role === 'assistant') {
+        // Thinking block
+        if (msg.thinking || msg.isGenerating) {
+          activities.push({ type: 'thinking', messageId: msg.id, messageIdx: msgIdx, data: msg });
+        }
+        // Tool calls
+        const tcs = msg.toolCalls;
+        if (tcs && tcs.length > 0) {
+          tcs.forEach((tc: any, tcIdx: number) => {
+            const toolName = tc.name || tc.toolName || 'tool';
+            const isBrowser = toolName.startsWith('browser');
+            activities.push({ type: 'tool', messageId: msg.id, messageIdx: msgIdx, toolCallIdx: tcIdx, toolCount: tcs.length, messageIsGenerating: msg.isGenerating, data: { ...tc, toolName, isBrowser } });
+            if (isBrowser) {
+              lastBrowserActivityIdx = activities.length - 1;
+            }
+          });
+        }
+        // Response content
+        if (msg.content || (msg.isGenerating && !msg.thinking && !msg.toolCalls?.length)) {
+          activities.push({ type: 'response', messageId: msg.id, messageIdx: msgIdx, data: msg });
         }
       }
-      if (liveBrowserToolId) break;
-    }
-  }
+    });
+    
+    return { activities, lastBrowserActivityIdx };
+  }, [messages]);
 
   return (
     <div className="flex-1 flex flex-col bg-surface relative">
@@ -932,42 +950,7 @@ const ChatArea = () => {
       {/* Main Content */}
       <div ref={scrollContainerRef} onScroll={handleScroll} className="flex-1 flex flex-col items-center overflow-y-auto w-full relative">
         
-        {/* The persistent AgentBrowser, ordered immediately after its host message */}
-        {liveBrowserToolId && (
-          <div
-            className="w-full max-w-3xl px-4 pb-4 shrink-0 transition-all duration-300 -mt-8"
-            style={{ order: liveBrowserMsgIdx * 2 + 1 }}
-          >
-            <div className="w-full overflow-hidden rounded-xl border border-white/10 shadow-lg bg-white/[0.03] backdrop-blur-md">
-              <div
-                onClick={() => setIsBrowserExpanded(!isBrowserExpanded)}
-                className="flex items-center justify-between px-3 py-2 cursor-pointer hover:bg-white/[0.05] transition-colors select-none text-xs text-textSecondary group border-b border-white/5"
-              >
-                <div className="flex items-center gap-2 min-w-0">
-                  <Globe size={14} className="text-blue-400 shrink-0" />
-                  <span className="font-medium text-textSecondary group-hover:text-white transition-colors shrink-0">Live Browser Session</span>
-                  <span className="font-mono truncate text-textSecondary/80">Active</span>
-                </div>
-                <div className="flex items-center gap-2 shrink-0 ml-2">
-                  <div className="w-2 h-2 rounded-full bg-green-500 animate-pulse" />
-                  {isBrowserExpanded ? (
-                    <ChevronDown size={14} className="text-textSecondary group-hover:text-gray-200 transition-transform" />
-                  ) : (
-                    <ChevronRight size={14} className="text-textSecondary group-hover:text-gray-200 transition-transform" />
-                  )}
-                </div>
-              </div>
-              
-              {isBrowserExpanded && (
-                <div className="w-full h-[340px] relative bg-black/40">
-                  <AgentBrowser />
-                </div>
-              )}
-            </div>
-          </div>
-        )}
-
-        {messages.length === 0 ? (
+        {activityFeed.activities.length === 0 ? (
           <div className="flex-1 flex flex-col items-center justify-center w-full px-4">
             <div className="flex flex-col items-center max-w-3xl w-full mt-10">
               <div className="w-16 h-16 bg-white rounded-full flex items-center justify-center mb-6">
@@ -977,110 +960,152 @@ const ChatArea = () => {
             </div>
           </div>
         ) : (
-          <div className="w-full max-w-3xl flex flex-col gap-6 py-10 px-4">
-            {messages.map((msg, idx) => {
-              const isEditingUser = editingBlock?.id === msg.id && editingBlock?.type === 'user';
-              const isEditingThinking = editingBlock?.id === msg.id && editingBlock?.type === 'thinking';
-              const isEditingResponse = editingBlock?.id === msg.id && editingBlock?.type === 'response';
-              
-              return (
-              <div key={msg.id || idx} className="flex flex-col w-full text-gray-100 gap-2 mb-4 group/msg relative shrink-0" style={{ order: idx * 2 }}>
-                <div className="flex items-center justify-between font-semibold text-sm text-textSecondary">
-                  <span>{msg.role === 'user' ? 'You' : 'Assistant'}</span>
-                </div>
-                {msg.role === 'user' && (
-                  <div data-msg-id={msg.id} data-msg-type="user" className={`w-full group relative ${isEditingUser ? 'ring-2 ring-accent rounded-lg p-2 -m-2' : ''}`}>
-                    {!isGenerating && !msg.isGenerating && (
-                      <BlockToolbar 
-                        onEdit={() => setEditingBlock({ id: msg.id, type: 'user' })} 
-                        onRegenerate={() => handleRegenerate(msg.id, 'user')} 
-                        onDelete={() => handleDelete(msg.id, 'user')} 
-                      />
-                    )}
-                    <div className="focus:outline-none [&_.mention]:inline-flex [&_.mention]:items-center [&_.mention]:gap-1.5 [&_.mention]:bg-white/10 [&_.mention]:border [&_.mention]:border-white/5 [&_.mention]:text-accentBright [&_.mention]:px-2 [&_.mention]:h-[24px] [&_.mention]:rounded-md [&_.mention]:mx-1 [&_.mention]:align-middle [&_.mention]:select-none">
-                      <ReactMarkdown 
-                        remarkPlugins={[remarkGfm, remarkMath]} 
-                        rehypePlugins={[rehypeRaw, rehypeKatex]} 
-                        components={chatComponents}
-                      >
-                        {formatMentions(isEditingUser && editPreview ? editPreview.text : msg.content, msg.comments)}
-                      </ReactMarkdown>
-                    </div>
-                    {((isEditingUser && editPreview ? editPreview.attachments : msg.attachments) || []).length > 0 && (
-                      <div className="flex gap-2 mt-3 flex-wrap">
-                        {((isEditingUser && editPreview ? editPreview.attachments : msg.attachments) || []).map((att: any, aIdx: number) => (
-                          <div key={aIdx} className="relative w-16 h-16 rounded-lg overflow-hidden border border-white/10 group/att">
-                            {att.type === 'image' && att.url ? (
-                              <img src={att.url} alt="attached" className="w-full h-full object-cover" />
-                            ) : att.thumbnail ? (
-                              <img src={att.thumbnail} alt={att.display} className="w-full h-full object-contain p-1 bg-black/20" />
-                            ) : (
-                              <div className="w-full h-full bg-white/5 flex items-center justify-center text-xs text-textSecondary">File</div>
-                            )}
-                          </div>
-                        ))}
-                      </div>
-                    )}
-                  </div>
-                )}
+          <div className="w-full max-w-3xl flex flex-col gap-4 py-6 px-4">
+            {activityFeed.activities.map((activity, idx) => {
+              const isLastBrowser = idx === activityFeed.lastBrowserActivityIdx;
 
-                {msg.role === 'assistant' && (
-                  <div className="w-full text-white flex flex-col gap-2">
-                    {(msg.thinking || (msg.isGenerating && !msg.content && !msg.toolCalls?.length) || (isEditingThinking && editPreview?.text)) && (
-                      <div data-msg-id={msg.id} data-msg-type="thinking" className={`w-full group relative ${isEditingThinking ? 'ring-2 ring-accent rounded-lg p-2 -m-2' : ''}`}>
-                        {!isGenerating && !msg.isGenerating && (
-                          <BlockToolbar 
-                            onEdit={() => setEditingBlock({ id: msg.id, type: 'thinking' })} 
-                            onRegenerate={() => handleRegenerate(msg.id, 'thinking')} 
-                            onDelete={() => handleDelete(msg.id, 'thinking')} 
-                          />
-                        )}
-                        <ThinkingBlock thinking={(isEditingThinking && editPreview) ? editPreview.text : (msg.thinking || '')} isGenerating={!!msg.isGenerating && !msg.content && !msg.isCallingTool} />
-                      </div>
-                    )}
-                    
-                    {msg.toolCalls && msg.toolCalls.map((tc: any, idx) => {
-                      const toolName = tc.name || tc.toolName || 'tool';
-                      const args = tc.args || tc.arguments || tc;
-                      const status = tc.status || (msg.isGenerating && idx === msg.toolCalls!.length - 1 ? 'executing' : 'completed');
-                      const result = tc.result;
-                      return (
-                        <ToolCallBlock
-                          key={`${tc.id || 'tc-' + msg.id}-${idx}`}
-                          toolName={toolName}
-                          args={args}
-                          status={status}
-                          result={result}
-                          imageDataUrl={tc.image}
+              if (activity.type === 'user') {
+                const msg = activity.data;
+                const isEditingUser = editingBlock?.id === msg.id && editingBlock?.type === 'user';
+                return (
+                  <div key={`user-${activity.messageId}`} className="flex flex-col w-full text-gray-100 gap-2 group/msg relative shrink-0" style={{ order: idx * 2 }}>
+                    <div className="flex items-center justify-between font-semibold text-sm text-textSecondary">
+                      <span>You</span>
+                    </div>
+                    <div data-msg-id={msg.id} data-msg-type="user" className={`w-full group relative ${isEditingUser ? 'ring-2 ring-accent rounded-lg p-2 -m-2' : ''}`}>
+                      {!isGenerating && !msg.isGenerating && (
+                        <BlockToolbar 
+                          onEdit={() => setEditingBlock({ id: msg.id, type: 'user' })} 
+                          onRegenerate={() => handleRegenerate(msg.id, 'user')} 
+                          onDelete={() => handleDelete(msg.id, 'user')} 
                         />
-                      );
-                    })}
-                    
-                    {(msg.content || (msg.isGenerating && !msg.thinking && !msg.toolCalls?.length) || (isEditingResponse && editPreview?.text)) && (
-                      <div data-msg-id={msg.id} data-msg-type="response" className={`w-full group relative ${isEditingResponse ? 'ring-2 ring-accent rounded-lg p-2 -m-2' : ''}`}>
-                        {!isGenerating && !msg.isGenerating && (
-                          <BlockToolbar 
-                            onEdit={() => setEditingBlock({ id: msg.id, type: 'response' })} 
-                            onRegenerate={() => handleRegenerate(msg.id, 'response')} 
-                            onDelete={() => handleDelete(msg.id, 'response')} 
-                          />
-                        )}
-                        <div className="[&_.mention]:inline-flex [&_.mention]:items-center [&_.mention]:gap-1.5 [&_.mention]:bg-white/10 [&_.mention]:border [&_.mention]:border-white/5 [&_.mention]:text-accentBright [&_.mention]:px-2 [&_.mention]:h-[24px] [&_.mention]:rounded-md [&_.mention]:mx-1 [&_.mention]:align-middle [&_.mention]:select-none">
-                          <ReactMarkdown 
-                            remarkPlugins={[remarkGfm, remarkMath]} 
-                            rehypePlugins={[rehypeRaw, rehypeKatex]} 
-                            components={chatComponents}
-                          >
-                            {formatMentions(isEditingResponse && editPreview ? editPreview.text : msg.content, msg.comments) + (msg.isGenerating ? ' ⬤' : '')}
-                          </ReactMarkdown>
-                        </div>
+                      )}
+                      <div className="focus:outline-none [&_.mention]:inline-flex [&_.mention]:items-center [&_.mention]:gap-1.5 [&_.mention]:bg-white/10 [&_.mention]:border [&_.mention]:border-white/5 [&_.mention]:text-accentBright [&_.mention]:px-2 [&_.mention]:h-[24px] [&_.mention]:rounded-md [&_.mention]:mx-1 [&_.mention]:align-middle [&_.mention]:select-none">
+                        <ReactMarkdown 
+                          remarkPlugins={[remarkGfm, remarkMath]} 
+                          rehypePlugins={[rehypeRaw, rehypeKatex]} 
+                          components={chatComponents}
+                        >
+                          {formatMentions(isEditingUser && editPreview ? editPreview.text : msg.content, msg.comments)}
+                        </ReactMarkdown>
                       </div>
-                    )}
+                      {((isEditingUser && editPreview ? editPreview.attachments : msg.attachments) || []).length > 0 && (
+                        <div className="flex gap-2 mt-3 flex-wrap">
+                          {((isEditingUser && editPreview ? editPreview.attachments : msg.attachments) || []).map((att: any, aIdx: number) => (
+                            <div key={aIdx} className="relative w-16 h-16 rounded-lg overflow-hidden border border-white/10 group/att">
+                              {att.type === 'image' && att.url ? (
+                                <img src={att.url} alt="attached" className="w-full h-full object-cover" />
+                              ) : att.thumbnail ? (
+                                <img src={att.thumbnail} alt={att.display} className="w-full h-full object-contain p-1 bg-black/20" />
+                              ) : (
+                                <div className="w-full h-full bg-white/5 flex items-center justify-center text-xs text-textSecondary">File</div>
+                              )}
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
                   </div>
-                )}
+                );
+              }
+              
+              if (activity.type === 'thinking') {
+                const msg = activity.data;
+                const isEditingThinking = editingBlock?.id === msg.id && editingBlock?.type === 'thinking';
+                return (
+                  <div key={`think-${activity.messageId}`} className="flex flex-col w-full text-gray-100 gap-2 group/msg relative shrink-0" style={{ order: idx * 2 }}>
+                    <ThinkingBlock 
+                      thinking={(isEditingThinking && editPreview) ? editPreview.text : (msg.thinking || '')} 
+                      isGenerating={!!msg.isGenerating && !msg.content && !msg.isCallingTool} 
+                    />
+                  </div>
+                );
+              }
+              
+              if (activity.type === 'tool') {
+                const tc = activity.data;
+                const toolName = tc.toolName;
+                const args = tc.args || tc.arguments || tc;
+                const status = tc.status || (activity.messageIsGenerating && activity.toolCallIdx === activity.toolCount - 1 ? 'executing' : 'completed');
+                const result = tc.result;
+                return (
+                  <div key={`tc-${activity.messageId}-${activity.toolCallIdx}`} className="flex flex-col w-full text-gray-100 gap-2 group/msg relative shrink-0" style={{ order: idx * 2 }}>
+                    <ToolCallBlock
+                      toolName={toolName}
+                      args={args}
+                      status={status}
+                      result={result}
+                      imageDataUrl={tc.image}
+                      isLiveBrowser={isLastBrowser}
+                    />
+                  </div>
+                );
+              }
+              
+              if (activity.type === 'response') {
+                const msg = activity.data;
+                const isEditingResponse = editingBlock?.id === msg.id && editingBlock?.type === 'response';
+                return (
+                  <div key={`resp-${activity.messageId}`} className="flex flex-col w-full text-gray-100 gap-2 group/msg relative shrink-0" style={{ order: idx * 2 }}>
+                    <div data-msg-id={msg.id} data-msg-type="response" className={`w-full group relative ${isEditingResponse ? 'ring-2 ring-accent rounded-lg p-2 -m-2' : ''}`}>
+                      {!isGenerating && !msg.isGenerating && (
+                        <BlockToolbar 
+                          onEdit={() => setEditingBlock({ id: msg.id, type: 'response' })} 
+                          onRegenerate={() => handleRegenerate(msg.id, 'response')} 
+                          onDelete={() => handleDelete(msg.id, 'response')} 
+                        />
+                      )}
+                      <div className="[&_.mention]:inline-flex [&_.mention]:items-center [&_.mention]:gap-1.5 [&_.mention]:bg-white/10 [&_.mention]:border [&_.mention]:border-white/5 [&_.mention]:text-accentBright [&_.mention]:px-2 [&_.mention]:h-[24px] [&_.mention]:rounded-md [&_.mention]:mx-1 [&_.mention]:align-middle [&_.mention]:select-none">
+                        <ReactMarkdown 
+                          remarkPlugins={[remarkGfm, remarkMath]} 
+                          rehypePlugins={[rehypeRaw, rehypeKatex]} 
+                          components={chatComponents}
+                        >
+                          {formatMentions(isEditingResponse && editPreview ? editPreview.text : msg.content, msg.comments) + (msg.isGenerating ? ' ⬤' : '')}
+                        </ReactMarkdown>
+                      </div>
+                    </div>
+                  </div>
+                );
+              }
+              
+              return null;
+            })}
+            
+            {activityFeed.lastBrowserActivityIdx !== -1 && (
+              <div 
+                className="w-full shrink-0 transition-all duration-300"
+                style={{ order: activityFeed.lastBrowserActivityIdx * 2 + 1 }}
+              >
+                <div className="w-full overflow-hidden rounded-xl border border-white/10 shadow-lg bg-white/[0.03] backdrop-blur-md">
+                  <div
+                    onClick={() => setIsBrowserExpanded(!isBrowserExpanded)}
+                    className="flex items-center justify-between px-3 py-2 cursor-pointer hover:bg-white/[0.05] transition-colors select-none text-xs text-textSecondary group border-b border-white/5"
+                  >
+                    <div className="flex items-center gap-2 min-w-0">
+                      <Globe size={14} className="text-blue-400 shrink-0" />
+                      <span className="font-medium text-textSecondary group-hover:text-white transition-colors shrink-0">Live Browser Session</span>
+                      <span className="font-mono truncate text-textSecondary/80">Active</span>
+                    </div>
+                    <div className="flex items-center gap-2 shrink-0 ml-2">
+                      <div className="w-2 h-2 rounded-full bg-green-500 animate-pulse" />
+                      {isBrowserExpanded ? (
+                        <ChevronDown size={14} className="text-textSecondary group-hover:text-gray-200 transition-transform" />
+                      ) : (
+                        <ChevronRight size={14} className="text-textSecondary group-hover:text-gray-200 transition-transform" />
+                      )}
+                    </div>
+                  </div>
+                  
+                  <div className={`transition-all duration-300 ease-in-out origin-top ${isBrowserExpanded ? 'h-[340px] opacity-100 scale-y-100' : 'h-0 opacity-0 scale-y-0'}`}>
+                    <div className="w-full h-full relative bg-black/40">
+                      <AgentBrowser />
+                    </div>
+                  </div>
+                </div>
               </div>
-            );
-          })}
+            )}
+
             <div ref={bottomRef} className="w-full shrink-0" style={{ order: 999999 }} />
           </div>
         )}

@@ -1,12 +1,13 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { ChevronRight, ChevronDown, Check, X, Terminal, FileCode, Search, Globe, MousePointer2, Loader2, Bot, SlidersHorizontal } from 'lucide-react';
-
+import { ChevronRight, ChevronDown, Check, X, Terminal, FileCode, Search, Globe, MousePointer2, Loader2, Bot, SlidersHorizontal } from 'lucide-react';
 interface ToolCallBlockProps {
   toolName: string;
   args: any;
   status: 'executing' | 'completed' | 'error';
   result?: string;
   imageDataUrl?: string;
+  isLiveBrowser?: boolean;
 }
 
 const TOOL_LABELS: Record<string, string> = {
@@ -172,16 +173,22 @@ const formatOutput = (result?: string): string => {
   return result;
 };
 
-const ToolCallBlock: React.FC<ToolCallBlockProps> = ({ toolName, args, status, result, imageDataUrl }) => {
+const ToolCallBlock: React.FC<ToolCallBlockProps> = ({ toolName, args, status, result, imageDataUrl, isLiveBrowser }) => {
   const [expanded, setExpanded] = useState(false);
   const userToggled = useRef(false);
   const isScreenshotTool = toolName === 'desktop_screenshot' || toolName === 'browser_screenshot' || toolName === 'browser_observe';
+  const isBrowserTool = toolName.startsWith('browser');
 
-  // Auto-open while running and when the output arrives, unless the user took control
+  // Auto-expand while running, then fold back into the stack shortly after
+  // completion — unless the user took manual control of this block.
   useEffect(() => {
-    if (!userToggled.current && (status === 'executing' || status === 'completed' || status === 'error')) {
+    if (userToggled.current) return;
+    if (status === 'executing') {
       setExpanded(true);
+      return;
     }
+    const t = setTimeout(() => setExpanded(false), 1500);
+    return () => clearTimeout(t);
   }, [status]);
 
   const label = TOOL_LABELS[toolName] || toolName;
@@ -213,8 +220,8 @@ const ToolCallBlock: React.FC<ToolCallBlockProps> = ({ toolName, args, status, r
         </div>
       </div>
 
-      {/* Screenshot preview — visible only while the block is expanded */}
-      {expanded && isScreenshotTool && status === 'completed' && imageDataUrl && (
+      {/* Screenshot preview — visible only while the block is expanded (non-browser tools or non-live browser) */}
+      {expanded && isScreenshotTool && status === 'completed' && imageDataUrl && !isLiveBrowser && (
         <div className="px-3 pb-3 pt-0.5">
           <img
             src={imageDataUrl}
