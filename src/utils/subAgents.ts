@@ -1,4 +1,4 @@
-import { generateChatStream, getModelSettings, LLMModel, ModelSettings, fetchModels } from './llm';
+import { generateChatStream, getModelSettings, condenseThinking, LLMModel, ModelSettings, fetchModels } from './llm';
 import { executeToolCalls, ToolContext } from './toolExecutor';
 import { getSystemTools } from './tools';
 
@@ -197,6 +197,9 @@ const runSubAgent = async (agent: SubAgentState, host: SubAgentHost): Promise<vo
     };
 
     let finalContent = '';
+    // Auto-recovery: nudge models that stop after thinking without acting or
+    // get cut off mid-generation by max_tokens, instead of ending the task.
+    let autoContinues = 0;
     for (let round = 0; round < MAX_AGENT_ROUNDS; round++) {
       if (controller.signal.aborted) throw new Error('Aborted by user');
 
@@ -204,7 +207,23 @@ const runSubAgent = async (agent: SubAgentState, host: SubAgentHost): Promise<vo
       finalContent = res.content || finalContent;
 
       const rawCalls = res.toolCalls || [];
-      if (rawCalls.length === 0) break;
+      if (rawCalls.length === 0) {
+        const truncated = res.finishReason === 'length';
+        const wentSilent = !(res.content || '').trim() && !!(res.thinking || '').trim();
+        if ((truncated || wentSilent) && autoContinues < 2 && round < MAX_AGENT_ROUNDS - 1) {
+          autoContinues++;
+          // Forward the interrupted round's conclusions so the retry inherits
+          // its decision instead of re-deriving it from scratch.
+          const digest = condenseThinking(res.thinking)
+            .split('\n').filter(l => !l.startsWith('[Earlier')).join('\n').trim();
+          messages.push({
+            role: 'user',
+            content: `[System notice] ${truncated ? 'Your reply hit the token limit mid-generation.' : 'Your reasoning ended without a tool call or answer.'} The task is not done.${digest ? `\nConclusions already reached (trust these):\n${digest}` : ''} Respond with your next tool call now.`
+          });
+          continue;
+        }
+        break;
+      }
 
       const results = await executeToolCalls(rawCalls, ctx);
       agent.steps += rawCalls.length;
@@ -220,9 +239,13 @@ const runSubAgent = async (agent: SubAgentState, host: SubAgentHost): Promise<vo
         }
       }
 
+      // Persist this round's reasoning (condensed) into the next round's
+      // context so running analysis survives between tool calls.
+      const roundDigest = condenseThinking(res.thinking);
       messages.push({
         role: 'assistant',
-        content: rawCalls.map((c: string) => `<tool_call>\n${c}\n</tool_call>`).join('\n\n')
+        content: (roundDigest ? `<reasoning_digest>\n${roundDigest}\n</reasoning_digest>\n\n` : '') +
+          rawCalls.map((c: string) => `<tool_call>\n${c}\n</tool_call>`).join('\n\n')
       });
       messages.push({
         role: 'user',

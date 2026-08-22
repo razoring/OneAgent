@@ -491,7 +491,48 @@ export interface ChatStreamResult {
   thinking: string;
   toolCalls?: string[];
   isCallingTool?: boolean;
+  // Provider finish reason ('stop' | 'length' | ...) — 'length' means the
+  // output was cut off by max_tokens before the model finished its turn.
+  finishReason?: string | null;
 }
+
+// When prior assistant thinking is re-injected into context, compress it
+// intelligently instead of replaying full prose. Keeps lines that carry
+// decisions/actions (wherever they appear in the block) plus the most recent
+// line, drops pure narration. Models imitate the thinking style they see,
+// so shorter history = faster thinking.
+const THINKING_INJECTION_LIMIT = 700;
+
+// Tool names, arrows, element ids, action verbs — the signature of a
+// decision line vs descriptive prose.
+const DECISION_LINE =
+  /((browser|desktop|view|list|search|write_to|replace_file|run_command|delete|spawn|switch|get|update)_\w+|→|->|\b(?:id|ids)\s*[:#=]?\s*\d|\b(click|scroll|navigate|typed?|submit|select|observe|download|wait)\b)/i;
+
+export const condenseThinking = (thinking: string | undefined | null, maxChars = THINKING_INJECTION_LIMIT): string => {
+  const t = (thinking || '').trim();
+  if (!t || t.length <= maxChars) return t;
+  const lines = t.split('\n').map(l => l.trim()).filter(Boolean);
+
+  // Walk newest → oldest; keep the latest line unconditionally (current
+  // state), other lines only when they look like decisions.
+  const kept: string[] = [];
+  let used = 0;
+  for (let i = lines.length - 1; i >= 0 && used < maxChars; i--) {
+    const isLatest = i === lines.length - 1;
+    if (!isLatest && !DECISION_LINE.test(lines[i])) continue;
+    const cost = lines[i].length + 1;
+    if (kept.length > 0 && used + cost > maxChars) break;
+    kept.unshift(lines[i]);
+    used += cost;
+  }
+
+  if (kept.length === 0) {
+    // Single oversized blob with nothing recognizable: fall back to tail slice.
+    const tail = t.slice(-maxChars).replace(/^\S*\s+/, '');
+    return `[Earlier reasoning condensed]\n…${tail}`;
+  }
+  return `[Earlier reasoning condensed to decision lines — ${t.length - used} chars omitted]\n${kept.join('\n')}`;
+};
 
 // Generates a streaming chat completion, feeding thinking and response deltas in real-time
 export const generateChatStream = async (
@@ -655,7 +696,7 @@ export const generateChatStream = async (
           toolCalls: finalToolCalls,
           isCallingTool: isCallingTool
         });
-        resolve({ content: parsed.content, thinking: combinedThinking, toolCalls: finalToolCalls, isCallingTool: isCallingTool });
+        resolve({ content: parsed.content, thinking: combinedThinking, toolCalls: finalToolCalls, isCallingTool: isCallingTool, finishReason: (data as any).finishReason ?? null });
       });
 
       cleanupError = (window as any).electronAPI.onStreamError((data: any) => {

@@ -21,11 +21,13 @@ const sendInputEvent = async (opts: any) => {
 
 // The live webview mounts inside the latest browser tool call block, which can
 // land a beat after the agent's first browser_* call arrives — poll briefly.
+// Also waits for dom-ready: webview methods throw "must be attached to the DOM"
+// before the guest view is ready, even though the element already exists.
 export const waitForActiveWebview = async (timeoutMs = 5000): Promise<any> => {
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
     const wv = (window as any).activeWebview;
-    if (wv) return wv;
+    if (wv && (window as any).activeWebviewReady) return wv;
     await new Promise(r => setTimeout(r, 100));
   }
   throw new Error("No active webview available");

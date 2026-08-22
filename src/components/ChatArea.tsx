@@ -2,7 +2,7 @@ import React, { useState, useRef, useEffect } from 'react';
 import ChatInput from './ChatInput';
 import ThinkingBlock from './ThinkingBlock';
 import ToolCallBlock from './ToolCallBlock';
-import { generateChatStream, LLMModel, fileToBase64, parseAttachmentDocument } from '../utils/llm';
+import { generateChatStream, condenseThinking, LLMModel, fileToBase64, parseAttachmentDocument, getModelStats } from '../utils/llm';
 import { executeToolCalls, ToolContext } from '../utils/toolExecutor';
 import { spawnSubAgent, getAgentsSnapshot, waitForAgents } from '../utils/subAgents';
 import DEFAULT_SYSTEM_PROMPT from '../utils/systemPrompt.md?raw';
@@ -15,7 +15,7 @@ import 'katex/dist/katex.min.css';
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
 import { vscDarkPlus } from 'react-syntax-highlighter/dist/esm/styles/prism';
 import AgentBrowser from './AgentBrowser';
-import { MessageSquarePlus, Terminal, Globe, ChevronDown, ChevronRight, Trash2 } from 'lucide-react';
+import { MessageSquarePlus, Terminal, Globe, ChevronDown, ChevronRight, Trash2, Bug } from 'lucide-react';
 import { getSystemTools } from '../utils/tools';
 import { agentBrowserStore } from '../utils/agentBrowserStore';
 import { terminateBrowserSession } from '../utils/browserTools';
@@ -70,6 +70,7 @@ export interface ToolCall {
   result?: string;
   raw?: string;
   image?: string;
+  timestamp?: number;
 }
 
 export interface ChatMessage {
@@ -84,7 +85,87 @@ export interface ChatMessage {
   comments?: ChatComment[];
   toolCalls?: ToolCall[];
   isCallingTool?: boolean;
+  // Debug-transcript data: generation window, exact model-call context and
+  // settings/model snapshot at the time of the response.
+  createdAt?: number;
+  completedAt?: number;
+  internalContext?: any[];
+  modelStats?: any;
 }
+
+// ─── Debug transcript ────────────────────────────────────────────────────────
+const fmtTs = (t?: number) => (t ? new Date(t).toISOString() : 'unknown');
+const trunc = (s: any, max = 3000) => {
+  const str = typeof s === 'string' ? s : JSON.stringify(s, null, 2);
+  if (str == null) return 'undefined';
+  return str.length > max ? str.slice(0, max) + `\n...[truncated ${str.length - max} chars]` : str;
+};
+
+export const buildTranscript = (msg: ChatMessage): string => {
+  const L: string[] = [];
+  L.push('# OneAgent Debug Transcript');
+  L.push(`Message ID: ${msg.id}`);
+  L.push(`Started:    ${fmtTs(msg.createdAt)}`);
+  L.push(`Completed:  ${fmtTs(msg.completedAt)}${msg.createdAt && msg.completedAt ? ` (${((msg.completedAt - msg.createdAt) / 1000).toFixed(1)}s)` : ''}`);
+  L.push(`Generating: ${!!msg.isGenerating}`);
+
+  if (msg.modelStats) {
+    L.push('\n## Model & Settings');
+    L.push(trunc(msg.modelStats));
+  }
+
+  if (msg.thinking && msg.thinking.trim()) {
+    L.push('\n## Thinking Output');
+    L.push(msg.thinking);
+  }
+
+  if (msg.toolCalls && msg.toolCalls.length > 0) {
+    L.push(`\n## Tool Calls (${msg.toolCalls.length})`);
+    msg.toolCalls.forEach((tc, i) => {
+      L.push(`\n### [${i + 1}] ${tc.name} — ${tc.status} @ ${fmtTs(tc.timestamp)}`);
+      L.push(`id: ${tc.id}`);
+      L.push(`arguments:\n${trunc(tc.args)}`);
+      if (tc.raw) L.push(`raw:\n${trunc(tc.raw)}`);
+      if (tc.result !== undefined) L.push(`result:\n${trunc(tc.result)}`);
+      if (tc.image) L.push('result: [image attached]');
+    });
+  }
+
+  if (msg.internalContext && msg.internalContext.length > 0) {
+    L.push('\n## Internal Context (messages sent to the model)');
+    msg.internalContext.forEach((m: any, i: number) => {
+      L.push(`\n### [${i + 1}] role: ${m.role}`);
+      L.push(trunc(m.content));
+    });
+  }
+
+  if (msg.comments && msg.comments.length > 0) {
+    L.push('\n## User Comments');
+    msg.comments.forEach(c => L.push(`- on "${c.quote}": ${c.text}`));
+  }
+
+  return L.join('\n');
+};
+
+const TranscriptsButton = ({ msg }: { msg: ChatMessage }) => {
+  const [copied, setCopied] = useState(false);
+  return (
+    <button
+      onClick={async () => {
+        try {
+          await navigator.clipboard.writeText(buildTranscript(msg));
+          setCopied(true);
+          setTimeout(() => setCopied(false), 1500);
+        } catch (e) { console.error('Transcript copy failed', e); }
+      }}
+      className="mt-1 self-start flex items-center gap-1.5 text-[11px] text-textSecondary hover:text-gray-200 hover:bg-white/10 border border-white/5 rounded-full px-2 py-1 transition-colors"
+      title="Copy debug transcript (model settings, context, thinking, tool calls)"
+    >
+      <Bug size={12} />
+      <span>{copied ? 'Copied!' : 'Transcripts'}</span>
+    </button>
+  );
+};
 
 // Safety cap so a model stuck in tool-call loops can't run forever
 const MAX_TOOL_ROUNDS = 10;
@@ -110,6 +191,111 @@ const BlockToolbar = ({ onEdit, onRegenerate, onDelete }: { onEdit?: () => void,
           <button onClick={onDelete} className="p-1.5 text-textSecondary hover:text-gray-200 hover:bg-white/10 rounded-full transition-colors" title="Delete">
             <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M3 6h18"/><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/><line x1="10" x2="10" y1="11" y2="17"/><line x1="14" x2="14" y1="11" y2="17"/></svg>
           </button>
+        )}
+      </div>
+    </div>
+  );
+};
+
+const UnifiedToolsBlock = ({ activity, isGenerating, msgIsGenerating, activityFeed, isBrowserExpanded, setIsBrowserExpanded, handleUserKillBrowser, onEdit, onRegenerate, onDelete }: any) => {
+  const { toolCalls } = activity.data;
+  const [expanded, setExpanded] = useState(true);
+
+  return (
+    <div className="w-full group relative">
+      {!isGenerating && !msgIsGenerating && (
+        <BlockToolbar 
+          onEdit={onEdit} 
+          onRegenerate={onRegenerate} 
+          onDelete={onDelete} 
+        />
+      )}
+      <div className="w-full rounded-xl border border-white/10 bg-white/[0.03] backdrop-blur-md overflow-hidden transition-all duration-200">
+        <div 
+          onClick={() => setExpanded(!expanded)}
+          className="px-3 py-2 text-xs text-textSecondary flex items-center justify-between border-b border-white/5 cursor-pointer hover:bg-white/[0.05] transition-colors group/header"
+        >
+          <div className="flex items-center gap-2">
+            <Terminal size={14} className="text-gray-400" />
+            <span className="font-medium group-hover/header:text-white transition-colors">Tool Calls</span>
+            <span className="font-mono text-textSecondary/80">{toolCalls.length} call{toolCalls.length !== 1 ? 's' : ''}</span>
+          </div>
+          <div className="text-textSecondary group-hover/header:text-gray-200 transition-colors">
+            {expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+          </div>
+        </div>
+        
+        {expanded && (
+          <div className="p-2 flex flex-col gap-2 bg-black/20">
+            {toolCalls.map((tc: any, i: number) => {
+              const toolName = tc.name || tc.toolName || 'tool';
+              const args = tc.args || tc.arguments || tc;
+              const status = tc.status || (msgIsGenerating && i === toolCalls.length - 1 ? 'executing' : 'completed');
+              const result = tc.result;
+              const isBrowser = toolName.startsWith('browser');
+              const isLastBrowser = isBrowser && i === toolCalls.findLastIndex((t: any) => (t.name || t.toolName || '').startsWith('browser'));
+              return (
+                <ToolCallBlock
+                  key={`tc-${activity.messageId}-${i}`}
+                  toolName={toolName}
+                  args={args}
+                  status={status}
+                  result={result}
+                  imageDataUrl={tc.image}
+                  isLiveBrowser={isLastBrowser}
+                />
+              );
+            })}
+            
+            {/* Live Browser — teleports into the latest browser-bearing tools block */}
+            {activityFeed.lastBrowserToolsMessageId === activity.messageId && (
+              <div className="w-full rounded-xl border border-white/10 bg-white/[0.03] backdrop-blur-md overflow-hidden transition-all duration-200">
+                <div
+                  onClick={() => setIsBrowserExpanded(!isBrowserExpanded)}
+                  className="flex items-center justify-between px-3 py-2 cursor-pointer hover:bg-white/[0.05] transition-colors select-none text-xs text-textSecondary group"
+                >
+                  <div className="flex items-center gap-2 min-w-0">
+                    <Globe size={14} className="text-blue-400 shrink-0" />
+                    <span className="font-medium text-textSecondary group-hover:text-white transition-colors shrink-0">Live Browser Session</span>
+                  </div>
+                  <div className="flex items-center gap-2 shrink-0 ml-2">
+                    {agentBrowserStore.getTerminatedSnapshot() ? (
+                      <div className="w-2 h-2 rounded-full bg-red-500" title="Browser terminated" />
+                    ) : (
+                      <>
+                        <button
+                          onClick={(e) => { e.stopPropagation(); handleUserKillBrowser(); }}
+                          className="p-1 rounded hover:bg-red-500/20 text-textSecondary hover:text-red-400 transition-colors"
+                          title="Kill browser session"
+                        >
+                          <Trash2 size={14} />
+                        </button>
+                        <div className="w-2 h-2 rounded-full bg-green-500 animate-pulse" />
+                      </>
+                    )}
+                    {isBrowserExpanded ? (
+                      <ChevronDown size={14} className="text-textSecondary group-hover:text-gray-200 transition-transform" />
+                    ) : (
+                      <ChevronRight size={14} className="text-textSecondary group-hover:text-gray-200 transition-transform" />
+                    )}
+                  </div>
+                </div>
+
+                {isBrowserExpanded && (
+                  <div className="border-t border-white/5 transition-all duration-300 ease-in-out origin-top overflow-hidden opacity-100 scale-y-100 bg-black/40 relative">
+                    <AgentBrowser />
+                    {agentBrowserStore.getTerminatedSnapshot() && (
+                      <img
+                        src={agentBrowserStore.getTerminatedSnapshot()!}
+                        alt="Terminated browser session"
+                        className="absolute inset-0 w-full h-full object-cover grayscale opacity-60"
+                      />
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
         )}
       </div>
     </div>
@@ -499,6 +685,7 @@ const ChatArea = () => {
     }, 50);
 
     const assistantMsgId = Math.random().toString(36).substring(7);
+    const genStartedAt = Date.now();
 
     // Add temporary loading message for assistant
     setMessages([...contextMsgs, { 
@@ -522,9 +709,11 @@ const ChatArea = () => {
       for (const msg of contextMsgs) {
         let textContent = msg.content || '';
 
-        // If this is a previous assistant turn with thinking, preserve it in the context!
+        // Previous assistant thinking is retained but condensed to its recent
+        // core — keeps continuity without replaying pages of prose.
         if (msg.role === 'assistant' && msg.thinking) {
-          textContent = `<think>\n${msg.thinking}\n</think>\n\n${textContent}`;
+          const condensed = condenseThinking(msg.thinking);
+          textContent = `<think>\n${condensed}\n</think>\n\n${textContent}`;
         }
         
         // Append comments context
@@ -614,7 +803,7 @@ const ChatArea = () => {
       if (keepThinking) {
         formattedMessages.push({
           role: 'assistant',
-          content: `<think>\n${keepThinking}\n</think>\n\n`
+          content: `<think>\n${condenseThinking(keepThinking)}\n</think>\n\n`
         });
       }
 
@@ -627,8 +816,18 @@ const ChatArea = () => {
       // reopened when fresh input arrives. Keeps blocks small and chronological.
       const roundThinkingParts: string[] = [];
 
+      // Auto-recovery for silent stops: small models sometimes end their turn
+      // after reasoning without acting (EOS-after-think), or get cut off by
+      // max_tokens mid-generation. Nudge them to continue instead of ending.
+      const MAX_AUTO_CONTINUES = 2;
+      let autoContinues = 0;
+
       while (round < MAX_TOOL_ROUNDS) {
         round++;
+
+        // User hit stop (ref nulled or aborted) — never start another round.
+        const roundSignal = abortControllerRef.current?.signal;
+        if (!roundSignal || roundSignal.aborted) break;
 
         // Read the active model fresh each round so switch_model applies mid-conversation
         const roundModel = activeModelRef.current || targetModel;
@@ -641,7 +840,8 @@ const ChatArea = () => {
                 name: parsed.name || parsed.toolName || 'tool',
                 args: parsed.arguments || parsed.args || {},
                 status: 'executing' as const,
-                raw: tc
+                raw: tc,
+                timestamp: Date.now()
               };
             } catch {
               return {
@@ -649,7 +849,8 @@ const ChatArea = () => {
                 name: 'tool',
                 args: tc,
                 status: 'executing' as const,
-                raw: tc
+                raw: tc,
+                timestamp: Date.now()
               };
             }
           });
@@ -675,7 +876,7 @@ const ChatArea = () => {
             }
             return newMsgs;
           });
-        }, abortControllerRef.current.signal, undefined, getSystemTools());
+        }, roundSignal, undefined, getSystemTools());
 
         if (streamResult.thinking) {
           accumulatedThinking = accumulatedThinking ? `${accumulatedThinking}\n\n${streamResult.thinking}` : streamResult.thinking;
@@ -688,6 +889,32 @@ const ChatArea = () => {
 
         const rawCalls = streamResult.toolCalls || [];
         if (rawCalls.length === 0) {
+          const truncated = streamResult.finishReason === 'length';
+          // An aborted stream also resolves without tool calls — that's a
+          // manual kill, not a silent stop; never auto-continue it.
+          const aborted = roundSignal.aborted || !abortControllerRef.current;
+          const wentSilent = !aborted && !streamResult.content.trim() && !!streamResult.thinking.trim();
+          if ((truncated || wentSilent) && autoContinues < MAX_AUTO_CONTINUES && round < MAX_TOOL_ROUNDS) {
+            autoContinues++;
+            // Carry the interrupted round's conclusions forward — otherwise the
+            // next attempt re-derives everything from scratch and loops.
+            const digest = condenseThinking(streamResult.thinking)
+              .split('\n').filter(l => !l.startsWith('[Earlier')).join('\n').trim();
+            const strict = autoContinues >= MAX_AUTO_CONTINUES
+              ? ' No further analysis is allowed. Decide from what you have and emit ONE tool call immediately.'
+              : ' Do NOT re-analyze from scratch.';
+            const reason = truncated
+              ? 'Your reply hit the token limit mid-generation.'
+              : 'Your reasoning ended without a tool call or answer.';
+            const note = `[Auto-continued: ${truncated ? 'token cutoff' : 'stopped without acting'}]`;
+            accumulatedThinking = accumulatedThinking ? `${accumulatedThinking}\n\n${note}` : note;
+            roundThinkingParts.push(note);
+            formattedMessages.push({
+              role: 'user',
+              content: `[System notice] ${reason} The task is not done.${digest ? `\nConclusions already reached (trust these):\n${digest}` : ''}${strict} Respond with your next tool call now.`
+            });
+            continue;
+          }
           break;
         }
 
@@ -702,7 +929,7 @@ const ChatArea = () => {
           } catch {
             args = raw;
           }
-          return { id: `${assistantMsgId}-tc-${round}-${i}`, name, args, status: 'executing' as const, raw };
+          return { id: `${assistantMsgId}-tc-${round}-${i}`, name, args, status: 'executing' as const, raw, timestamp: Date.now() };
         });
         setMessages(prev => {
           const newMsgs = [...prev];
@@ -752,9 +979,14 @@ const ChatArea = () => {
 
         allToolCalls.push(...roundToolCalls);
 
+        // Persist this round's reasoning (condensed) into the next round's
+        // context. Without it, models re-derive their analysis from scratch
+        // every round — running tallies and decisions evaporate between calls.
+        const roundDigest = condenseThinking(streamResult.thinking);
         formattedMessages.push({
           role: 'assistant',
-          content: rawCalls.map((c: string) => `<tool_call>\n${c}\n</tool_call>`).join('\n\n')
+          content: (roundDigest ? `<reasoning_digest>\n${roundDigest}\n</reasoning_digest>\n\n` : '') +
+            rawCalls.map((c: string) => `<tool_call>\n${c}\n</tool_call>`).join('\n\n')
         });
 
         const hasImagePart = roundToolParts.some(p => p.type === 'image_url');
@@ -763,6 +995,10 @@ const ChatArea = () => {
           content: hasImagePart ? roundToolParts : roundToolParts.map(p => p.text).join('\n\n')
         });
       }
+
+      const finalModel = activeModelRef.current || targetModel;
+      let modelStats: any = null;
+      try { modelStats = await getModelStats(finalModel); } catch {}
 
       setMessages(prev => {
         const newMsgs = [...prev];
@@ -774,7 +1010,11 @@ const ChatArea = () => {
             thinking: accumulatedThinking,
             toolCalls: allToolCalls.length > 0 ? allToolCalls : undefined,
             isGenerating: false,
-            isCallingTool: false
+            isCallingTool: false,
+            createdAt: genStartedAt,
+            completedAt: Date.now(),
+            internalContext: JSON.parse(JSON.stringify(formattedMessages)),
+            modelStats
           };
         }
         return newMsgs;
@@ -970,27 +1210,9 @@ const ChatArea = () => {
         activities.push({ type: 'user', messageId: msg.id, messageIdx: msgIdx, data: msg });
       } else if (msg.role === 'assistant') {
         const tcs = msg.toolCalls || [];
-        // Chunked thinking: parts[i] precedes tool-call round i+1. Tool ids
-        // embed their round (`-tc-${round}-${i}`), so we can interleave exactly.
-        const parts = msg.thinkingParts && msg.thinkingParts.length > 0
-          ? msg.thinkingParts
-          : ((msg.thinking || msg.isGenerating) ? [msg.thinking || ''] : []);
-        const toolsByRound = new Map<number, { tc: any, tcIdx: number }[]>();
-        let maxRound = 0;
-        tcs.forEach((tc: any, tcIdx: number) => {
-          const m = String(tc.id || '').match(/-tc-(\d+)-/);
-          const r = m ? Number(m[1]) : 1;
-          if (!toolsByRound.has(r)) toolsByRound.set(r, []);
-          toolsByRound.get(r)!.push({ tc, tcIdx });
-          if (r > maxRound) maxRound = r;
-        });
-        const slots = Math.max(parts.length, maxRound);
-        for (let slot = 0; slot < slots; slot++) {
-          const partText = parts[slot] || '';
-          const isLivePart = !!msg.isGenerating && !msg.isCallingTool && !msg.content && slot === parts.length - 1;
-          if (partText.trim() || isLivePart) {
-            activities.push({ type: 'thinking', messageId: msg.id, messageIdx: msgIdx, partIdx: slot, text: partText, live: isLivePart, data: msg });
-          }
+        if (msg.thinking || (msg.isGenerating && !msg.isCallingTool && !msg.content)) {
+          const isLivePart = !!msg.isGenerating && !msg.isCallingTool && !msg.content;
+          activities.push({ type: 'thinking', messageId: msg.id, messageIdx: msgIdx, partIdx: 0, text: msg.thinking || '', live: isLivePart, data: msg });
         }
         // Tools block (unified) — only if there are tool calls
         if (tcs.length > 0) {
@@ -1104,98 +1326,21 @@ const ChatArea = () => {
               }
               
               if (activity.type === 'tools') {
-                const { toolCalls, isGenerating: msgIsGenerating } = activity.data;
+                const { isGenerating: msgIsGenerating } = activity.data;
                 return (
                   <div key={`tools-${activity.messageId}`} className="flex flex-col w-full text-gray-100 gap-2 group/msg relative shrink-0" style={{ order: idx * 2 }}>
-                    <div className="w-full group relative">
-                      {!isGenerating && !msgIsGenerating && (
-                        <BlockToolbar 
-                          onEdit={() => setEditingBlock({ id: activity.messageId, type: 'tools' })} 
-                          onRegenerate={() => handleRegenerate(activity.messageId, 'tools')} 
-                          onDelete={() => handleDelete(activity.messageId, 'tools')} 
-                        />
-                      )}
-                      <div className="w-full rounded-xl border border-white/10 bg-white/[0.03] backdrop-blur-md overflow-hidden transition-all duration-200">
-                        <div className="px-3 py-2 text-xs text-textSecondary flex items-center gap-2 border-b border-white/5">
-                          <Terminal size={14} className="text-gray-400" />
-                          <span className="font-medium">Tool Calls</span>
-                          <span className="font-mono text-textSecondary/80">{toolCalls.length} call{toolCalls.length !== 1 ? 's' : ''}</span>
-                        </div>
-                        <div className="flex flex-col">
-                          {toolCalls.map((tc: any, i: number) => {
-                            const toolName = tc.name || tc.toolName || 'tool';
-                            const args = tc.args || tc.arguments || tc;
-                            const status = tc.status || (msgIsGenerating && i === toolCalls.length - 1 ? 'executing' : 'completed');
-                            const result = tc.result;
-                            const isBrowser = toolName.startsWith('browser');
-                            const isLastBrowser = isBrowser && i === toolCalls.findLastIndex((t: any) => (t.name || t.toolName || '').startsWith('browser'));
-                            return (
-                              <ToolCallBlock
-                                key={`tc-${activity.messageId}-${i}`}
-                                toolName={toolName}
-                                args={args}
-                                status={status}
-                                result={result}
-                                imageDataUrl={tc.image}
-                                isLiveBrowser={isLastBrowser}
-                              />
-                            );
-                          })}
-                        </div>
-                        {/* Live Browser — teleports into the latest browser-bearing tools block */}
-                        {activityFeed.lastBrowserToolsMessageId === activity.messageId && (
-                          <div className="border-t border-white/5">
-                            <div
-                              onClick={() => setIsBrowserExpanded(!isBrowserExpanded)}
-                              className="flex items-center justify-between px-3 py-2 cursor-pointer hover:bg-white/[0.05] transition-colors select-none text-xs text-textSecondary group"
-                            >
-                              <div className="flex items-center gap-2 min-w-0">
-                                <Globe size={14} className="text-blue-400 shrink-0" />
-                                <span className="font-medium text-textSecondary group-hover:text-white transition-colors shrink-0">Live Browser Session</span>
-                                <span className="font-mono truncate text-textSecondary/80">Active</span>
-                              </div>
-                              <div className="flex items-center gap-2 shrink-0 ml-2">
-                                {agentBrowserStore.getTerminatedSnapshot() ? (
-                                  <div className="w-2 h-2 rounded-full bg-red-500" title="Browser terminated" />
-                                ) : (
-                                  <>
-                                    <button
-                                      onClick={(e) => { e.stopPropagation(); handleUserKillBrowser(); }}
-                                      className="p-1 rounded hover:bg-red-500/20 text-textSecondary hover:text-red-400 transition-colors"
-                                      title="Kill browser session"
-                                    >
-                                      <Trash2 size={14} />
-                                    </button>
-                                    <div className="w-2 h-2 rounded-full bg-green-500 animate-pulse" />
-                                  </>
-                                )}
-                                {isBrowserExpanded ? (
-                                  <ChevronDown size={14} className="text-textSecondary group-hover:text-gray-200 transition-transform" />
-                                ) : (
-                                  <ChevronRight size={14} className="text-textSecondary group-hover:text-gray-200 transition-transform" />
-                                )}
-                              </div>
-                            </div>
-
-                            <div className={`transition-all duration-300 ease-in-out origin-top overflow-hidden ${isBrowserExpanded ? 'h-[340px] opacity-100 scale-y-100' : 'h-0 opacity-0 scale-y-0'}`}>
-                              <div className="w-full h-full relative bg-black/40">
-                                {/* Webview stays mounted across terminations so a new
-                                    session resumes instantly; the grayscale snapshot
-                                    overlays it until browsing restarts. */}
-                                <AgentBrowser />
-                                {agentBrowserStore.getTerminatedSnapshot() && (
-                                  <img
-                                    src={agentBrowserStore.getTerminatedSnapshot()!}
-                                    alt="Terminated browser session"
-                                    className="absolute inset-0 w-full h-full object-cover grayscale opacity-60"
-                                  />
-                                )}
-                              </div>
-                            </div>
-                          </div>
-                        )}
-                      </div>
-                    </div>
+                    <UnifiedToolsBlock
+                      activity={activity}
+                      isGenerating={isGenerating}
+                      msgIsGenerating={msgIsGenerating}
+                      activityFeed={activityFeed}
+                      isBrowserExpanded={isBrowserExpanded}
+                      setIsBrowserExpanded={setIsBrowserExpanded}
+                      handleUserKillBrowser={handleUserKillBrowser}
+                      onEdit={() => setEditingBlock({ id: activity.messageId, type: 'tools' })}
+                      onRegenerate={() => handleRegenerate(activity.messageId, 'tools')}
+                      onDelete={() => handleDelete(activity.messageId, 'tools')}
+                    />
                   </div>
                 );
               }
@@ -1222,6 +1367,7 @@ const ChatArea = () => {
                           {formatMentions(isEditingResponse && editPreview ? editPreview.text : msg.content, msg.comments) + (msg.isGenerating ? ' ⬤' : '')}
                         </ReactMarkdown>
                       </div>
+                      <TranscriptsButton msg={msg} />
                     </div>
                   </div>
                 );

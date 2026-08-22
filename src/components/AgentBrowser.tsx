@@ -23,6 +23,9 @@ const AgentBrowser: React.FC = () => {
     if (!webview) return;
 
     (window as any).activeWebview = webview;
+    // webview methods (loadURL, executeJavaScript, ...) throw until the guest
+    // has attached and fired dom-ready — gate tool calls on this flag.
+    (window as any).activeWebviewReady = false;
 
     const updateEmulation = (width: number, height: number) => {
       const electronAPI = (window as any).electronAPI;
@@ -57,6 +60,7 @@ const AgentBrowser: React.FC = () => {
     });
 
     const handleDomReady = () => {
+      (window as any).activeWebviewReady = true;
       if (webview.parentElement) {
         resizeObserver.observe(webview.parentElement);
       }
@@ -84,6 +88,7 @@ const AgentBrowser: React.FC = () => {
     return () => {
       if ((window as any).activeWebview === webview) {
         (window as any).activeWebview = null;
+        (window as any).activeWebviewReady = false;
       }
       webview.removeEventListener('dom-ready', handleDomReady);
       webview.removeEventListener('did-finish-load', handleDidFinishLoad);

@@ -225,6 +225,9 @@ ipcMain.handle('chat-stream', async (event, { endpoint, apiKey, payload, streamI
     const decoder = new TextDecoder();
     let buffer = '';
     let lastUsage: any = null;
+    // Providers report why generation ended ('stop' | 'length' | ...) on the
+    // final chunk. Needed so the renderer can detect silent max_tokens cutoffs.
+    let lastFinishReason: string | null = null;
 
     while (true) {
       const { done, value } = await reader.read();
@@ -246,10 +249,13 @@ ipcMain.handle('chat-stream', async (event, { endpoint, apiKey, payload, streamI
           if (parsed.usage) lastUsage = parsed.usage;
           const choice = parsed.choices?.[0];
           if (choice) {
+            if (choice.finish_reason) lastFinishReason = choice.finish_reason;
             const content = choice.delta?.content || '';
             const reasoning = choice.delta?.reasoning_content || choice.delta?.reasoning || choice.delta?.thinking || '';
             const toolCalls = choice.delta?.tool_calls;
             event.sender.send('chat-stream-delta', { streamId, content, reasoning, toolCalls });
+          } else if (parsed.choices?.[0] === undefined && parsed.finish_reason) {
+            lastFinishReason = parsed.finish_reason;
           }
         } catch {
           // Ignore incomplete chunk parse errors
@@ -257,7 +263,7 @@ ipcMain.handle('chat-stream', async (event, { endpoint, apiKey, payload, streamI
       }
     }
 
-    event.sender.send('chat-stream-end', { streamId, usage: lastUsage });
+    event.sender.send('chat-stream-end', { streamId, usage: lastUsage, finishReason: lastFinishReason });
     return { success: true };
   } catch (error: any) {
     if (error.name === 'AbortError') {
