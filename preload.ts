@@ -50,6 +50,7 @@ const { ipcRenderer, webUtils } = require('electron');
   browserSendInputEvent: (options: any) => ipcRenderer.invoke('browser-send-input-event', options),
   browserInsertText: (options: any) => ipcRenderer.invoke('browser-insert-text', options),
   browserCapture: (webContentsId: number) => ipcRenderer.invoke('browser-capture', webContentsId),
+  browserEmulateDevice: (webContentsId: number, options: any) => ipcRenderer.invoke('browser-emulate-device', webContentsId, options),
   browserCookies: (options: any) => ipcRenderer.invoke('browser-cookies', options),
   browserHistory: (options: any) => ipcRenderer.invoke('browser-history', options),
   findInPage: (options: any) => ipcRenderer.invoke('find-in-page', options),

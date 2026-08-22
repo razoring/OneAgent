@@ -592,6 +592,24 @@ export const generateChatStream = async (
         }
         if (data.content) {
           accumulatedContent += data.content;
+          
+          // Detect and abort on known model hallucination loops (e.g. Gemma4 <|channel> loops)
+          if (accumulatedContent.endsWith('<|channel>thought<|channel>thought<|channel>thought')) {
+            (window as any).electronAPI?.abortChatStream(streamId);
+            accumulatedContent = accumulatedContent.replace(/(<\|channel>thought)+$/, '\\n\\n[Generation aborted: Model hallucination loop detected. Try a different approach or tool.]');
+            cleanup();
+            const parsed = extractThinkingAndContent(accumulatedContent);
+            const combinedThinking = [accumulatedReasoning, parsed.thinking].filter(Boolean).join('\\n\\n').trim();
+            onUpdate({
+              content: parsed.content,
+              thinking: combinedThinking,
+              isGenerating: false,
+              toolCalls: parsed.toolCalls,
+              isCallingTool: parsed.isCallingTool
+            });
+            resolve({ content: parsed.content, thinking: combinedThinking, toolCalls: parsed.toolCalls, isCallingTool: parsed.isCallingTool });
+            return;
+          }
         }
         if (data.toolCalls) {
           data.toolCalls.forEach((tc: any) => {

@@ -72,6 +72,7 @@ export const SYSTEM_TOOLS = [
   // ── Embedded browser: virtual input (instant, no permission) ─────────────
   fn('browser_navigate', 'Load a URL in the embedded browser. Bare domains get https:// prepended; non-URLs are treated as a DuckDuckGo search. Waits for the page to settle before returning.',
     { url: str('URL or search phrase.') }, ['url']),
+  fn('browser_terminate', 'Stop the current browser session and reset to a blank page. Use when the browser is stuck, unresponsive, or the task is complete and you want a clean slate for the next navigation.', {}),
   fn('browser_click', 'Click an element by Set-of-Mark id (preferred) or viewport coordinates. Supports any mouse button, double/triple clicks and modifier keys.',
     {
       id: num('Set-of-Mark element ID from the last screenshot/observe.'),

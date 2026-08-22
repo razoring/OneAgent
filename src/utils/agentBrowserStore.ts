@@ -7,6 +7,10 @@ type Listener = (url: string) => void;
 let currentUrl = 'https://html.duckduckgo.com/';
 const listeners = new Set<Listener>();
 
+// Set when the USER kills the browser from the Live Browser header. Consumed
+// by the next browser_* tool call so the agent learns why its session died.
+let userKilledBrowser = false;
+
 export const agentBrowserStore = {
   getUrl: () => currentUrl,
   navigate: (url: string) => {
@@ -17,5 +21,11 @@ export const agentBrowserStore = {
   subscribe: (l: Listener) => {
     listeners.add(l);
     return () => { listeners.delete(l); };
+  },
+  markUserKilled: () => { userKilledBrowser = true; },
+  consumeUserKill: () => {
+    if (!userKilledBrowser) return false;
+    userKilledBrowser = false;
+    return true;
   }
 };

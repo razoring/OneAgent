@@ -15,6 +15,21 @@ export const ThinkingBlock: React.FC<ThinkingBlockProps> = ({ thinking, isGenera
   const [elapsed, setElapsed] = useState(0);
   const [finalDuration, setFinalDuration] = useState<number | null>(null);
   const startRef = useRef<number | null>(null);
+  
+  const scrollContainerRef = useRef<HTMLDivElement>(null);
+  const isScrolledToBottomRef = useRef(true);
+
+  // Auto-scroll logic
+  useEffect(() => {
+    if (isExpanded && isScrolledToBottomRef.current && scrollContainerRef.current) {
+      scrollContainerRef.current.scrollTop = scrollContainerRef.current.scrollHeight;
+    }
+  }, [thinking, isExpanded]);
+
+  const handleScroll = (e: React.UIEvent<HTMLDivElement>) => {
+    const { scrollTop, scrollHeight, clientHeight } = e.currentTarget;
+    isScrolledToBottomRef.current = Math.abs(scrollHeight - clientHeight - scrollTop) < 10;
+  };
 
   // Open while thinking, fold back into the stack when done — unless the user took control
   useEffect(() => {
@@ -46,6 +61,9 @@ export const ThinkingBlock: React.FC<ThinkingBlockProps> = ({ thinking, isGenera
   const handleToggle = () => {
     setUserToggled(true);
     setIsExpanded(!isExpanded);
+    if (!isExpanded) {
+      isScrolledToBottomRef.current = true; // reset scroll tracking when expanding
+    }
   };
 
   if (!thinking && !isGenerating) return null;
@@ -92,7 +110,11 @@ export const ThinkingBlock: React.FC<ThinkingBlockProps> = ({ thinking, isGenera
 
       {/* Collapsible Content */}
       {isExpanded && (
-        <div className="px-3.5 py-2.5 border-t border-white/5 text-xs text-textSecondary font-mono leading-relaxed max-h-[350px] overflow-y-auto whitespace-pre-wrap bg-black/20 select-text">
+        <div 
+          ref={scrollContainerRef}
+          onScroll={handleScroll}
+          className="px-3.5 py-2.5 border-t border-white/5 text-xs text-textSecondary font-mono leading-relaxed max-h-[350px] overflow-y-auto whitespace-pre-wrap bg-black/20 select-text"
+        >
           <ReactMarkdown remarkPlugins={[remarkGfm]}>
             {thinking || '...'}
           </ReactMarkdown>

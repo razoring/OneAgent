@@ -660,8 +660,37 @@ ipcMain.handle('browser-capture', async (event, webContentsId) => {
   try {
     const wc = webContents.fromId(webContentsId);
     if (!wc) return { success: false, error: 'WebContents not found' };
-    const image = await wc.capturePage();
+    let image;
+    try {
+      image = await wc.capturePage();
+    } catch (captureErr: any) {
+      // UnknownVizError occurs when the page is blank, not yet rendered, or GPU
+      // cache is broken.  Retry once after a short delay; if that also fails,
+      // return a 1×1 transparent placeholder so the agent can continue.
+      if (captureErr?.message?.includes('UnknownVizError') || captureErr?.name === 'UnknownVizError') {
+        await new Promise(r => setTimeout(r, 200));
+        try {
+          image = await wc.capturePage();
+        } catch {
+          const { nativeImage } = require('electron');
+          image = nativeImage.createEmpty();
+        }
+      } else {
+        throw captureErr;
+      }
+    }
     return { success: true, image: image.toDataURL() };
+  } catch (err: any) {
+    return { success: false, error: err.message };
+  }
+});
+
+ipcMain.handle('browser-emulate-device', async (event, webContentsId, options) => {
+  try {
+    const wc = webContents.fromId(webContentsId);
+    if (!wc) return { success: false, error: 'WebContents not found' };
+    wc.enableDeviceEmulation(options);
+    return { success: true };
   } catch (err: any) {
     return { success: false, error: err.message };
   }
@@ -967,6 +996,15 @@ ipcMain.handle('provider-status', async (event, { providers }) => {
   }));
 
   return { success: true, status };
+});
+
+app.on('web-contents-created', (event, contents) => {
+  if (contents.getType() === 'webview') {
+    contents.setWindowOpenHandler(({ url }) => {
+      contents.loadURL(url);
+      return { action: 'deny' };
+    });
+  }
 });
 
 app.on('ready', createWindow);

@@ -2,6 +2,23 @@ import { agentBrowserStore } from './agentBrowserStore';
 
 export const getActiveWebview = () => (window as any).activeWebview;
 
+// Device-emulation scale applied to the agent webview (set by AgentBrowser on
+// dom-ready, currently 0.5). Input events are injected in widget space while
+// DOM coordinates from getBoundingClientRect() live in emulated page space —
+// every positional event must be multiplied by this factor before sending.
+const getEmulationScale = (): number => (window as any).__oneagentBrowserScale || 1;
+
+// Scale-aware wrapper around electronAPI.browserSendInputEvent. Pass-through
+// for events without coordinates (keyboard events).
+const sendInputEvent = async (opts: any) => {
+  const s = getEmulationScale();
+  const { x, y, ...rest } = opts;
+  const scaled: any = { ...rest };
+  if (x != null) scaled.x = Math.round(x * s);
+  if (y != null) scaled.y = Math.round(y * s);
+  return (window as any).electronAPI.browserSendInputEvent(scaled);
+};
+
 // The live webview mounts inside the latest browser tool call block, which can
 // land a beat after the agent's first browser_* call arrives — poll briefly.
 export const waitForActiveWebview = async (timeoutMs = 5000): Promise<any> => {
@@ -41,6 +58,9 @@ export const injectSetOfMark = async (): Promise<any> => {
         if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return;
         const rect = el.getBoundingClientRect();
         if (rect.width === 0 || rect.height === 0) return;
+        
+        // Only label elements that intersect with the current viewport
+        if (rect.bottom < 0 || rect.right < 0 || rect.top > window.innerHeight || rect.left > window.innerWidth) return;
 
         const id = nextId++;
         
@@ -214,6 +234,12 @@ export const captureBrowserScreenshot = async (): Promise<{ image: string, marke
     const res = await electronAPI.browserCapture(wv.getWebContentsId());
     if (!res?.success || !res.image) throw new Error(res?.error || "Failed to capture browser screenshot");
     return { image: res.image, markers };
+  } catch (err: any) {
+    const msg = err?.message || String(err);
+    if (msg.includes('UnknownVizError') || msg.includes('not found') || msg.includes('not available')) {
+      throw new Error("Browser page is not ready (blank or still loading). Navigate to a URL first with browser_navigate, or wait a moment and retry browser_observe.");
+    }
+    throw err;
   } finally {
     try { await clearSetOfMark(); } catch {}
   }
@@ -234,14 +260,13 @@ const normalizeKeyCode = (key: string): string => {
 };
 
 const sendKey = async (webContentsId: number, keyCode: string, modifiers: string[] = [], state: 'press' | 'down' | 'up' = 'press') => {
-  const electronAPI = (window as any).electronAPI;
   if (state === 'down' || state === 'press') {
-    const r = await electronAPI.browserSendInputEvent({ webContentsId, type: 'keyDown', keyCode, modifiers });
+    const r = await sendInputEvent({ webContentsId, type: 'keyDown', keyCode, modifiers });
     if (r && r.success === false) return r;
   }
   if (state === 'up' || state === 'press') {
     await new Promise(r => setTimeout(r, 40));
-    const r = await electronAPI.browserSendInputEvent({ webContentsId, type: 'keyUp', keyCode, modifiers });
+    const r = await sendInputEvent({ webContentsId, type: 'keyUp', keyCode, modifiers });
     if (r && r.success === false) return r;
   }
   return { success: true };
@@ -273,7 +298,7 @@ const typeTextIntoFocus = async (wv: any, webContentsId: number, text: string): 
     if (ch === '\n') {
       await sendKey(webContentsId, 'Enter');
     } else {
-      const r = await electronAPI.browserSendInputEvent({ webContentsId, type: 'char', keyCode: ch });
+      const r = await sendInputEvent({ webContentsId, type: 'char', keyCode: ch });
       if (r && r.success === false) return { ok: false, detail: r.error || 'keyboard event was rejected' };
     }
     await new Promise(r => setTimeout(r, 12));
@@ -400,7 +425,6 @@ export const browserKeystrokes = async (args: any): Promise<string> => {
     throw new Error("browser_keystrokes type action requires the text to type in the 'value' parameter");
   }
 
-  const electronAPI = (window as any).electronAPI;
   const webContentsId = wv.getWebContentsId();
 
   // Real wheel-event scrolling (the old path sent a bogus mouseDown instead).
@@ -417,7 +441,7 @@ export const browserKeystrokes = async (args: any): Promise<string> => {
     } else {
       ({ x, y } = await wv.executeJavaScript(`({ x: Math.round(window.innerWidth / 2), y: Math.round(window.innerHeight / 2) })`));
     }
-    const r = await electronAPI.browserSendInputEvent({ webContentsId, type: 'mouseWheel', x, y, deltaX: dx, deltaY: dy });
+    const r = await sendInputEvent({ webContentsId, type: 'mouseWheel', x, y, deltaX: dx, deltaY: dy });
     if (r && r.success === false) return `Scroll failed: ${r.error}`;
     await new Promise(res => setTimeout(res, 300));
     return `Scrolled ${dir} ${amount}px${id ? ` at element ${id}` : ''}`;
@@ -442,20 +466,20 @@ export const browserKeystrokes = async (args: any): Promise<string> => {
       return 'Drag requires a destination: set targetId (Set-of-Mark element) or x/y coordinates';
     }
 
-    await electronAPI.browserSendInputEvent({ webContentsId, type: 'mouseMove', x: coords.x, y: coords.y });
+    await sendInputEvent({ webContentsId, type: 'mouseMove', x: coords.x, y: coords.y });
     await new Promise(r => setTimeout(r, 80));
-    await electronAPI.browserSendInputEvent({ webContentsId, type: 'mouseDown', x: coords.x, y: coords.y, button, clickCount: 1 });
+    await sendInputEvent({ webContentsId, type: 'mouseDown', x: coords.x, y: coords.y, button, clickCount: 1 });
     await new Promise(r => setTimeout(r, 150));
 
     const steps = 12;
     for (let i = 1; i <= steps; i++) {
       const ix = Math.round(coords.x + ((tx as number) - coords.x) * i / steps);
       const iy = Math.round(coords.y + ((ty as number) - coords.y) * i / steps);
-      await electronAPI.browserSendInputEvent({ webContentsId, type: 'mouseMove', x: ix, y: iy });
+      await sendInputEvent({ webContentsId, type: 'mouseMove', x: ix, y: iy });
       await new Promise(r => setTimeout(r, 30));
     }
     await new Promise(r => setTimeout(r, 100));
-    await electronAPI.browserSendInputEvent({ webContentsId, type: 'mouseUp', x: tx as number, y: ty as number, button, clickCount: 1 });
+    await sendInputEvent({ webContentsId, type: 'mouseUp', x: tx as number, y: ty as number, button, clickCount: 1 });
     return `Dragged element ${id} to (${tx}, ${ty})`;
   }
 
@@ -470,20 +494,20 @@ export const browserKeystrokes = async (args: any): Promise<string> => {
     if (state === 'move' || state === 'hover') type = 'mouseMove';
 
     if (state === 'click') {
-      await electronAPI.browserSendInputEvent({ webContentsId, type: 'mouseDown', x: coords.x, y: coords.y, button, clickCount: 1, modifiers });
+      await sendInputEvent({ webContentsId, type: 'mouseDown', x: coords.x, y: coords.y, button, clickCount: 1, modifiers });
       await new Promise(r => setTimeout(r, 50));
-      await electronAPI.browserSendInputEvent({ webContentsId, type: 'mouseUp', x: coords.x, y: coords.y, button, clickCount: 1, modifiers });
+      await sendInputEvent({ webContentsId, type: 'mouseUp', x: coords.x, y: coords.y, button, clickCount: 1, modifiers });
     } else {
-      await electronAPI.browserSendInputEvent({ webContentsId, type, x: coords.x, y: coords.y, button, clickCount: 1, modifiers });
+      await sendInputEvent({ webContentsId, type, x: coords.x, y: coords.y, button, clickCount: 1, modifiers });
     }
     return `${state === 'click' ? 'Clicked' : state} element ${id} at (${coords.x}, ${coords.y})`;
   }
 
   if (action === 'keyboard' || action === 'type') {
     // Focus first
-    await electronAPI.browserSendInputEvent({ webContentsId, type: 'mouseDown', x: coords.x, y: coords.y, button: 'left', clickCount: 1 });
+    await sendInputEvent({ webContentsId, type: 'mouseDown', x: coords.x, y: coords.y, button: 'left', clickCount: 1 });
     await new Promise(r => setTimeout(r, 50));
-    await electronAPI.browserSendInputEvent({ webContentsId, type: 'mouseUp', x: coords.x, y: coords.y, button: 'left', clickCount: 1 });
+    await sendInputEvent({ webContentsId, type: 'mouseUp', x: coords.x, y: coords.y, button: 'left', clickCount: 1 });
     await new Promise(r => setTimeout(r, 120));
 
     if (action === 'type') {
@@ -514,7 +538,6 @@ export const browserScroll = async (args: any): Promise<string> => {
   const wv = await waitForActiveWebview();
   if (!wv) throw new Error("No active webview available");
 
-  const electronAPI = (window as any).electronAPI;
   const webContentsId = wv.getWebContentsId();
   const dir = String(args.direction || args.Direction || 'down').toLowerCase();
   const amount = Number(args.amount ?? args.Amount ?? 600) || 600;
@@ -553,7 +576,7 @@ export const browserScroll = async (args: any): Promise<string> => {
   const before = await readScrollPos(wv);
 
   // Attempt 1: real wheel event at the target point.
-  const r = await electronAPI.browserSendInputEvent({ webContentsId, type: 'mouseWheel', x, y, deltaX: dx, deltaY: dy });
+  const r = await sendInputEvent({ webContentsId, type: 'mouseWheel', x, y, deltaX: dx, deltaY: dy });
   if (!r || r.success !== false) {
     await new Promise(res => setTimeout(res, 300));
     const afterWheel = await readScrollPos(wv);
@@ -636,7 +659,6 @@ export const browserType = async (args: any): Promise<string> => {
   const wv = await waitForActiveWebview();
   if (!wv) throw new Error("No active webview available");
 
-  const electronAPI = (window as any).electronAPI;
   const webContentsId = wv.getWebContentsId();
   const text = args.text || args.Text || args.value || args.Value || '';
   if (!text) throw new Error("browser_type requires the 'text' parameter");
@@ -648,9 +670,9 @@ export const browserType = async (args: any): Promise<string> => {
     if (!coords) {
       return `Element ${id} not found — take a browser_screenshot to re-label the page and retry`;
     }
-    await electronAPI.browserSendInputEvent({ webContentsId, type: 'mouseDown', x: coords.x, y: coords.y, button: 'left', clickCount: 1 });
+    await sendInputEvent({ webContentsId, type: 'mouseDown', x: coords.x, y: coords.y, button: 'left', clickCount: 1 });
     await new Promise(r => setTimeout(r, 50));
-    await electronAPI.browserSendInputEvent({ webContentsId, type: 'mouseUp', x: coords.x, y: coords.y, button: 'left', clickCount: 1 });
+    await sendInputEvent({ webContentsId, type: 'mouseUp', x: coords.x, y: coords.y, button: 'left', clickCount: 1 });
   }
   await new Promise(r => setTimeout(r, 120));
 
@@ -722,6 +744,24 @@ export const executeBrowserNavigation = async (action: string, url?: string): Pr
   return "OK";
 };
 
+// Kills the live webview session: stops in-flight loads, blanks the page and
+// syncs the URL store. Used by both the agent's browser_terminate tool and the
+// user-facing trash button in the Live Browser header.
+export const terminateBrowserSession = async (): Promise<void> => {
+  const wv = getActiveWebview();
+  if (!wv) return;
+  try { wv.stop(); } catch {}
+  try {
+    Promise.resolve(wv.loadURL('about:blank')).catch(() => {});
+  } catch {}
+  agentBrowserStore.navigate('about:blank');
+};
+
+export const executeBrowserTerminate = async (): Promise<string> => {
+  await terminateBrowserSession();
+  return "Browser terminated. The session has been stopped and reset to a blank page. The next browser tool call will start a fresh session.";
+};
+
 // ─── Virtual input primitives ────────────────────────────────────────────────
 // Fine-grained keyboard/mouse building blocks used by the modern tool set.
 // Every positional tool accepts a Set-of-Mark id (preferred) or viewport x/y.
@@ -747,14 +787,13 @@ const notFoundMsg = (id?: number | null) =>
   `${id !== undefined && id !== null ? `Element ${id}` : 'Target'} not found or out of view — take a browser_observe to re-label the page and retry`;
 
 const mouseButtonEvent = async (
-  electronAPI: any,
   webContentsId: number,
   type: string,
   x: number,
   y: number,
   opts: { button?: string, clickCount?: number, modifiers?: string[] } = {}
 ) => {
-  const r = await electronAPI.browserSendInputEvent({
+  const r = await sendInputEvent({
     webContentsId,
     type,
     x,
@@ -768,7 +807,6 @@ const mouseButtonEvent = async (
 
 export const browserClick = async (args: any): Promise<string> => {
   const wv = await waitForActiveWebview();
-  const electronAPI = (window as any).electronAPI;
   const webContentsId = wv.getWebContentsId();
 
   const id = args.id ?? args.Id;
@@ -782,10 +820,14 @@ export const browserClick = async (args: any): Promise<string> => {
   if (args.double ?? args.Double) count = Math.max(count, 2);
   count = Math.min(3, Math.max(1, Math.round(count)));
 
+  // Move cursor to target first — some pages only respond to clicks after hover
+  await sendInputEvent({ webContentsId, type: 'mouseMove', x: coords.x, y: coords.y });
+  await new Promise(r => setTimeout(r, 30));
+
   for (let c = 1; c <= count; c++) {
-    await mouseButtonEvent(electronAPI, webContentsId, 'mouseDown', coords.x, coords.y, { button, clickCount: c, modifiers });
+    await mouseButtonEvent(webContentsId, 'mouseDown', coords.x, coords.y, { button, clickCount: c, modifiers });
     await new Promise(r => setTimeout(r, 50));
-    await mouseButtonEvent(electronAPI, webContentsId, 'mouseUp', coords.x, coords.y, { button, clickCount: c, modifiers });
+    await mouseButtonEvent(webContentsId, 'mouseUp', coords.x, coords.y, { button, clickCount: c, modifiers });
     await new Promise(r => setTimeout(r, 60));
   }
   return `Clicked ${button} x${count} at (${coords.x}, ${coords.y})${id != null ? ` on element ${id}` : ''}`;
@@ -794,7 +836,6 @@ export const browserClick = async (args: any): Promise<string> => {
 // phase: 'down' presses and holds; 'up' releases.
 export const browserHold = async (args: any, phase: 'down' | 'up'): Promise<string> => {
   const wv = await waitForActiveWebview();
-  const electronAPI = (window as any).electronAPI;
   const webContentsId = wv.getWebContentsId();
 
   // Release may omit position entirely — release at current cursor location.
@@ -804,32 +845,30 @@ export const browserHold = async (args: any, phase: 'down' | 'up'): Promise<stri
   if (needsPoint) {
     const coords = await resolveTargetPoint(wv, args.id ?? args.Id, args.x ?? args.X, args.y ?? args.Y);
     if (!coords) return notFoundMsg(args.id ?? args.Id);
-    const r = await mouseButtonEvent(electronAPI, webContentsId, phase === 'down' ? 'mouseDown' : 'mouseUp', coords.x, coords.y, { button });
+    const r = await mouseButtonEvent(webContentsId, phase === 'down' ? 'mouseDown' : 'mouseUp', coords.x, coords.y, { button });
     if (r.success === false) return `${phase} failed: ${r.error}`;
     return `Mouse ${phase} ${button} at (${coords.x}, ${coords.y})`;
   }
 
   // Position-less release: nudge event through at last known center.
-  const r = await electronAPI.browserSendInputEvent({ webContentsId, type: 'mouseUp', button, clickCount: 1 });
+  const r = await sendInputEvent({ webContentsId, type: 'mouseUp', button, clickCount: 1 });
   if (r && r.success === false) return `Release failed: ${r.error}`;
   return `Mouse up ${button} released`;
 };
 
 export const browserMove = async (args: any): Promise<string> => {
   const wv = await waitForActiveWebview();
-  const electronAPI = (window as any).electronAPI;
   const webContentsId = wv.getWebContentsId();
 
   const coords = await resolveTargetPoint(wv, args.id ?? args.Id, args.x ?? args.X, args.y ?? args.Y);
   if (!coords) return notFoundMsg(args.id ?? args.Id);
-  const r = await electronAPI.browserSendInputEvent({ webContentsId, type: 'mouseMove', x: coords.x, y: coords.y });
+  const r = await sendInputEvent({ webContentsId, type: 'mouseMove', x: coords.x, y: coords.y });
   if (r && r.success === false) return `Move failed: ${r.error}`;
   return `Cursor moved to (${coords.x}, ${coords.y})${args.id != null ? ` over element ${args.id}` : ''}`;
 };
 
 export const browserDragTo = async (args: any): Promise<string> => {
   const wv = await waitForActiveWebview();
-  const electronAPI = (window as any).electronAPI;
   const webContentsId = wv.getWebContentsId();
 
   const fromCoords = await resolveTargetPoint(wv, args.from_id ?? args.FromId, args.from_x ?? args.FromX, args.from_y ?? args.FromY);
@@ -839,20 +878,20 @@ export const browserDragTo = async (args: any): Promise<string> => {
   if (!toCoords) return notFoundMsg(args.to_id ?? args.ToId);
 
   const button = args.button || args.Button || 'left';
-  await electronAPI.browserSendInputEvent({ webContentsId, type: 'mouseMove', x: fromCoords.x, y: fromCoords.y });
+  await sendInputEvent({ webContentsId, type: 'mouseMove', x: fromCoords.x, y: fromCoords.y });
   await new Promise(r => setTimeout(r, 80));
-  await mouseButtonEvent(electronAPI, webContentsId, 'mouseDown', fromCoords.x, fromCoords.y, { button });
+  await mouseButtonEvent(webContentsId, 'mouseDown', fromCoords.x, fromCoords.y, { button });
   await new Promise(r => setTimeout(r, 150));
 
   const steps = 12;
   for (let i = 1; i <= steps; i++) {
     const ix = Math.round(fromCoords.x + (toCoords.x - fromCoords.x) * i / steps);
     const iy = Math.round(fromCoords.y + (toCoords.y - fromCoords.y) * i / steps);
-    await electronAPI.browserSendInputEvent({ webContentsId, type: 'mouseMove', x: ix, y: iy });
+    await sendInputEvent({ webContentsId, type: 'mouseMove', x: ix, y: iy });
     await new Promise(r => setTimeout(r, 30));
   }
   await new Promise(r => setTimeout(r, 100));
-  await mouseButtonEvent(electronAPI, webContentsId, 'mouseUp', toCoords.x, toCoords.y, { button });
+  await mouseButtonEvent(webContentsId, 'mouseUp', toCoords.x, toCoords.y, { button });
   return `Dragged (${fromCoords.x}, ${fromCoords.y}) → (${toCoords.x}, ${toCoords.y})`;
 };
 
@@ -883,8 +922,8 @@ export const browserEvaluateScript = async (args: any): Promise<string> => {
   const timeoutMs = Number(args.timeout_ms ?? args.TimeoutMs ?? 15000) || 15000;
 
   const wrapped = /^return\b/.test(script)
-    ? `(async () => { ${script} })()`
-    : `(async () => { return (${script}); })()`;
+    ? `(async () => { try { ${script} } catch(e) { return { __isError: true, message: e.message || String(e) }; } })()`
+    : `(async () => { try { return (${script}); } catch(e) { return { __isError: true, message: e.message || String(e) }; } })()`;
 
   let timer: any = null;
   try {
@@ -892,6 +931,9 @@ export const browserEvaluateScript = async (args: any): Promise<string> => {
       wv.executeJavaScript(wrapped),
       new Promise((_, rej) => { timer = setTimeout(() => rej(new Error(`evaluation timed out after ${timeoutMs}ms`)), timeoutMs); })
     ]);
+    if (value && typeof value === 'object' && (value as any).__isError) {
+      return `Execution error: ${(value as any).message}`;
+    }
     let out: string;
     try {
       out = value === undefined ? 'undefined' : JSON.stringify(value);
@@ -900,6 +942,8 @@ export const browserEvaluateScript = async (args: any): Promise<string> => {
       out = String(value);
     }
     return `Result: ${out}`;
+  } catch (err: any) {
+    return `Execution error: ${err.message || err}`;
   } finally {
     if (timer) clearTimeout(timer);
   }

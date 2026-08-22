@@ -2,6 +2,7 @@ import React, { useState, useRef, useEffect } from 'react';
 import ChatInput from './ChatInput';
 import ThinkingBlock from './ThinkingBlock';
 import ToolCallBlock from './ToolCallBlock';
+import AgentBrowser from './AgentBrowser';
 import { generateChatStream, LLMModel, fileToBase64, parseAttachmentDocument } from '../utils/llm';
 import { executeToolCalls, ToolContext } from '../utils/toolExecutor';
 import { spawnSubAgent, getAgentsSnapshot, waitForAgents } from '../utils/subAgents';
@@ -14,8 +15,10 @@ import rehypeKatex from 'rehype-katex';
 import 'katex/dist/katex.min.css';
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
 import { vscDarkPlus } from 'react-syntax-highlighter/dist/esm/styles/prism';
-import { MessageSquarePlus, MessageSquare, X, Check } from 'lucide-react';
+import { MessageSquarePlus, MessageSquare, X, Check, Globe, ChevronDown, ChevronRight, Trash2 } from 'lucide-react';
 import { getSystemTools } from '../utils/tools';
+import { agentBrowserStore } from '../utils/agentBrowserStore';
+import { terminateBrowserSession } from '../utils/browserTools';
 import ApprovalCard, { PendingApproval } from './ApprovalCard';
 
 const MarkdownComponents: any = {
@@ -74,6 +77,8 @@ export interface ChatMessage {
   role: 'user' | 'assistant' | 'system';
   content: string;
   thinking?: string;
+  // Per-round thinking chunks: parts[i] precedes tool-call round i+1.
+  thinkingParts?: string[];
   attachments?: any[];
   isGenerating?: boolean;
   comments?: ChatComment[];
@@ -129,6 +134,7 @@ const ChatArea = () => {
   const [activeComment, setActiveComment] = useState<{ commentId: string, msgId: string, msgType: 'user' | 'thinking' | 'response', quote: string, x: number, y: number } | null>(null);
   const [isCommentPinned, setIsCommentPinned] = useState(false);
   const [commentDraft, setCommentDraft] = useState('');
+  const [isBrowserExpanded, setIsBrowserExpanded] = useState(false);
   const commentPopupHoverRef = useRef(false);
   const isCommentPinnedRef = useRef(false);
   const commentTextareaRef = useRef<HTMLTextAreaElement>(null);
@@ -340,7 +346,7 @@ const ChatArea = () => {
       // Use behavior: 'auto' so it doesn't tween constantly on every token, causing jitter
       bottomRef.current?.scrollIntoView({ behavior: 'auto' });
     }
-  }, [messages]);
+  }, [messages, isGenerating]);
 
   const handleStop = () => {
     if (abortControllerRef.current) {
@@ -599,6 +605,9 @@ const ChatArea = () => {
       let accumulatedThinking = keepThinking || '';
       let accumulatedContent = '';
       const allToolCalls: ToolCall[] = [];
+      // One thinking chunk per model round: closed when tools execute,
+      // reopened when fresh input arrives. Keeps blocks small and chronological.
+      const roundThinkingParts: string[] = [];
 
       while (round < MAX_TOOL_ROUNDS) {
         round++;
@@ -633,10 +642,14 @@ const ChatArea = () => {
             const newMsgs = [...prev];
             const targetIdx = newMsgs.findIndex(m => m.id === assistantMsgId);
             if (targetIdx !== -1) {
+              // Live chunk for the in-flight round; completed rounds stay frozen.
+              const liveParts = [...roundThinkingParts];
+              if (update.thinking) liveParts[roundThinkingParts.length] = update.thinking;
               newMsgs[targetIdx] = {
                 ...newMsgs[targetIdx],
                 content: accumulatedContent ? (update.content ? `${accumulatedContent}\n\n${update.content}` : accumulatedContent) : update.content,
                 thinking: accumulatedThinking ? (update.thinking ? `${accumulatedThinking}\n\n${update.thinking}` : accumulatedThinking) : update.thinking,
+                thinkingParts: liveParts.length > 0 ? liveParts : undefined,
                 isGenerating: true,
                 toolCalls: combinedToolCalls.length > 0 ? combinedToolCalls : undefined,
                 isCallingTool: update.isCallingTool
@@ -648,6 +661,8 @@ const ChatArea = () => {
 
         if (streamResult.thinking) {
           accumulatedThinking = accumulatedThinking ? `${accumulatedThinking}\n\n${streamResult.thinking}` : streamResult.thinking;
+          // Close this round's chunk — the next round (or tool input) opens a new one.
+          roundThinkingParts.push(streamResult.thinking);
         }
         if (streamResult.content) {
           accumulatedContent = accumulatedContent ? `${accumulatedContent}\n\n${streamResult.content}` : streamResult.content;
@@ -907,6 +922,14 @@ const ChatArea = () => {
     setEditingBlock(null);
   };
 
+  // User-initiated kill of the embedded browser (trash icon in Live Browser).
+  // The flag is consumed by the agent's next webview tool call so it learns
+  // why its session died.
+  const handleUserKillBrowser = async () => {
+    agentBrowserStore.markUserKilled();
+    await terminateBrowserSession();
+  };
+
   // Build unified chronological activity feed from all messages
   // Each activity: { type, messageId, messageIdx, toolCallIdx?, data }
   // Order: user msg → thinking → tool calls → response (per message), messages in array order
@@ -918,14 +941,30 @@ const ChatArea = () => {
       if (msg.role === 'user') {
         activities.push({ type: 'user', messageId: msg.id, messageIdx: msgIdx, data: msg });
       } else if (msg.role === 'assistant') {
-        // Thinking block
-        if (msg.thinking || msg.isGenerating) {
-          activities.push({ type: 'thinking', messageId: msg.id, messageIdx: msgIdx, data: msg });
-        }
-        // Tool calls
-        const tcs = msg.toolCalls;
-        if (tcs && tcs.length > 0) {
-          tcs.forEach((tc: any, tcIdx: number) => {
+        const tcs = msg.toolCalls || [];
+        // Chunked thinking: parts[i] precedes tool-call round i+1. Tool ids
+        // embed their round (`-tc-${round}-${i}`), so we can interleave exactly.
+        const parts = msg.thinkingParts && msg.thinkingParts.length > 0
+          ? msg.thinkingParts
+          : ((msg.thinking || msg.isGenerating) ? [msg.thinking || ''] : []);
+        const toolsByRound = new Map<number, { tc: any, tcIdx: number }[]>();
+        let maxRound = 0;
+        tcs.forEach((tc: any, tcIdx: number) => {
+          const m = String(tc.id || '').match(/-tc-(\d+)-/);
+          const r = m ? Number(m[1]) : 1;
+          if (!toolsByRound.has(r)) toolsByRound.set(r, []);
+          toolsByRound.get(r)!.push({ tc, tcIdx });
+          if (r > maxRound) maxRound = r;
+        });
+        const slots = Math.max(parts.length, maxRound);
+        for (let slot = 0; slot < slots; slot++) {
+          const partText = parts[slot] || '';
+          const isLivePart = !!msg.isGenerating && !msg.isCallingTool && !msg.content && slot === parts.length - 1;
+          if (partText.trim() || isLivePart) {
+            activities.push({ type: 'thinking', messageId: msg.id, messageIdx: msgIdx, partIdx: slot, text: partText, live: isLivePart, data: msg });
+          }
+          const roundTools = toolsByRound.get(slot + 1) || [];
+          roundTools.forEach(({ tc, tcIdx }) => {
             const toolName = tc.name || tc.toolName || 'tool';
             const isBrowser = toolName.startsWith('browser');
             activities.push({ type: 'tool', messageId: msg.id, messageIdx: msgIdx, toolCallIdx: tcIdx, toolCount: tcs.length, messageIsGenerating: msg.isGenerating, data: { ...tc, toolName, isBrowser } });
@@ -935,7 +974,7 @@ const ChatArea = () => {
           });
         }
         // Response content
-        if (msg.content || (msg.isGenerating && !msg.thinking && !msg.toolCalls?.length)) {
+        if (msg.content || (msg.isGenerating && !msg.thinking && !tcs.length)) {
           activities.push({ type: 'response', messageId: msg.id, messageIdx: msgIdx, data: msg });
         }
       }
@@ -1013,10 +1052,10 @@ const ChatArea = () => {
                 const msg = activity.data;
                 const isEditingThinking = editingBlock?.id === msg.id && editingBlock?.type === 'thinking';
                 return (
-                  <div key={`think-${activity.messageId}`} className="flex flex-col w-full text-gray-100 gap-2 group/msg relative shrink-0" style={{ order: idx * 2 }}>
+                  <div key={`think-${activity.messageId}-${activity.partIdx ?? 0}`} className="flex flex-col w-full text-gray-100 gap-2 group/msg relative shrink-0" style={{ order: idx * 2 }}>
                     <ThinkingBlock 
-                      thinking={(isEditingThinking && editPreview) ? editPreview.text : (msg.thinking || '')} 
-                      isGenerating={!!msg.isGenerating && !msg.content && !msg.isCallingTool} 
+                      thinking={(isEditingThinking && editPreview) ? editPreview.text : (activity.text || '')} 
+                      isGenerating={!!activity.live} 
                     />
                   </div>
                 );
@@ -1088,6 +1127,13 @@ const ChatArea = () => {
                       <span className="font-mono truncate text-textSecondary/80">Active</span>
                     </div>
                     <div className="flex items-center gap-2 shrink-0 ml-2">
+                      <button
+                        onClick={(e) => { e.stopPropagation(); handleUserKillBrowser(); }}
+                        className="p-1 rounded hover:bg-red-500/20 text-textSecondary hover:text-red-400 transition-colors"
+                        title="Kill browser session"
+                      >
+                        <Trash2 size={14} />
+                      </button>
                       <div className="w-2 h-2 rounded-full bg-green-500 animate-pulse" />
                       {isBrowserExpanded ? (
                         <ChevronDown size={14} className="text-textSecondary group-hover:text-gray-200 transition-transform" />

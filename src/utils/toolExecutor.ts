@@ -14,9 +14,11 @@ import {
   browserObservePage,
   captureBrowserScreenshot,
   executeBrowserNavigation,
+  executeBrowserTerminate,
   getSemanticDOM,
   waitForActiveWebview
 } from './browserTools';
+import { agentBrowserStore } from './agentBrowserStore';
 import {
   getWebSearchSettings,
   downscaleDataUrl,
@@ -191,6 +193,7 @@ const HANDLERS: Record<string, Handler> = {
     return ok(await executeBrowserNavigation('navigate', url));
   },
   browser_go_back: async () => ok(await executeBrowserNavigation('back')),
+  browser_terminate: async () => ok(await executeBrowserTerminate()),
   browser_get_dom: async () => ok(await getSemanticDOM()),
   browser_observe: async () => {
     const obs = await browserObservePage();
@@ -435,6 +438,16 @@ const runOne = async (raw: string, ctx: ToolContext): Promise<NamedToolResult> =
           error: true
         };
       }
+    }
+
+    // The user killed the Live Browser mid-task — short-circuit this webview
+    // call with an explanation instead of silently operating on a blank page.
+    if ((name.startsWith('browser') || name === 'find_in_page') && agentBrowserStore.consumeUserKill()) {
+      return {
+        toolName: name,
+        result: 'USER ACTION: the user terminated the embedded browser while you were working. All pages were closed and the session reset to blank. If you still need web access, start over with browser_navigate.',
+        error: true
+      };
     }
 
     const out = await handler(args, ctx);

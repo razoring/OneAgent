@@ -1,6 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { ChevronRight, ChevronDown, Check, X, Terminal, FileCode, Search, Globe, MousePointer2, Loader2, Bot, SlidersHorizontal } from 'lucide-react';
-import { ChevronRight, ChevronDown, Check, X, Terminal, FileCode, Search, Globe, MousePointer2, Loader2, Bot, SlidersHorizontal } from 'lucide-react';
 interface ToolCallBlockProps {
   toolName: string;
   args: any;
@@ -21,6 +20,7 @@ const TOOL_LABELS: Record<string, string> = {
   search_web: 'Web Search',
   browser_navigate: 'Browser',
   browser_go_back: 'Browser',
+  browser_terminate: 'Terminate Browser',
   browser_get_dom: 'Page DOM',
   browser_type: 'Browser Type',
   browser_scroll: 'Scroll',
@@ -177,7 +177,6 @@ const ToolCallBlock: React.FC<ToolCallBlockProps> = ({ toolName, args, status, r
   const [expanded, setExpanded] = useState(false);
   const userToggled = useRef(false);
   const isScreenshotTool = toolName === 'desktop_screenshot' || toolName === 'browser_screenshot' || toolName === 'browser_observe';
-  const isBrowserTool = toolName.startsWith('browser');
 
   // Auto-expand while running, then fold back into the stack shortly after
   // completion — unless the user took manual control of this block.

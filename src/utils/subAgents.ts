@@ -50,7 +50,7 @@ const TOOL_PRESETS: Record<string, Set<string>> = {
     'browser_observe', 'browser_screenshot', 'browser_get_dom', 'find_in_page'
   ]),
   browser: new Set([
-    'browser_navigate', 'browser_go_back', 'browser_click', 'browser_mouse_down',
+    'browser_navigate', 'browser_go_back', 'browser_terminate', 'browser_click', 'browser_mouse_down',
     'browser_mouse_up', 'browser_mouse_move', 'browser_drag', 'browser_key',
     'browser_type', 'browser_scroll', 'browser_observe', 'browser_screenshot',
     'browser_get_dom', 'browser_evaluate', 'browser_cookies', 'browser_history',
@@ -61,12 +61,12 @@ const TOOL_PRESETS: Record<string, Set<string>> = {
     'view_file', 'list_dir', 'search_files', 'write_to_file', 'replace_file_content'
   ]),
   web: new Set([
-    'search_web', 'browser_navigate', 'browser_go_back', 'browser_get_dom',
+    'search_web', 'browser_navigate', 'browser_go_back', 'browser_terminate', 'browser_get_dom',
     'browser_observe', 'browser_click', 'browser_type', 'browser_scroll',
     'browser_wait_for'
   ]),
   general: new Set([
-    'view_file', 'list_dir', 'search_files', 'search_web', 'browser_navigate',
+    'view_file', 'list_dir', 'search_files', 'search_web', 'browser_navigate', 'browser_terminate',
     'browser_get_dom', 'browser_observe', 'browser_wait_for', 'find_in_page',
     'get_settings'
   ])

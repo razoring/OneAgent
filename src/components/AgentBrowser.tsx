@@ -19,6 +19,22 @@ const AgentBrowser: React.FC = () => {
 
     (window as any).activeWebview = webview;
 
+    const handleDomReady = () => {
+      // Advertised to browserTools so virtual-input coordinates can be
+      // converted from page CSS space into widget space.
+      (window as any).__oneagentBrowserScale = 0.5;
+      const electronAPI = (window as any).electronAPI;
+      if (electronAPI?.browserEmulateDevice) {
+        electronAPI.browserEmulateDevice(webview.getWebContentsId(), {
+          screenPosition: 'desktop',
+          screenSize: { width: 1280, height: 680 },
+          viewPosition: { x: 0, y: 0 },
+          viewSize: { width: 1280, height: 680 },
+          scale: 0.5
+        });
+      }
+    };
+
     const handleDidFinishLoad = () => {
       agentBrowserStore.navigate(webview.getURL());
     };
@@ -30,12 +46,14 @@ const AgentBrowser: React.FC = () => {
       console.warn('[AgentBrowser] load failed:', e?.errorDescription || e);
     };
 
+    webview.addEventListener('dom-ready', handleDomReady);
     webview.addEventListener('did-finish-load', handleDidFinishLoad);
     webview.addEventListener('did-fail-load', handleDidFailLoad);
     return () => {
       if ((window as any).activeWebview === webview) {
         (window as any).activeWebview = null;
       }
+      webview.removeEventListener('dom-ready', handleDomReady);
       webview.removeEventListener('did-finish-load', handleDidFinishLoad);
       webview.removeEventListener('did-fail-load', handleDidFailLoad);
     };
@@ -65,14 +83,17 @@ const AgentBrowser: React.FC = () => {
       </div>
 
       {/* Live page */}
-      {/* @ts-ignore - webview is a custom element in Electron */}
-      <webview
-        ref={webviewRef}
-        src={initialSrc}
-        className="flex-1 w-full"
-        partition="persist:oneagent_browser"
-        webpreferences="contextIsolation=yes,javascript=yes"
-      />
+      <div className="relative flex-1 w-full overflow-hidden bg-white">
+        {/* @ts-ignore - webview is a custom element in Electron */}
+        <webview
+          ref={webviewRef}
+          src={initialSrc}
+          className="w-full h-full"
+          partition="persist:oneagent_browser"
+          webpreferences="contextIsolation=yes,javascript=yes"
+          allowpopups
+        />
+      </div>
     </div>
   );
 };
