@@ -505,9 +505,11 @@ export const browserKeystrokes = async (args: any): Promise<string> => {
   return `Unknown action "${action}"`;
 };
 
-// Dedicated wheel-scrolling tool for the embedded browser. Relative
-// directions ride real wheel events (keeps lazy-load/infinite-scroll pages
-// honest); "top"/"bottom" jump absolutely via scrollTo/scrollIntoView.
+// Dedicated scrolling tool for the embedded browser.
+// Strategy: real wheel event first (keeps lazy-load/infinite-scroll pages
+// honest), then VERIFY the page actually moved — synthetic wheel events are
+// silently swallowed by some pages/layouts — falling back to programmatic
+// window.scrollBy, then to the nearest scrollable container under the cursor.
 export const browserScroll = async (args: any): Promise<string> => {
   const wv = await waitForActiveWebview();
   if (!wv) throw new Error("No active webview available");
@@ -532,7 +534,7 @@ export const browserScroll = async (args: any): Promise<string> => {
       );
     }
     await new Promise(res => setTimeout(res, 300));
-    const pos = await readScrollState(wv);
+    const pos = await formatScrollState(wv);
     return `Scrolled to ${dir}${hasId ? ` of element ${id}` : ' of page'}${pos ? ` — ${pos}` : ''}`;
   }
 
@@ -548,27 +550,83 @@ export const browserScroll = async (args: any): Promise<string> => {
     ({ x, y } = await wv.executeJavaScript(`({ x: Math.round(window.innerWidth / 2), y: Math.round(window.innerHeight / 2) })`));
   }
 
+  const before = await readScrollPos(wv);
+
+  // Attempt 1: real wheel event at the target point.
   const r = await electronAPI.browserSendInputEvent({ webContentsId, type: 'mouseWheel', x, y, deltaX: dx, deltaY: dy });
-  if (r && r.success === false) return `Scroll failed: ${r.error}`;
-  await new Promise(res => setTimeout(res, 300));
-  const pos = await readScrollState(wv);
-  return `Scrolled ${dir} ${amount}px${hasId ? ` at element ${id}` : ''}${pos ? ` — now at ${pos}` : ''}`;
+  if (!r || r.success !== false) {
+    await new Promise(res => setTimeout(res, 300));
+    const afterWheel = await readScrollPos(wv);
+    if (scrollMoved(before, afterWheel)) {
+      const pos = await formatScrollState(wv);
+      return `Scrolled ${dir} ${amount}px${hasId ? ` at element ${id}` : ''}${pos ? ` — now at ${pos}` : ''}`;
+    }
+  }
+
+  // Attempt 2: programmatic window scroll (fires scroll events, so
+  // IntersectionObserver lazy-loading still triggers).
+  await wv.executeJavaScript(`window.scrollBy(${dx}, ${dy}); true`);
+  await new Promise(res => setTimeout(res, 250));
+  const afterWin = await readScrollPos(wv);
+  if (scrollMoved(before, afterWin)) {
+    const pos = await formatScrollState(wv);
+    return `Scrolled ${dir} ${amount}px${hasId ? ` at element ${id}` : ''} (direct scroll — wheel had no effect)${pos ? ` — now at ${pos}` : ''}`;
+  }
+
+  // Attempt 3: deepest scrollable container under the target point
+  // (pages that lock <body> and scroll an inner overflow div).
+  const containerHit = await wv.executeJavaScript(`(() => {
+    let node = document.elementFromPoint(Math.round(window.innerWidth / 2), Math.round(window.innerHeight / 2));
+    while (node && node !== document.documentElement) {
+      const cs = getComputedStyle(node);
+      const vOK = /(auto|scroll)/.test(cs.overflowY) && node.scrollHeight > node.clientHeight + 1;
+      const hOK = /(auto|scroll)/.test(cs.overflowX) && node.scrollWidth > node.clientWidth + 1;
+      if (vOK || hOK) { node.scrollBy(${dx}, ${dy}); return true; }
+      node = node.parentElement;
+    }
+    return false;
+  })()`);
+  await new Promise(res => setTimeout(res, 250));
+  const afterContainer = await readScrollPos(wv);
+  if (containerHit || scrollMoved(afterWin, afterContainer)) {
+    const pos = await formatScrollState(wv);
+    return `Scrolled ${dir} ${amount}px${hasId ? ` at element ${id}` : ''} (inner scroll container — page body does not scroll)${pos ? ` — now at ${pos}` : ''}`;
+  }
+
+  const stuck = await formatScrollState(wv);
+  return `Could not scroll ${dir}: no movement (wheel ignored, window/inner containers at their limit or non-scrollable)${stuck ? ` — ${stuck}` : ''}`;
 };
 
-// Post-scroll position report so the model knows whether more page remains.
-const readScrollState = async (wv: any): Promise<string | null> => {
+interface ScrollPos { x: number; y: number; maxX: number; maxY: number }
+
+// Raw post-scroll geometry of the main scroller.
+const readScrollPos = async (wv: any): Promise<ScrollPos | null> => {
   try {
     const s = await wv.executeJavaScript(`(() => {
       const d = document.scrollingElement || document.documentElement;
-      const max = d.scrollHeight - d.clientHeight;
-      return { y: Math.round(d.scrollTop), max: Math.round(max) };
+      return { x: Math.round(d.scrollLeft), y: Math.round(d.scrollTop), maxX: Math.round(d.scrollWidth - d.clientWidth), maxY: Math.round(d.scrollHeight - d.clientHeight) };
     })()`);
-    if (!s) return null;
-    if (s.max <= 0) return 'page fits viewport (nothing more to scroll)';
-    return `y=${s.y}/${s.max}px${s.y >= s.max - 2 ? ' [at bottom]' : s.y <= 2 ? ' [at top]' : ''}`;
+    return s && typeof s.y === 'number' ? s : null;
   } catch {
     return null;
   }
+};
+
+// True when either axis moved at least 1px between two readings.
+const scrollMoved = (a: ScrollPos | null, b: ScrollPos | null): boolean => {
+  if (!a || !b) return false;
+  return Math.abs(b.y - a.y) >= 1 || Math.abs(b.x - a.x) >= 1;
+};
+
+// Human-readable position report so the model knows whether more page remains.
+const formatScrollState = async (wv: any): Promise<string | null> => {
+  const s = await readScrollPos(wv);
+  if (!s) return null;
+  const vPart = s.maxY <= 0
+    ? 'vertical: fits viewport'
+    : `y=${s.y}/${s.maxY}px${s.y >= s.maxY - 2 ? ' [at bottom]' : s.y <= 2 ? ' [at top]' : ''}`;
+  const hPart = s.maxX > 0 ? `, x=${s.x}/${s.maxX}px` : '';
+  return `${vPart}${hPart}`;
 };
 
 // Dedicated, model-friendly typing tool: focuses the field (optionally by
