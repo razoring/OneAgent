@@ -2,4 +2,5 @@ hotmodel swapping with tab
 auto load model when swapped with estimated TTFT label
 chat history
 mcp servers
-unify the tools to be simpler, encapsulated, and idiot-proof.
+make the chat history a hidden overlay; move the model parameters to the right side with an inset. Below the model details, have an artifacts panel / todo list.
+Make orchestrator agent spawn sub-agents to do the todo lists; seems like the smaller models overthink less than Gemma4:12b
