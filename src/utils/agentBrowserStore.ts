@@ -3,9 +3,11 @@
 // collapses), but the current URL survives here so it restores in place.
 
 type Listener = (url: string) => void;
+type SnapshotListener = (img: string | null) => void;
 
 let currentUrl = 'https://html.duckduckgo.com/';
 const listeners = new Set<Listener>();
+const snapshotListeners = new Set<SnapshotListener>();
 
 // Set when the USER kills the browser from the Live Browser header. Consumed
 // by the next browser_* tool call so the agent learns why its session died.
@@ -29,11 +31,18 @@ export const agentBrowserStore = {
     listeners.add(l);
     return () => { listeners.delete(l); };
   },
+  subscribeSnapshot: (l: SnapshotListener) => {
+    snapshotListeners.add(l);
+    return () => { snapshotListeners.delete(l); };
+  },
   markUserKilled: () => { userKilledBrowser = true; },
   consumeUserKill: () => {
     if (!userKilledBrowser) return false;
     userKilledBrowser = false;
     return true;
   },
-  setTerminatedSnapshot: (img: string | null) => { terminatedSnapshot = img; },
+  setTerminatedSnapshot: (img: string | null) => { 
+    terminatedSnapshot = img; 
+    snapshotListeners.forEach(l => l(img));
+  },
 };

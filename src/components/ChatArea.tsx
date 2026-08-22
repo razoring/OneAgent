@@ -135,6 +135,7 @@ const ChatArea = () => {
   const [isCommentPinned, setIsCommentPinned] = useState(false);
   const [commentDraft, setCommentDraft] = useState('');
   const [isBrowserExpanded, setIsBrowserExpanded] = useState(false);
+  const [terminatedSnapshot, setTerminatedSnapshot] = useState<string | null>(() => agentBrowserStore.getTerminatedSnapshot());
   const commentPopupHoverRef = useRef(false);
   const isCommentPinnedRef = useRef(false);
   const commentTextareaRef = useRef<HTMLTextAreaElement>(null);
@@ -207,6 +208,11 @@ const ChatArea = () => {
       commentTextareaRef.current?.focus();
     }
   }, [isCommentPinned]);
+
+  // Subscribe to terminated snapshot changes for instant UI update
+  useEffect(() => {
+    return agentBrowserStore.subscribeSnapshot(setTerminatedSnapshot);
+  }, []);
 
   const showCommentPopup = (el: Element, pinned: boolean) => {
     const commentId = el.getAttribute('data-comment-id');
@@ -1124,10 +1130,9 @@ const ChatArea = () => {
                     <div className="flex items-center gap-2 min-w-0">
                       <Globe size={14} className="text-blue-400 shrink-0" />
                       <span className="font-medium text-textSecondary group-hover:text-white transition-colors shrink-0">Live Browser Session</span>
-                      <span className="font-mono truncate text-textSecondary/80">Active</span>
                     </div>
                     <div className="flex items-center gap-2 shrink-0 ml-2">
-                      {agentBrowserStore.getTerminatedSnapshot() ? (
+                      {terminatedSnapshot ? (
                         <div className="w-2 h-2 rounded-full bg-red-500" title="Browser terminated" />
                       ) : (
                         <>
@@ -1150,17 +1155,17 @@ const ChatArea = () => {
                   </div>
                   
 <div className={`transition-all duration-300 ease-in-out origin-top ${isBrowserExpanded ? 'h-[340px] opacity-100 scale-y-100' : 'h-0 opacity-0 scale-y-0'}`}>
-                     <div className="w-full h-full relative bg-black/40">
-                       {agentBrowserStore.getTerminatedSnapshot() && (
-                         <img
-                           src={agentBrowserStore.getTerminatedSnapshot()!}
-                           alt="Terminated browser session"
-                           className="w-full h-full object-cover grayscale opacity-60"
-                         />
-                       )}
-                       {!agentBrowserStore.getTerminatedSnapshot() && <AgentBrowser />}
-                     </div>
-                   </div>
+                      <div className="w-full h-full relative bg-black/40">
+                        {terminatedSnapshot && (
+                          <img
+                            src={terminatedSnapshot}
+                            alt="Terminated browser session"
+                            className="w-full h-full object-cover grayscale opacity-60"
+                          />
+                        )}
+                        {!terminatedSnapshot && <AgentBrowser />}
+                      </div>
+                    </div>
                 </div>
               </div>
             )}
