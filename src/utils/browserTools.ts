@@ -758,11 +758,12 @@ export const terminateBrowserSession = async (): Promise<void> => {
       agentBrowserStore.setTerminatedSnapshot(res.image);
     }
   } catch {}
+  // Stop any in-flight navigation. Deliberately do NOT loadURL('about:blank'):
+  // guest-view navigation during teardown rejects with ERR_FAILED (-2) in the
+  // main-process GUEST_VIEW_MANAGER_CALL handler. The grayscale snapshot is
+  // displayed instead, and the next browser_* tool call remounts a fresh webview.
   try { wv.stop(); } catch {}
-  try {
-    Promise.resolve(wv.loadURL('about:blank')).catch(() => {});
-  } catch {}
-  agentBrowserStore.navigate('about:blank');
+  agentBrowserStore.navigate('https://html.duckduckgo.com/');
 };
 
 export const executeBrowserTerminate = async (): Promise<string> => {

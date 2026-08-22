@@ -14,8 +14,11 @@ import rehypeKatex from 'rehype-katex';
 import 'katex/dist/katex.min.css';
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
 import { vscDarkPlus } from 'react-syntax-highlighter/dist/esm/styles/prism';
-import { MessageSquarePlus, Terminal } from 'lucide-react';
+import AgentBrowser from './AgentBrowser';
+import { MessageSquarePlus, Terminal, Globe, ChevronDown, ChevronRight, Trash2 } from 'lucide-react';
 import { getSystemTools } from '../utils/tools';
+import { agentBrowserStore } from '../utils/agentBrowserStore';
+import { terminateBrowserSession } from '../utils/browserTools';
 import ApprovalCard, { PendingApproval } from './ApprovalCard';
 
 const MarkdownComponents: any = {
@@ -132,6 +135,8 @@ const ChatArea = () => {
   const [isCommentPinned, setIsCommentPinned] = useState(false);
   const [commentDraft, setCommentDraft] = useState('');
   const [isBrowserExpanded, setIsBrowserExpanded] = useState(false);
+  const [, setBrowserSnapshotTick] = useState(0);
+  useEffect(() => agentBrowserStore.subscribeSnapshot(() => setBrowserSnapshotTick(t => t + 1)), []);
   const commentPopupHoverRef = useRef(false);
   const isCommentPinnedRef = useRef(false);
   const commentTextareaRef = useRef<HTMLTextAreaElement>(null);
@@ -345,6 +350,21 @@ const ChatArea = () => {
     }
   }, [messages, isGenerating]);
 
+  // Finalize any in-flight assistant message so per-block toolbars
+  // (edit / regenerate / delete) become available after a manual stop.
+  const finalizeGeneratingMessages = () => {
+    setMessages(prev => {
+      const newMsgs = [...prev];
+      for (let i = newMsgs.length - 1; i >= 0; i--) {
+        if (newMsgs[i].isGenerating) {
+          newMsgs[i] = { ...newMsgs[i], isGenerating: false, isCallingTool: false };
+          break;
+        }
+      }
+      return newMsgs;
+    });
+  };
+
   const handleStop = () => {
     if (abortControllerRef.current) {
       abortControllerRef.current.abort();
@@ -352,6 +372,7 @@ const ChatArea = () => {
     }
     flushPendingApprovals(false);
     setIsGenerating(false);
+    finalizeGeneratingMessages();
   };
 
   const allAttachments = messages.flatMap(m => m.attachments || []);
@@ -764,6 +785,7 @@ const ChatArea = () => {
     } catch (e: any) {
       if (e.name === 'AbortError') {
         console.log('Stream aborted manually');
+        finalizeGeneratingMessages();
         return;
       }
       console.error(e);
@@ -879,7 +901,7 @@ const ChatArea = () => {
       if (!type || type === 'user') {
         newMsgs.splice(idx, 1);
       } else if (type === 'thinking') {
-        newMsgs[idx] = { ...newMsgs[idx], thinking: '' };
+        newMsgs[idx] = { ...newMsgs[idx], thinking: '', thinkingParts: undefined };
         if (!newMsgs[idx].content && (!newMsgs[idx].toolCalls || newMsgs[idx].toolCalls.length === 0)) newMsgs.splice(idx, 1);
       } else if (type === 'response') {
         newMsgs.splice(idx, 1);
@@ -932,12 +954,17 @@ const ChatArea = () => {
   // User-initiated kill of the embedded browser (trash icon in Live Browser).
   // The flag is consumed by the agent's next webview tool call so it learns
   // why its session died.
+  const handleUserKillBrowser = async () => {
+    agentBrowserStore.markUserKilled();
+    await terminateBrowserSession();
+  };
+
   // Build unified chronological activity feed from all messages
   // Each activity: { type, messageId, messageIdx, toolCallIdx?, data }
   // Order: user msg → thinking → tools block → response (per message), messages in array order
   const activityFeed = React.useMemo(() => {
     const activities: any[] = [];
-    
+
     messages.forEach((msg, msgIdx) => {
       if (msg.role === 'user') {
         activities.push({ type: 'user', messageId: msg.id, messageIdx: msgIdx, data: msg });
@@ -967,7 +994,8 @@ const ChatArea = () => {
         }
         // Tools block (unified) — only if there are tool calls
         if (tcs.length > 0) {
-          activities.push({ type: 'tools', messageId: msg.id, messageIdx: msgIdx, data: { toolCalls: tcs, isGenerating: msg.isGenerating } });
+          const hasBrowserCall = tcs.some((tc: any) => String(tc.name || tc.toolName || '').startsWith('browser'));
+          activities.push({ type: 'tools', messageId: msg.id, messageIdx: msgIdx, data: { toolCalls: tcs, isGenerating: msg.isGenerating, hasBrowserCall } });
         }
         // Response content
         if (msg.content || (msg.isGenerating && !msg.thinking && !tcs.length)) {
@@ -976,7 +1004,17 @@ const ChatArea = () => {
       }
     });
     
-    return { activities };
+    // The Live Browser "teleports": it renders inside the most recent tools
+    // block that contains browser_* calls (single webview instance).
+    const lastBrowserToolsMessageId = (() => {
+      for (let i = activities.length - 1; i >= 0; i--) {
+        const a = activities[i];
+        if (a.type === 'tools' && a.data.hasBrowserCall) return a.messageId;
+      }
+      return null;
+    })();
+
+    return { activities, lastBrowserToolsMessageId };
   }, [messages]);
 
   return (
@@ -1048,10 +1086,19 @@ const ChatArea = () => {
                 const isEditingThinking = editingBlock?.id === msg.id && editingBlock?.type === 'thinking';
                 return (
                   <div key={`think-${activity.messageId}-${activity.partIdx ?? 0}`} className="flex flex-col w-full text-gray-100 gap-2 group/msg relative shrink-0" style={{ order: idx * 2 }}>
-                    <ThinkingBlock 
-                      thinking={(isEditingThinking && editPreview) ? editPreview.text : (activity.text || '')} 
-                      isGenerating={!!activity.live} 
-                    />
+                    <div className="w-full group relative">
+                      {!isGenerating && !msg.isGenerating && (
+                        <BlockToolbar
+                          onEdit={() => setEditingBlock({ id: msg.id, type: 'thinking' })}
+                          onRegenerate={() => handleRegenerate(msg.id, 'thinking')}
+                          onDelete={() => handleDelete(msg.id, 'thinking')}
+                        />
+                      )}
+                      <ThinkingBlock
+                        thinking={(isEditingThinking && editPreview) ? editPreview.text : (activity.text || '')}
+                        isGenerating={!!activity.live}
+                      />
+                    </div>
                   </div>
                 );
               }
@@ -1095,6 +1142,58 @@ const ChatArea = () => {
                             );
                           })}
                         </div>
+                        {/* Live Browser — teleports into the latest browser-bearing tools block */}
+                        {activityFeed.lastBrowserToolsMessageId === activity.messageId && (
+                          <div className="border-t border-white/5">
+                            <div
+                              onClick={() => setIsBrowserExpanded(!isBrowserExpanded)}
+                              className="flex items-center justify-between px-3 py-2 cursor-pointer hover:bg-white/[0.05] transition-colors select-none text-xs text-textSecondary group"
+                            >
+                              <div className="flex items-center gap-2 min-w-0">
+                                <Globe size={14} className="text-blue-400 shrink-0" />
+                                <span className="font-medium text-textSecondary group-hover:text-white transition-colors shrink-0">Live Browser Session</span>
+                                <span className="font-mono truncate text-textSecondary/80">Active</span>
+                              </div>
+                              <div className="flex items-center gap-2 shrink-0 ml-2">
+                                {agentBrowserStore.getTerminatedSnapshot() ? (
+                                  <div className="w-2 h-2 rounded-full bg-red-500" title="Browser terminated" />
+                                ) : (
+                                  <>
+                                    <button
+                                      onClick={(e) => { e.stopPropagation(); handleUserKillBrowser(); }}
+                                      className="p-1 rounded hover:bg-red-500/20 text-textSecondary hover:text-red-400 transition-colors"
+                                      title="Kill browser session"
+                                    >
+                                      <Trash2 size={14} />
+                                    </button>
+                                    <div className="w-2 h-2 rounded-full bg-green-500 animate-pulse" />
+                                  </>
+                                )}
+                                {isBrowserExpanded ? (
+                                  <ChevronDown size={14} className="text-textSecondary group-hover:text-gray-200 transition-transform" />
+                                ) : (
+                                  <ChevronRight size={14} className="text-textSecondary group-hover:text-gray-200 transition-transform" />
+                                )}
+                              </div>
+                            </div>
+
+                            <div className={`transition-all duration-300 ease-in-out origin-top overflow-hidden ${isBrowserExpanded ? 'h-[340px] opacity-100 scale-y-100' : 'h-0 opacity-0 scale-y-0'}`}>
+                              <div className="w-full h-full relative bg-black/40">
+                                {/* Webview stays mounted across terminations so a new
+                                    session resumes instantly; the grayscale snapshot
+                                    overlays it until browsing restarts. */}
+                                <AgentBrowser />
+                                {agentBrowserStore.getTerminatedSnapshot() && (
+                                  <img
+                                    src={agentBrowserStore.getTerminatedSnapshot()!}
+                                    alt="Terminated browser session"
+                                    className="absolute inset-0 w-full h-full object-cover grayscale opacity-60"
+                                  />
+                                )}
+                              </div>
+                            </div>
+                          </div>
+                        )}
                       </div>
                     </div>
                   </div>

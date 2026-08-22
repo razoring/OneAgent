@@ -13,7 +13,7 @@ const AgentBrowser: React.FC = () => {
 
   useEffect(() => agentBrowserStore.subscribe(url => setDisplayUrl(url)), []);
 
-  // Reset scale on every mount
+  // Scale is updated dynamically via ResizeObserver
   useEffect(() => {
     (window as any).__oneagentBrowserScale = 0.5;
   }, []);
@@ -24,16 +24,46 @@ const AgentBrowser: React.FC = () => {
 
     (window as any).activeWebview = webview;
 
-    const handleDomReady = () => {
+    const updateEmulation = (width: number, height: number) => {
       const electronAPI = (window as any).electronAPI;
-      if (electronAPI?.browserEmulateDevice) {
+      if (!electronAPI?.browserEmulateDevice) return;
+      
+      const logicalWidth = 1280;
+      const scale = width / logicalWidth;
+      const logicalHeight = Math.round(height / scale);
+
+      (window as any).__oneagentBrowserScale = scale;
+
+      try {
         electronAPI.browserEmulateDevice(webview.getWebContentsId(), {
           screenPosition: 'desktop',
-          screenSize: { width: 1280, height: 680 },
+          screenSize: { width: logicalWidth, height: logicalHeight },
           viewPosition: { x: 0, y: 0 },
-          viewSize: { width: 1280, height: 680 },
-          scale: 0.5
+          viewSize: { width: logicalWidth, height: logicalHeight },
+          scale: scale
         });
+      } catch (e) {
+        // webcontents might not be ready
+      }
+    };
+
+    const resizeObserver = new ResizeObserver((entries) => {
+      for (const entry of entries) {
+        const { width, height } = entry.contentRect;
+        if (width > 0 && height > 0 && webview.getWebContentsId) {
+          updateEmulation(width, height);
+        }
+      }
+    });
+
+    const handleDomReady = () => {
+      if (webview.parentElement) {
+        resizeObserver.observe(webview.parentElement);
+      }
+      // Trigger initial
+      if (webview.parentElement) {
+        const rect = webview.parentElement.getBoundingClientRect();
+        if (rect.width > 0) updateEmulation(rect.width, rect.height);
       }
     };
 
@@ -58,6 +88,7 @@ const AgentBrowser: React.FC = () => {
       webview.removeEventListener('dom-ready', handleDomReady);
       webview.removeEventListener('did-finish-load', handleDidFinishLoad);
       webview.removeEventListener('did-fail-load', handleDidFailLoad);
+      resizeObserver.disconnect();
     };
   }, []);
 
