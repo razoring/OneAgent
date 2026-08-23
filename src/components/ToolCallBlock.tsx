@@ -173,7 +173,7 @@ const formatOutput = (result?: string): string => {
   return result;
 };
 
-const ToolCallBlock: React.FC<ToolCallBlockProps> = ({ toolName, args, status, result, imageDataUrl, isLiveBrowser }) => {
+const ToolCallBlock: React.FC<ToolCallBlockProps> = ({ toolName, args, status, result, imageDataUrl }) => {
   const [expanded, setExpanded] = useState(false);
   const userToggled = useRef(false);
   const isScreenshotTool = toolName === 'desktop_screenshot' || toolName === 'browser_screenshot' || toolName === 'browser_observe';
@@ -219,8 +219,8 @@ const ToolCallBlock: React.FC<ToolCallBlockProps> = ({ toolName, args, status, r
         </div>
       </div>
 
-      {/* Screenshot preview — visible only while the block is expanded (non-browser tools or non-live browser) */}
-      {expanded && isScreenshotTool && status === 'completed' && imageDataUrl && !isLiveBrowser && (
+      {/* Screenshot preview — visible only while the block is expanded */}
+      {expanded && isScreenshotTool && status === 'completed' && imageDataUrl && (
         <div className="px-3 pb-3 pt-0.5">
           <img
             src={imageDataUrl}

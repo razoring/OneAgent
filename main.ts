@@ -5,11 +5,25 @@ import * as officeParser from 'officeparser';
 
 
 const createWindow = () => {
+  // Native-drawn window chrome per platform: macOS keeps its traffic lights
+  // (titleBarStyle hidden), Windows renders native min/max/close on the right
+  // via titleBarOverlay — colored to match the app background (#171717).
+  const isMac = process.platform === 'darwin';
+  const isWindows = process.platform === 'win32';
+
   // Create the browser window.
   const mainWindow = new BrowserWindow({
     width: 1200,
     height: 800,
     autoHideMenuBar: true,
+    ...(isMac
+      ? { titleBarStyle: 'hidden' as const, trafficLightPosition: { x: 14, y: 10 } }
+      : isWindows
+        ? {
+            titleBarStyle: 'hidden' as const,
+            titleBarOverlay: { color: '#171717', symbolColor: '#d1d5db', height: 36 }
+          }
+        : {}),
     webPreferences: {
       preload: path.join(import.meta.dirname, 'preload.js'),
       nodeIntegration: true,

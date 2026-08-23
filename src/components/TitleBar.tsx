@@ -1,38 +1,33 @@
-import React from 'react';
-import { Minus, Square, X } from 'lucide-react';
+import { PanelLeftClose, PanelLeftOpen } from 'lucide-react';
 
-const TitleBar = () => {
-  const handleMinimize = () => {
-    if ((window as any).electronAPI) (window as any).electronAPI.minimize();
-  };
-  
-  const handleMaximize = () => {
-    if ((window as any).electronAPI) (window as any).electronAPI.maximize();
-  };
-  
-  const handleClose = () => {
-    if ((window as any).electronAPI) (window as any).electronAPI.close();
-  };
+const proc = (window as any).process;
+const isMac = proc?.platform === 'darwin';
+const isWindows = proc?.platform === 'win32';
 
+// Slim top strip that hosts app-level buttons. Window controls are drawn by
+// the OS: macOS traffic lights overlay the left edge, Windows titleBarOverlay
+// renders native buttons on the right — so this bar only reserves space for
+// them (via env(titlebar-area-*)) and never implements window functions.
+const TitleBar = ({ sidebarOpen, onToggleSidebar }: { sidebarOpen: boolean, onToggleSidebar?: () => void }) => {
   return (
-    <div className="absolute top-0 left-0 right-0 h-10 drag-region z-50 flex items-center justify-between px-4">
-      {/* Empty space for dragging */}
-      <div className="flex-1 h-full flex items-center">
-        {/* Optional App Title or Logo can go here */}
-      </div>
-      
-      {/* Window Controls */}
-      <div className="flex items-center gap-2 no-drag-region h-full pt-1">
-        <button onClick={handleMinimize} className="p-1.5 text-textSecondary hover:bg-white/10 hover:text-white rounded transition-colors" title="Minimize">
-          <Minus size={14} />
+    <div
+      className="h-9 shrink-0 drag-region bg-background flex items-center gap-2 z-50 select-none"
+      style={
+        isWindows
+          ? { paddingLeft: 'env(titlebar-area-x, 0px)', width: 'env(titlebar-area-width, 100%)' }
+          : { paddingLeft: isMac ? '80px' : '12px', paddingRight: '12px' }
+      }
+    >
+      {onToggleSidebar && (
+        <button
+          onClick={onToggleSidebar}
+          className="no-drag-region p-1.5 rounded-md text-textSecondary hover:text-white hover:bg-white/10 transition-colors"
+          title={sidebarOpen ? 'Hide chat history' : 'Show chat history'}
+        >
+          {sidebarOpen ? <PanelLeftClose size={16} /> : <PanelLeftOpen size={16} />}
         </button>
-        <button onClick={handleMaximize} className="p-1.5 text-textSecondary hover:bg-white/10 hover:text-white rounded transition-colors" title="Maximize">
-          <Square size={12} />
-        </button>
-        <button onClick={handleClose} className="p-1.5 text-textSecondary hover:bg-white/10 hover:text-white rounded transition-colors" title="Close">
-          <X size={16} />
-        </button>
-      </div>
+      )}
+      {/* App-level buttons can be added here (no-drag-region on each) */}
     </div>
   );
 };

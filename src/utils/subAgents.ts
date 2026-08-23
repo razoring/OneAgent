@@ -200,7 +200,10 @@ const runSubAgent = async (agent: SubAgentState, host: SubAgentHost): Promise<vo
     // Auto-recovery: nudge models that stop after thinking without acting or
     // get cut off mid-generation by max_tokens, instead of ending the task.
     let autoContinues = 0;
-    for (let round = 0; round < MAX_AGENT_ROUNDS; round++) {
+    // Function-scoped so the budget-exhaustion check below can read it: it
+    // only equals MAX_AGENT_ROUNDS if the loop ran out without breaking early.
+    let round = 0;
+    for (; round < MAX_AGENT_ROUNDS; round++) {
       if (controller.signal.aborted) throw new Error('Aborted by user');
 
       const res = await generateChatStream(model, messages, () => {}, controller.signal, mergedSettings, toolDefs);
@@ -251,6 +254,17 @@ const runSubAgent = async (agent: SubAgentState, host: SubAgentHost): Promise<vo
         role: 'user',
         content: hasImage ? parts : parts.map(pt => pt.text).join('\n\n')
       });
+    }
+
+    // Tool budget exhausted: one final tools-free turn so the sub-agent
+    // reports its findings instead of ending on a bare tool result.
+    if (round >= MAX_AGENT_ROUNDS && !controller.signal.aborted) {
+      messages.push({
+        role: 'user',
+        content: '[System notice] Tool-call budget reached — no further tool calls will execute. Report your findings and the task outcome now, concisely.'
+      });
+      const wrapRes = await generateChatStream(model, messages, () => {}, controller.signal, mergedSettings, []);
+      if ((wrapRes.content || '').trim()) finalContent = wrapRes.content.trim();
     }
 
     agent.result = finalContent.trim() || '(sub-agent finished with no textual result)';

@@ -27,6 +27,12 @@
     box-shadow: inset 0 1px 0 0 rgba(255, 255, 255, 0.15), 0 4px 12px rgba(0, 0, 0, 0.3);
   }
 
+  /* Mac-style bevel without the drop shadow (for full-height panels) */
+  .bevel-light {
+    border: 1px solid rgba(0, 0, 0, 0.55);
+    box-shadow: inset 0 1px 0 0 rgba(255, 255, 255, 0.15);
+  }
+
   .mac-element-hover:hover {
     background-color: #333333;
     border: 1px solid rgba(0, 0, 0, 0.6);

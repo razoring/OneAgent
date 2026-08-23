@@ -283,12 +283,19 @@ const UnifiedToolsBlock = ({ activity, isGenerating, msgIsGenerating, activityFe
 
                 {isBrowserExpanded && (
                   <div className="border-t border-white/5 transition-all duration-300 ease-in-out origin-top overflow-hidden opacity-100 scale-y-100 bg-black/40 relative">
-                    <AgentBrowser />
+                    {/* Terminated session: webview is fully unmounted — only
+                        the frozen grayscale snapshot shows. The next browser_*
+                        tool call clears the snapshot, remounting a fresh webview. */}
+                    {terminatedSnapshot ? (
+                      <div className="w-full h-[340px] bg-black/60" />
+                    ) : (
+                      <AgentBrowser />
+                    )}
                     {terminatedSnapshot && (
                       <img
                         src={terminatedSnapshot}
                         alt="Terminated browser session"
-                        className="absolute inset-0 w-full h-full object-cover grayscale opacity-60"
+                        className="absolute inset-0 w-full h-full object-cover grayscale"
                       />
                     )}
                   </div>
@@ -1001,6 +1008,32 @@ const ChatArea = () => {
         });
       }
 
+      // Tool budget exhausted: give the model one final tools-free turn to
+      // answer, otherwise the message ends with no/partial text (or leaked
+      // reasoning) because the loop cut it off right after a tool execution.
+      const wrapSignal = abortControllerRef.current?.signal;
+      if (round >= MAX_TOOL_ROUNDS && wrapSignal && !wrapSignal.aborted) {
+        formattedMessages.push({
+          role: 'user',
+          content: '[System notice] Tool-call budget reached — no further tool calls will execute. Based on everything gathered so far, give your final answer to the task now in clean, complete sentences.'
+        });
+        try {
+          const wrapModel = activeModelRef.current || targetModel;
+          const wrapResult = await generateChatStream(wrapModel, formattedMessages, update => {
+            setMessages(prev => {
+              const newMsgs = [...prev];
+              const targetIdx = newMsgs.findIndex(m => m.id === assistantMsgId);
+              if (targetIdx !== -1) {
+                newMsgs[targetIdx] = { ...newMsgs[targetIdx], content: update.content, thinking: update.thinking, isGenerating: true };
+              }
+              return newMsgs;
+            });
+          }, wrapSignal, undefined, []);
+          if (wrapResult.thinking) accumulatedThinking = accumulatedThinking ? `${accumulatedThinking}\n\n${wrapResult.thinking}` : wrapResult.thinking;
+          if (wrapResult.content) accumulatedContent = accumulatedContent ? `${accumulatedContent}\n\n${wrapResult.content}` : wrapResult.content;
+        } catch {}
+      }
+
       const finalModel = activeModelRef.current || targetModel;
       let modelStats: any = null;
       try { modelStats = await getModelStats(finalModel); } catch {}
@@ -1245,7 +1278,7 @@ const ChatArea = () => {
   }, [messages]);
 
   return (
-    <div className="flex-1 flex flex-col bg-surface relative">
+    <div className="flex-1 flex flex-col bg-surface relative rounded-lg overflow-hidden min-w-0 bevel-light">
       
       {/* Main Content */}
       <div ref={scrollContainerRef} onScroll={handleScroll} className="flex-1 flex flex-col items-center overflow-y-auto w-full relative">

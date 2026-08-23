@@ -372,8 +372,8 @@ const clickElementCenter = async (wv: any, id: number, highlight: boolean): Prom
             svgContent = '<svg width="32" height="48" viewBox="0 0 24 36" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M5.65376 2.15376C5.42103 1.92103 5.06847 1.8385 4.75338 1.94314C4.4383 2.04778 4.22019 2.31885 4.19702 2.65171L2.03035 33.8517C2.00844 34.1673 2.1969 34.4636 2.49603 34.5843C2.79517 34.7049 3.13653 34.6231 3.34032 34.3813L10.3704 26.0355L16.2731 34.8021C16.4805 35.1097 16.8906 35.1884 17.1889 34.978L22.4206 31.2872C22.7188 31.0768 22.7845 30.666 22.5663 30.3621L16.2238 21.5303H24.3333C24.6468 21.5303 24.9312 21.3414 25.0482 21.0558C25.1652 20.7702 25.0906 20.4431 24.8604 20.2319L5.65376 2.15376Z" fill="black" stroke="white" stroke-width="2" stroke-linejoin="round"/></svg>';
           }
 
-          const cursor = document.createElement('img');
-          cursor.src = 'data:image/svg+xml;utf8,' + encodeURIComponent(svgContent);
+          const cursor = document.createElement('div');
+          cursor.innerHTML = svgContent;
           Object.assign(cursor.style, {
             position: 'fixed',
             zIndex: '2147483647',
@@ -856,8 +856,8 @@ const resolveTargetPoint = async (
           svgContent = '<svg width="32" height="48" viewBox="0 0 24 36" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M5.65376 2.15376C5.42103 1.92103 5.06847 1.8385 4.75338 1.94314C4.4383 2.04778 4.22019 2.31885 4.19702 2.65171L2.03035 33.8517C2.00844 34.1673 2.1969 34.4636 2.49603 34.5843C2.79517 34.7049 3.13653 34.6231 3.34032 34.3813L10.3704 26.0355L16.2731 34.8021C16.4805 35.1097 16.8906 35.1884 17.1889 34.978L22.4206 31.2872C22.7188 31.0768 22.7845 30.666 22.5663 30.3621L16.2238 21.5303H24.3333C24.6468 21.5303 24.9312 21.3414 25.0482 21.0558C25.1652 20.7702 25.0906 20.4431 24.8604 20.2319L5.65376 2.15376Z" fill="black" stroke="white" stroke-width="2" stroke-linejoin="round"/></svg>';
         }
 
-        const cursor = document.createElement('img');
-        cursor.src = 'data:image/svg+xml;utf8,' + encodeURIComponent(svgContent);
+        const cursor = document.createElement('div');
+        cursor.innerHTML = svgContent;
         Object.assign(cursor.style, {
           position: 'fixed',
           zIndex: '2147483647',

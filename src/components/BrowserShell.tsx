@@ -44,7 +44,7 @@ const BrowserShell = () => {
   const goHome = () => setUrl('https://html.duckduckgo.com/');
 
   return (
-    <div className="w-[500px] border-l border-white/10 bg-black flex flex-col no-drag-region">
+    <div className="w-[500px] bg-black flex flex-col no-drag-region">
       {/* Browser Toolbar */}
       <div className="h-12 bg-surface flex items-center px-3 gap-2 border-b border-white/10 z-10 shadow-sm">
         <div className="flex items-center gap-1">

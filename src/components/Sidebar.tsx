@@ -6,7 +6,7 @@ const Sidebar = () => {
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
 
   return (
-    <div className="w-[280px] bg-background flex flex-col h-full border-r border-white/10 text-sm">
+    <div className="w-[280px] bg-background flex flex-col h-full text-sm">
       {/* Top Section */}
       <div className="p-4">
         <button className="flex items-center gap-3 w-full mac-element mac-element-hover transition-all rounded-[28px] p-3.5 text-left font-medium text-white">
