@@ -1010,6 +1010,15 @@ app.on('web-contents-created', (event, contents) => {
       contents.loadURL(url);
       return { action: 'deny' };
     });
+    // Handle did-fail-load so Electron doesn't spam the console with
+    // "Failed to load URL ... ERR_BLOCKED_BY_RESPONSE / ERR_TOO_MANY_REDIRECTS"
+    // for every blocked tracker/ad subframe on ad-heavy pages.
+    contents.on('did-fail-load', (_e, code, desc, url, isMainFrame) => {
+      if (!isMainFrame) return;
+      // -3 = ERR_ABORTED: navigation superseded, expected during rapid driving
+      if (code === -3) return;
+      console.warn(`[AgentBrowser] load failed (${code} ${desc}): ${url}`);
+    });
   }
 });
 

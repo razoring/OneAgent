@@ -72,6 +72,9 @@ const AgentBrowser: React.FC = () => {
     };
 
     const handleDidFinishLoad = () => {
+      // A terminated session shows a frozen grayscale snapshot — don't let a
+      // late did-finish-load from the dying page clear it.
+      if (agentBrowserStore.getTerminatedSnapshot()) return;
       agentBrowserStore.navigate(webview.getURL());
     };
 

@@ -799,6 +799,9 @@ export const terminateBrowserSession = async (): Promise<void> => {
   // main-process GUEST_VIEW_MANAGER_CALL handler. The grayscale snapshot is
   // displayed instead, and the next browser_* tool call remounts a fresh webview.
   try { wv.stop(); } catch {}
+  // Sync the URL store AFTER setting the snapshot: navigate() clears any
+  // terminated snapshot (it means "fresh navigation started"), so calling it
+  // first would immediately wipe the grayscale image we just captured.
   agentBrowserStore.navigate('https://html.duckduckgo.com/');
 };
 

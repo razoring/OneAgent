@@ -197,7 +197,7 @@ const BlockToolbar = ({ onEdit, onRegenerate, onDelete }: { onEdit?: () => void,
   );
 };
 
-const UnifiedToolsBlock = ({ activity, isGenerating, msgIsGenerating, activityFeed, isBrowserExpanded, setIsBrowserExpanded, handleUserKillBrowser, onEdit, onRegenerate, onDelete }: any) => {
+const UnifiedToolsBlock = ({ activity, isGenerating, msgIsGenerating, activityFeed, isBrowserExpanded, setIsBrowserExpanded, handleUserKillBrowser, terminatedSnapshot, onEdit, onRegenerate, onDelete }: any) => {
   const { toolCalls } = activity.data;
   const [expanded, setExpanded] = useState(true);
 
@@ -259,7 +259,7 @@ const UnifiedToolsBlock = ({ activity, isGenerating, msgIsGenerating, activityFe
                     <span className="font-medium text-textSecondary group-hover:text-white transition-colors shrink-0">Live Browser Session</span>
                   </div>
                   <div className="flex items-center gap-2 shrink-0 ml-2">
-                    {agentBrowserStore.getTerminatedSnapshot() ? (
+                    {terminatedSnapshot ? (
                       <div className="w-2 h-2 rounded-full bg-red-500" title="Browser terminated" />
                     ) : (
                       <>
@@ -284,9 +284,9 @@ const UnifiedToolsBlock = ({ activity, isGenerating, msgIsGenerating, activityFe
                 {isBrowserExpanded && (
                   <div className="border-t border-white/5 transition-all duration-300 ease-in-out origin-top overflow-hidden opacity-100 scale-y-100 bg-black/40 relative">
                     <AgentBrowser />
-                    {agentBrowserStore.getTerminatedSnapshot() && (
+                    {terminatedSnapshot && (
                       <img
-                        src={agentBrowserStore.getTerminatedSnapshot()!}
+                        src={terminatedSnapshot}
                         alt="Terminated browser session"
                         className="absolute inset-0 w-full h-full object-cover grayscale opacity-60"
                       />
@@ -305,7 +305,12 @@ const UnifiedToolsBlock = ({ activity, isGenerating, msgIsGenerating, activityFe
 const ChatArea = () => {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [isGenerating, setIsGenerating] = useState(false);
-  
+
+  // Terminated-browser grayscale snapshot. Read via state (not the store's
+  // getter) so snapshot changes actually trigger a re-render.
+  const [terminatedSnapshot, setTerminatedSnapshot] = useState<string | null>(agentBrowserStore.getTerminatedSnapshot());
+  useEffect(() => agentBrowserStore.subscribeSnapshot(setTerminatedSnapshot), []);
+
   // Edit mode tracking
   const [editingBlock, setEditingBlock] = useState<{ id: string, type: 'user' | 'thinking' | 'response' | 'tools' } | null>(null);
   const [editPreview, setEditPreview] = useState<{ text: string, attachments: any[] } | null>(null);
@@ -1337,6 +1342,7 @@ const ChatArea = () => {
                       isBrowserExpanded={isBrowserExpanded}
                       setIsBrowserExpanded={setIsBrowserExpanded}
                       handleUserKillBrowser={handleUserKillBrowser}
+                      terminatedSnapshot={terminatedSnapshot}
                       onEdit={() => setEditingBlock({ id: activity.messageId, type: 'tools' })}
                       onRegenerate={() => handleRegenerate(activity.messageId, 'tools')}
                       onDelete={() => handleDelete(activity.messageId, 'tools')}
