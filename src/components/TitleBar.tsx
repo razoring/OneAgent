@@ -4,10 +4,10 @@ const proc = (window as any).process;
 const isMac = proc?.platform === 'darwin';
 const isWindows = proc?.platform === 'win32';
 
-// Slim top strip that hosts app-level buttons. Window controls are drawn by
-// the OS: macOS traffic lights overlay the left edge, Windows titleBarOverlay
-// renders native buttons on the right — so this bar only reserves space for
-// them (via env(titlebar-area-*)) and never implements window functions.
+// Slim top strip hosting app-level buttons. Window controls are drawn by the
+// OS: macOS traffic lights overlay the left edge, Windows titleBarOverlay
+// renders native buttons on the right — so this bar reserves space for them
+// (via env(titlebar-area-*)) and never implements window functions.
 const TitleBar = ({ sidebarOpen, onToggleSidebar }: { sidebarOpen: boolean, onToggleSidebar?: () => void }) => {
   return (
     <div
@@ -21,13 +21,12 @@ const TitleBar = ({ sidebarOpen, onToggleSidebar }: { sidebarOpen: boolean, onTo
       {onToggleSidebar && (
         <button
           onClick={onToggleSidebar}
-          className="no-drag-region p-1.5 rounded-md text-textSecondary hover:text-white hover:bg-white/10 transition-colors"
+          className="no-drag-region p-1.5 rounded-full text-textSecondary hover:text-white hover:bg-white/10 transition-colors"
           title={sidebarOpen ? 'Hide chat history' : 'Show chat history'}
         >
           {sidebarOpen ? <PanelLeftClose size={16} /> : <PanelLeftOpen size={16} />}
         </button>
       )}
-      {/* App-level buttons can be added here (no-drag-region on each) */}
     </div>
   );
 };

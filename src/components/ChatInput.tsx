@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react';
-import { ArrowUp, ChevronUp, ChevronRight, Plus, FileText, Image as ImageIcon, Folder, X, FileSpreadsheet, MonitorPlay, AlertTriangle, Square, Check, RefreshCw, Settings2, GripHorizontal } from 'lucide-react';
+import { ArrowUp, ChevronUp, ChevronRight, Plus, FileText, Image as ImageIcon, Folder, X, FileSpreadsheet, MonitorPlay, AlertTriangle, Square, Check, RefreshCw } from 'lucide-react';
 import CodeMirror, { ReactCodeMirrorRef } from '@uiw/react-codemirror';
 import { markdown } from '@codemirror/lang-markdown';
 import { EditorView, Decoration, DecorationSet, WidgetType, ViewPlugin, ViewUpdate, keymap } from '@codemirror/view';
@@ -16,8 +16,9 @@ const PROVIDER_ICONS: Record<string, string> = {
   anthropic: 'https://www.anthropic.com/favicon.ico'
 };
 
-import { LLMModel, fetchModels, ModelSettings, getModelSettings, saveModelSettings, primeModel, flushModel } from '../utils/llm';
+import { LLMModel, fetchModels, ModelSettings, getModelSettings, primeModel, flushModel } from '../utils/llm';
 import DEFAULT_SYSTEM_PROMPT from '../utils/systemPrompt.md?raw';
+import { modelParamsStore } from '../utils/modelParamsStore';
 
 const ModelItem = ({ model, isSelected, onClick }: { model: any, isSelected: boolean, onClick: () => void }) => (
   <button
@@ -35,46 +36,6 @@ const ModelItem = ({ model, isSelected, onClick }: { model: any, isSelected: boo
     />
     <span className="truncate">{model.name}</span>
   </button>
-);
-
-const useMenuDrag = (active: boolean) => {
-  const [offset, setOffset] = useState({ x: 0, y: 0 });
-  const offsetRef = useRef(offset);
-  useEffect(() => { offsetRef.current = offset; }, [offset]);
-
-  useEffect(() => {
-    setOffset({ x: 0, y: 0 });
-  }, [active]);
-
-  const onGripMouseDown = useCallback((e: React.MouseEvent) => {
-    e.preventDefault();
-    e.stopPropagation();
-    const start = { x: e.clientX, y: e.clientY, baseX: offsetRef.current.x, baseY: offsetRef.current.y };
-    const onMove = (ev: MouseEvent) => {
-      setOffset({ x: start.baseX + ev.clientX - start.x, y: start.baseY + ev.clientY - start.y });
-    };
-    const onUp = () => {
-      window.removeEventListener('mousemove', onMove);
-      window.removeEventListener('mouseup', onUp);
-    };
-    window.addEventListener('mousemove', onMove);
-    window.addEventListener('mouseup', onUp);
-  }, []);
-
-  const reset = useCallback(() => setOffset({ x: 0, y: 0 }), []);
-
-  return { offset, onGripMouseDown, reset };
-};
-
-const MenuGrip = ({ onMouseDown, onReset }: { onMouseDown: (e: React.MouseEvent) => void, onReset: () => void }) => (
-  <div
-    onMouseDown={onMouseDown}
-    onDoubleClick={onReset}
-    className="absolute bottom-1 left-1/2 -translate-x-1/2 z-10 p-1 rounded-md cursor-grab active:cursor-grabbing text-textSecondary/50 hover:text-white hover:bg-white/10 transition-colors select-none"
-    title="Drag to move · double-click to reset"
-  >
-    <GripHorizontal size={14} />
-  </div>
 );
 
 interface ChatInputProps {
@@ -226,12 +187,8 @@ const ChatInput: React.FC<ChatInputProps> = ({ onSend, onStop, disabled, editing
   const [isLoadingModels, setIsLoadingModels] = useState(false);
 
   const [isAttachMenuOpen, setIsAttachMenuOpen] = useState(false);
-  const [isSettingsOpen, setIsSettingsOpen] = useState(false);
-  const attachMenuDrag = useMenuDrag(isAttachMenuOpen);
-  const settingsMenuDrag = useMenuDrag(isSettingsOpen);
-  const modelMenuDrag = useMenuDrag(isModelMenuOpen);
-  const [modelSettings, setModelSettings] = useState<ModelSettings>(() => getModelSettings());
-  const [estimatedTokens, setEstimatedTokens] = useState<{ total: number; prompt: number; history: number; system: number } | null>(null);
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  const [, setModelSettings] = useState<ModelSettings>(() => getModelSettings());
   const [attachments, setAttachments] = useState<any[]>([]);
   const [isDragging, setIsDragging] = useState(false);
   const [attachmentToRemove, setAttachmentToRemove] = useState<string | null>(null);
@@ -240,55 +197,46 @@ const ChatInput: React.FC<ChatInputProps> = ({ onSend, onStop, disabled, editing
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [hasUnsentChanges, setHasUnsentChanges] = useState(false);
 
-  const updateSettings = (partial: Partial<ModelSettings>) => {
-    const updated = { ...modelSettings, ...partial };
-    setModelSettings(updated);
-    saveModelSettings(updated);
-  };
-
   useEffect(() => {
-    //only calculate tokens when settings panel is open
-    if (!isSettingsOpen) return;
+    // Publish live token estimates to the right sidebar — only while it's
+    // open (modelParamsStore gates this to avoid constant recounting).
+    const compute = () => {
+      const systemTokens = Math.ceil(DEFAULT_SYSTEM_PROMPT.length / 3.8);
 
-    const systemTokens = Math.ceil(DEFAULT_SYSTEM_PROMPT.length / 3.8);
-
-    let historyChars = 0;
-    if (messages) {
-      for (const m of messages) {
-        if (typeof m.content === 'string') {
-          historyChars += m.content.length;
-        }
-        if (m.thinking) {
-          historyChars += m.thinking.length;
+      let historyChars = 0;
+      if (messages) {
+        for (const m of messages) {
+          if (typeof m.content === 'string') {
+            historyChars += m.content.length;
+          }
+          if (m.thinking) {
+            historyChars += m.thinking.length;
+          }
         }
       }
-    }
-    const historyTokens = Math.ceil(historyChars / 3.8);
+      const historyTokens = Math.ceil(historyChars / 3.8);
 
-    let promptChars = value.length;
-    for (const a of attachments) {
-      if (a.rawContent) {
-        promptChars += a.rawContent.length;
-      } else if (a.display) {
-        promptChars += a.display.length + 50;
+      let promptChars = value.length;
+      for (const a of attachments) {
+        if (a.rawContent) {
+          promptChars += a.rawContent.length;
+        } else if (a.display) {
+          promptChars += a.display.length + 50;
+        }
       }
-    }
-    const promptTokens = Math.ceil(promptChars / 3.8);
+      const promptTokens = Math.ceil(promptChars / 3.8);
 
-    setEstimatedTokens({
-      system: systemTokens,
-      history: historyTokens,
-      prompt: promptTokens,
-      total: systemTokens + historyTokens + promptTokens,
-    });
-  }, [isSettingsOpen, messages, value, attachments]);
+      modelParamsStore.publish({
+        system: systemTokens,
+        history: historyTokens,
+        prompt: promptTokens,
+      });
+    };
 
-  const contextLimit = modelSettings.contextWindow || 8192;
-  const usageSegments = [
-    { key: 'prompt', label: 'Prompt', tokens: estimatedTokens?.prompt ?? 0, color: 'color-mix(in srgb, rgb(var(--accent-rgb)) 45%, white)' },
-    { key: 'history', label: 'History', tokens: estimatedTokens?.history ?? 0, color: 'color-mix(in srgb, rgb(var(--accent-rgb)) 70%, white)' },
-    { key: 'system', label: 'System', tokens: estimatedTokens?.system ?? 0, color: 'rgb(var(--accent-rgb))' },
-  ];
+    modelParamsStore.setRecompute(compute);
+    if (modelParamsStore.isActive()) compute();
+  }, [messages, value, attachments]);
+
 
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const [canScrollRight, setCanScrollRight] = useState(false);
@@ -911,11 +859,7 @@ const ChatInput: React.FC<ChatInputProps> = ({ onSend, onStop, disabled, editing
               onChange={handleFileChange}
             />
             {isAttachMenuOpen && (
-              <div
-                className="absolute bottom-full left-0 mb-3 w-40 menu-panel rounded-[24px] p-2 pb-7 z-50 flex flex-col"
-                style={{ transform: `translate3d(${attachMenuDrag.offset.x}px, ${attachMenuDrag.offset.y}px, 0)` }}
-              >
-                <MenuGrip onMouseDown={attachMenuDrag.onGripMouseDown} onReset={attachMenuDrag.reset} />
+              <div className="absolute bottom-full left-0 mb-3 w-40 menu-panel rounded-[24px] p-2 z-50 flex flex-col">
                 <div className="px-3 pt-1.5 pb-1.5">
                   <span className="menu-header">Context</span>
                 </div>
@@ -934,182 +878,11 @@ const ChatInput: React.FC<ChatInputProps> = ({ onSend, onStop, disabled, editing
             </button>
           </div>
 
-          {/* Settings-2 Model Adjustments Drop-up */}
-          <div className="relative">
-            {isSettingsOpen && (
-              <div
-                className="absolute bottom-full left-0 mb-3 w-80 menu-panel rounded-[24px] p-4 pb-8 z-50 flex flex-col gap-3.5 text-textSecondary"
-                style={{ transform: `translate3d(${settingsMenuDrag.offset.x}px, ${settingsMenuDrag.offset.y}px, 0)` }}
-              >
-                <MenuGrip onMouseDown={settingsMenuDrag.onGripMouseDown} onReset={settingsMenuDrag.reset} />
-                {/* Header + Context Usage Chart */}
-                <div className="flex flex-col gap-2">
-                  <span className="menu-header">Model Parameters</span>
-                  <div className="flex items-baseline justify-between">
-                    <span className="text-sm font-semibold text-white font-mono">
-                      {estimatedTokens?.total.toLocaleString() || '0'}
-                    </span>
-                    <span className="text-xs text-textSecondary font-mono">
-                      of {contextLimit.toLocaleString()} tokens
-                    </span>
-                  </div>
-                  <div className="flex h-2 w-full rounded-full overflow-hidden bg-white/10">
-                    {usageSegments.map((seg) => (
-                      <div
-                        key={seg.key}
-                        className="h-full"
-                        style={{ width: `${(seg.tokens / contextLimit) * 100}%`, backgroundColor: seg.color }}
-                      />
-                    ))}
-                  </div>
-                  <div className="flex items-center justify-between text-xs text-textSecondary px-0.5">
-                    {usageSegments.map((seg) => (
-                      <span key={seg.key} className="flex items-center gap-1.5">
-                        <span className="w-1.5 h-1.5 rounded-full" style={{ backgroundColor: seg.color }} />
-                        {seg.label} {Math.round((seg.tokens / contextLimit) * 100)}%
-                      </span>
-                    ))}
-                  </div>
-                </div>
-
-                {/* Thinking Level */}
-                <div className="flex flex-col gap-1.5">
-                  <div className="flex justify-between items-center text-sm">
-                    <span className="text-textSecondary font-medium">Thinking Level</span>
-                    <span className="text-textSecondary font-mono text-xs capitalize">{modelSettings.thinkingLevel}</span>
-                  </div>
-                  <div className="grid grid-cols-4 gap-1 p-1 bg-black/30 rounded-xl border border-white/5">
-                    {(['off', 'low', 'medium', 'high'] as const).map(level => (
-                      <button
-                        key={level}
-                        type="button"
-                        onClick={() => updateSettings({ thinkingLevel: level })}
-                        className={`py-1.5 text-sm rounded-lg capitalize transition-colors ${modelSettings.thinkingLevel === level
-                            ? 'bg-white/20 text-white font-medium shadow-sm'
-                            : 'text-textSecondary hover:text-gray-200'
-                          }`}
-                      >
-                        {level}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-
-                {/* Thinking Timeout */}
-                <div className="flex flex-col gap-1.5">
-                  <div className="flex justify-between items-center text-sm">
-                    <span className="text-textSecondary font-medium">Thinking Timeout</span>
-                    <span className="text-textSecondary font-mono text-xs">
-                      {modelSettings.thinkingTimeout === 0 ? 'No timeout' : `${modelSettings.thinkingTimeout}s`}
-                    </span>
-                  </div>
-                  <input
-                    type="range"
-                    min={0}
-                    max={300}
-                    step={10}
-                    value={modelSettings.thinkingTimeout}
-                    onChange={(e) => updateSettings({ thinkingTimeout: Number(e.target.value) })}
-                    className="neutral-slider w-full cursor-pointer"
-                    style={{ '--fill': `${(modelSettings.thinkingTimeout / 300) * 100}%` } as React.CSSProperties}
-                  />
-                </div>
-
-                {/* Model Temperature */}
-                <div className="flex flex-col gap-1.5">
-                  <div className="flex justify-between items-center text-sm">
-                    <span className="text-textSecondary font-medium">Model Temperature</span>
-                    <span className="text-textSecondary font-mono text-xs">{modelSettings.temperature.toFixed(2)}</span>
-                  </div>
-                  <input
-                    type="range"
-                    min={0}
-                    max={2}
-                    step={0.05}
-                    value={modelSettings.temperature}
-                    onChange={(e) => updateSettings({ temperature: Number(e.target.value) })}
-                    className="neutral-slider w-full cursor-pointer"
-                    style={{ '--fill': `${(modelSettings.temperature / 2) * 100}%` } as React.CSSProperties}
-                  />
-                </div>
-
-                {/* Top-P */}
-                <div className="flex flex-col gap-1.5">
-                  <div className="flex justify-between items-center text-sm">
-                    <span className="text-textSecondary font-medium">Top-P</span>
-                    <span className="text-textSecondary font-mono text-xs">{modelSettings.topP.toFixed(2)}</span>
-                  </div>
-                  <input
-                    type="range"
-                    min={0}
-                    max={1}
-                    step={0.05}
-                    value={modelSettings.topP}
-                    onChange={(e) => updateSettings({ topP: Number(e.target.value) })}
-                    className="neutral-slider w-full cursor-pointer"
-                    style={{ '--fill': `${modelSettings.topP * 100}%` } as React.CSSProperties}
-                  />
-                </div>
-
-                {/* Max Output Length */}
-                <div className="flex flex-col gap-1.5">
-                  <div className="flex justify-between items-center text-sm">
-                    <span className="text-textSecondary font-medium">Max Output Length</span>
-                    <span className="text-textSecondary font-mono text-xs">
-                      {modelSettings.maxOutputLength ? `${modelSettings.maxOutputLength.toLocaleString()} tokens` : 'Default'}
-                    </span>
-                  </div>
-                  <input
-                    type="range"
-                    min={256}
-                    max={32768}
-                    step={256}
-                    value={modelSettings.maxOutputLength || 4096}
-                    onChange={(e) => updateSettings({ maxOutputLength: Number(e.target.value) })}
-                    className="neutral-slider w-full cursor-pointer"
-                    style={{ '--fill': `${(((modelSettings.maxOutputLength || 4096) - 256) / (32768 - 256)) * 100}%` } as React.CSSProperties}
-                  />
-                </div>
-
-                {/* Context Window */}
-                <div className="flex flex-col gap-1.5">
-                  <div className="flex justify-between items-center text-sm">
-                    <span className="text-textSecondary font-medium">Context Window</span>
-                    <span className="text-textSecondary font-mono text-xs">
-                      {contextLimit >= 1024 ? `${Math.round(contextLimit / 1024)}K` : contextLimit} tokens
-                    </span>
-                  </div>
-                  <input
-                    type="range"
-                    min={1024}
-                    max={131072}
-                    step={1024}
-                    value={modelSettings.contextWindow || 8192}
-                    onChange={(e) => updateSettings({ contextWindow: Number(e.target.value) })}
-                    className="neutral-slider w-full cursor-pointer"
-                    style={{ '--fill': `${(((modelSettings.contextWindow || 8192) - 1024) / (131072 - 1024)) * 100}%` } as React.CSSProperties}
-                  />
-                </div>
-              </div>
-            )}
-            <button
-              onClick={() => setIsSettingsOpen(!isSettingsOpen)}
-              className="p-2 text-textSecondary hover:text-white rounded-full hover:bg-white/10 transition-all"
-              title="Model settings"
-            >
-              <Settings2 size={20} className={`transition-colors ${isSettingsOpen ? 'text-white' : ''}`} />
-            </button>
-          </div>
 
           {/* Model Selector Drop-up */}
           <div className="relative">
             {isModelMenuOpen && (
-              <div
-                className="absolute bottom-full left-0 mb-3 w-64 menu-panel rounded-[24px] p-2 pb-7 z-50 flex flex-col"
-                style={{ transform: `translate3d(${modelMenuDrag.offset.x}px, ${modelMenuDrag.offset.y}px, 0)` }}
-              >
-                <MenuGrip onMouseDown={modelMenuDrag.onGripMouseDown} onReset={modelMenuDrag.reset} />
-
+              <div className="absolute bottom-full left-0 mb-3 w-64 menu-panel rounded-[24px] p-2 z-50 flex flex-col">
                 <div className="flex items-center justify-between px-3 pt-3 pb-2">
                   <span className="menu-header">Models</span>
                   <button
@@ -1265,3 +1038,6 @@ const ChatInput: React.FC<ChatInputProps> = ({ onSend, onStop, disabled, editing
 };
 
 export default ChatInput;
+
+
+

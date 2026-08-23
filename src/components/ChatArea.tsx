@@ -14,10 +14,11 @@ import rehypeKatex from 'rehype-katex';
 import 'katex/dist/katex.min.css';
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
 import { vscDarkPlus } from 'react-syntax-highlighter/dist/esm/styles/prism';
-import { MessageSquarePlus, Terminal, Globe, ChevronDown, ChevronRight, Trash2, Bug } from 'lucide-react';
+import { MessageSquarePlus, Terminal, Globe, ChevronDown, ChevronRight, Trash2, Bug, Settings2 } from 'lucide-react';
 import { getSystemTools } from '../utils/tools';
 import { agentBrowserStore } from '../utils/agentBrowserStore';
 import { terminateBrowserSession } from '../utils/browserTools';
+import { transcriptStore } from '../utils/transcriptStore';
 import ApprovalCard, { PendingApproval } from './ApprovalCard';
 
 const MarkdownComponents: any = {
@@ -93,77 +94,128 @@ export interface ChatMessage {
 }
 
 // ─── Debug transcript ────────────────────────────────────────────────────────
-const fmtTs = (t?: number) => (t ? new Date(t).toISOString() : 'unknown');
-const trunc = (s: any, max = 3000) => {
-  const str = typeof s === 'string' ? s : JSON.stringify(s, null, 2);
-  if (str == null) return 'undefined';
-  return str.length > max ? str.slice(0, max) + `\n...[truncated ${str.length - max} chars]` : str;
+// Compact, LLM-parseable format: flattened metadata, a round-by-round timeline
+// with relative timestamps and full per-round thinking, then the exact model
+// context. Designed so token cost stays low while retaining everything needed
+// to debug model behavior (thinking style, stalls, recovery, tool results).
+const fmtTs = (t?: number) => (t ? new Date(t).toISOString() : '?');
+const secs = (ms: number) => `${(ms / 1000).toFixed(1)}s`;
+const oneLine = (v: any, max = 300): string => {
+  let s: string;
+  try { s = typeof v === 'string' ? v : JSON.stringify(v); } catch { s = String(v); }
+  if (s == null) s = 'null';
+  s = s.replace(/\s+/g, ' ').trim();
+  return s.length > max ? s.slice(0, max) + `…(+${s.length - max}ch)` : s;
+};
+const blockText = (v: any, max: number): string => {
+  let s: string;
+  try { s = typeof v === 'string' ? v : JSON.stringify(v, null, 1); } catch { s = String(v); }
+  return s == null ? '' : (s.length > max ? s.slice(0, max) + `\n…[+${s.length - max} chars truncated]` : s);
+};
+// Multimodal message parts → compact string ([image] placeholders for blobs).
+const msgToText = (content: any): string => {
+  if (typeof content === 'string') return content;
+  if (Array.isArray(content)) return content.map((p: any) =>
+    p?.type === 'image_url' ? '[image attached]' : (p?.text ?? '')).join('\n');
+  return JSON.stringify(content);
 };
 
-export const buildTranscript = (msg: ChatMessage): string => {
+const buildTranscript = (msg: ChatMessage): string => {
   const L: string[] = [];
-  L.push('# OneAgent Debug Transcript');
-  L.push(`Message ID: ${msg.id}`);
-  L.push(`Started:    ${fmtTs(msg.createdAt)}`);
-  L.push(`Completed:  ${fmtTs(msg.completedAt)}${msg.createdAt && msg.completedAt ? ` (${((msg.completedAt - msg.createdAt) / 1000).toFixed(1)}s)` : ''}`);
-  L.push(`Generating: ${!!msg.isGenerating}`);
+  const t0 = msg.createdAt;
+  const calls = msg.toolCalls || [];
+  const dur = t0 && msg.completedAt ? secs(msg.completedAt - t0) : '?';
+  const at = (t?: number) => (t0 && t ? `t+${secs(t - t0)}` : 't+?');
 
+  L.push(`# OneAgent Transcript ${msg.id}`);
+  L.push(`window ${fmtTs(t0)} → ${fmtTs(msg.completedAt)} | dur ${dur} | rounds ${calls.length}/${MAX_TOOL_ROUNDS} | generating ${!!msg.isGenerating}`);
+
+  // Model & settings snapshot — flattened, no JSON dumps.
   if (msg.modelStats) {
-    L.push('\n## Model & Settings');
-    L.push(trunc(msg.modelStats));
+    const m = msg.modelStats;
+    if (m.activeModel) L.push(`model: ${m.activeModel.id ?? '?'} @ ${m.activeModel.provider ?? '?'}`);
+    const s = m.settings || {};
+    L.push(`settings: think=${s.thinkingLevel ?? '?'} thinkTO=${s.thinkingTimeout ?? 0}s temp=${s.temperature ?? '?'} topP=${s.topP ?? '?'} maxTok=${s.maxOutputLength ?? '?'} ctx=${s.contextWindow ?? '?'}`);
+    const u = m.totals || m.usage?.totals;
+    if (u) L.push(`usage: prompt=${u.promptTokens ?? 0} completion=${u.completionTokens ?? 0}`);
   }
 
-  if (msg.thinking && msg.thinking.trim()) {
-    L.push('\n## Thinking Output');
-    L.push(msg.thinking);
-  }
+  // Round timeline. thinkingParts[i] is the reasoning that preceded round i+1's
+  // tool calls; call timestamps give inter-round gaps (thinking + exec time).
+  const byRound = new Map<number, ToolCall[]>();
+  calls.forEach(tc => {
+    const m = /-tc-(\d+)-/.exec(tc.id || '');
+    const r = m ? parseInt(m[1], 10) : calls.indexOf(tc) + 1;
+    if (!byRound.has(r)) byRound.set(r, []);
+    byRound.get(r)!.push(tc);
+  });
+  const parts = msg.thinkingParts;
 
-  if (msg.toolCalls && msg.toolCalls.length > 0) {
-    L.push(`\n## Tool Calls (${msg.toolCalls.length})`);
-    msg.toolCalls.forEach((tc, i) => {
-      L.push(`\n### [${i + 1}] ${tc.name} — ${tc.status} @ ${fmtTs(tc.timestamp)}`);
-      L.push(`id: ${tc.id}`);
-      L.push(`arguments:\n${trunc(tc.args)}`);
-      if (tc.raw) L.push(`raw:\n${trunc(tc.raw)}`);
-      if (tc.result !== undefined) L.push(`result:\n${trunc(tc.result)}`);
-      if (tc.image) L.push('result: [image attached]');
+  if (byRound.size > 0) {
+    L.push('\n## Timeline');
+    let prevTs: number | undefined = t0;
+    Array.from(byRound.keys()).sort((a, b) => a - b).forEach(r => {
+      const roundCalls = byRound.get(r)!;
+      const firstTs = roundCalls[0]?.timestamp;
+      const gap = prevTs && firstTs ? secs(firstTs - prevTs) : '?';
+      const think = parts?.[r - 1];
+      const recovery = [];
+      if (think) {
+        if (think.includes('[Thinking timeout')) recovery.push('think-timeout');
+        if (think.includes('[Auto-continued')) recovery.push('auto-continue');
+      }
+      L.push(`\n### R${r} Δ${gap}${recovery.length ? ' ⚑ ' + recovery.join('+') : ''}`);
+      if (think && think.trim()) {
+        L.push(`think[${think.length}c]:`);
+        blockText(think, 4000).split('\n').forEach(line => L.push(`| ${line}`));
+      }
+      roundCalls.forEach(tc => {
+        L.push(`[${at(tc.timestamp)}] ${tc.name} → ${tc.status}`);
+        L.push(`  args: ${oneLine(tc.args)}`);
+        if (tc.result !== undefined) L.push(`  result: ${oneLine(tc.result, 400)}`);
+        if (tc.image) L.push('  result: [image]');
+        prevTs = tc.timestamp;
+      });
     });
+  } else if (msg.thinking && msg.thinking.trim()) {
+    L.push(`\n## Thinking [${msg.thinking.length}c]`);
+    blockText(msg.thinking, 6000).split('\n').forEach(line => L.push(`| ${line}`));
   }
 
+  if (msg.content && msg.content.trim()) {
+    L.push(`\n## Final Answer [${msg.content.length}c]`);
+    L.push(blockText(msg.content, 2000));
+  }
+
+  // The exact messages sent to the model — the ground truth of what it saw,
+  // including reasoning_digest blocks and tool_call serialization.
   if (msg.internalContext && msg.internalContext.length > 0) {
-    L.push('\n## Internal Context (messages sent to the model)');
+    L.push('\n## Model Context (verbatim)');
     msg.internalContext.forEach((m: any, i: number) => {
-      L.push(`\n### [${i + 1}] role: ${m.role}`);
-      L.push(trunc(m.content));
+      const body = msgToText(m.content);
+      L.push(`\n[${i + 1}] ${m.role} (${body.length}c)`);
+      L.push(blockText(body, 1800));
     });
   }
 
   if (msg.comments && msg.comments.length > 0) {
     L.push('\n## User Comments');
-    msg.comments.forEach(c => L.push(`- on "${c.quote}": ${c.text}`));
+    msg.comments.forEach(c => L.push(`- on "${oneLine(c.quote, 80)}": ${oneLine(c.text, 200)}`));
   }
 
   return L.join('\n');
 };
 
-const TranscriptsButton = ({ msg }: { msg: ChatMessage }) => {
-  const [copied, setCopied] = useState(false);
-  return (
-    <button
-      onClick={async () => {
-        try {
-          await navigator.clipboard.writeText(buildTranscript(msg));
-          setCopied(true);
-          setTimeout(() => setCopied(false), 1500);
-        } catch (e) { console.error('Transcript copy failed', e); }
-      }}
-      className="mt-1 self-start flex items-center gap-1.5 text-[11px] text-textSecondary hover:text-gray-200 hover:bg-white/10 border border-white/5 rounded-full px-2 py-1 transition-colors"
-      title="Copy debug transcript (model settings, context, thinking, tool calls)"
-    >
-      <Bug size={12} />
-      <span>{copied ? 'Copied!' : 'Transcripts'}</span>
-    </button>
-  );
+const downloadTranscript = () => {
+  const blob = new Blob([transcriptStore.get()], { type: 'text/markdown;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `oneagent-transcript-${new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)}.md`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
 };
 
 // Safety cap so a model stuck in tool-call loops can't run forever
@@ -338,7 +390,7 @@ const UnifiedToolsBlock = ({ activity, isGenerating, msgIsGenerating, activityFe
   );
 };
 
-const ChatArea = () => {
+const ChatArea = ({ onToggleSettings }: { onToggleSettings?: () => void }) => {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [isGenerating, setIsGenerating] = useState(false);
 
@@ -346,6 +398,10 @@ const ChatArea = () => {
   // getter) so snapshot changes actually trigger a re-render.
   const [terminatedSnapshot, setTerminatedSnapshot] = useState<string | null>(agentBrowserStore.getTerminatedSnapshot());
   useEffect(() => agentBrowserStore.subscribeSnapshot(setTerminatedSnapshot), []);
+
+  // Debug-transcript availability — button only shows after a generation completes.
+  const [hasTranscript, setHasTranscript] = useState(transcriptStore.get().length > 0);
+  useEffect(() => transcriptStore.subscribe(t => setHasTranscript(t.length > 0)), []);
 
   // Edit mode tracking
   const [editingBlock, setEditingBlock] = useState<{ id: string, type: 'user' | 'thinking' | 'response' | 'tools' } | null>(null);
@@ -717,6 +773,9 @@ const ChatArea = () => {
 
   const triggerGeneration = async (contextMsgs: ChatMessage[], targetModel: LLMModel, keepThinking?: string, feedbackComments?: ChatComment[]) => {
     setIsGenerating(true);
+    // Hide the titlebar Transcripts button while a new generation runs —
+    // it only reappears once the response completes.
+    transcriptStore.set('');
     abortControllerRef.current = new AbortController();
 
     // Re-enable autoscroll when generation starts
@@ -1067,25 +1126,31 @@ const ChatArea = () => {
       let modelStats: any = null;
       try { modelStats = await getModelStats(finalModel); } catch {}
 
+      const finalMsg: ChatMessage = {
+        id: assistantMsgId,
+        role: 'assistant',
+        content: accumulatedContent,
+        thinking: accumulatedThinking,
+        toolCalls: allToolCalls.length > 0 ? allToolCalls : undefined,
+        isGenerating: false,
+        isCallingTool: false,
+        createdAt: genStartedAt,
+        completedAt: Date.now(),
+        internalContext: JSON.parse(JSON.stringify(formattedMessages)),
+        modelStats
+      };
+
       setMessages(prev => {
         const newMsgs = [...prev];
         const targetIdx = newMsgs.findIndex(m => m.id === assistantMsgId);
         if (targetIdx !== -1) {
-          newMsgs[targetIdx] = {
-            ...newMsgs[targetIdx],
-            content: accumulatedContent,
-            thinking: accumulatedThinking,
-            toolCalls: allToolCalls.length > 0 ? allToolCalls : undefined,
-            isGenerating: false,
-            isCallingTool: false,
-            createdAt: genStartedAt,
-            completedAt: Date.now(),
-            internalContext: JSON.parse(JSON.stringify(formattedMessages)),
-            modelStats
-          };
+          newMsgs[targetIdx] = finalMsg;
         }
         return newMsgs;
       });
+
+      // Generation over — the titlebar Transcripts button appears now.
+      transcriptStore.set(buildTranscript(finalMsg));
 
 
 
@@ -1111,13 +1176,15 @@ const ChatArea = () => {
         const newMsgs = [...prev];
         const lastIdx = newMsgs.length - 1;
         if (lastIdx >= 0 && newMsgs[lastIdx].role === 'assistant') {
-          newMsgs[lastIdx] = {
+          const errMsg: ChatMessage = {
             id: newMsgs[lastIdx].id,
             role: 'assistant',
             content: displayError,
             thinking: newMsgs[lastIdx].thinking || '',
             isGenerating: false,
           };
+          newMsgs[lastIdx] = errMsg;
+          transcriptStore.set(buildTranscript(errMsg));
         }
         return newMsgs;
       });
@@ -1311,7 +1378,29 @@ const ChatArea = () => {
 
   return (
     <div className="flex-1 flex flex-col bg-surface relative rounded-lg overflow-hidden min-w-0 bevel-light">
-      
+
+      {/* Panel-level controls — top right */}
+      <div className="absolute top-2 right-2 z-30 flex items-center gap-1 no-drag-region">
+        {hasTranscript && (
+          <button
+            onClick={downloadTranscript}
+            className="p-1.5 rounded-full text-textSecondary hover:text-white hover:bg-white/10 transition-colors"
+            title="Download debug transcript"
+          >
+            <Bug size={15} />
+          </button>
+        )}
+        {onToggleSettings && (
+          <button
+            onClick={onToggleSettings}
+            className="p-1.5 rounded-full text-textSecondary hover:text-white hover:bg-white/10 transition-colors"
+            title="Model parameters"
+          >
+            <Settings2 size={15} />
+          </button>
+        )}
+      </div>
+
       {/* Main Content */}
       <div ref={scrollContainerRef} onScroll={handleScroll} className="flex-1 flex flex-col items-center overflow-y-auto w-full relative">
         
@@ -1438,7 +1527,6 @@ const ChatArea = () => {
                           {formatMentions(isEditingResponse && editPreview ? editPreview.text : msg.content, msg.comments) + (msg.isGenerating ? ' ⬤' : '')}
                         </ReactMarkdown>
                       </div>
-                      <TranscriptsButton msg={msg} />
                     </div>
                   </div>
                 );
