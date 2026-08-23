@@ -88,6 +88,18 @@ const AgentBrowser: React.FC = () => {
     webview.addEventListener('dom-ready', handleDomReady);
     webview.addEventListener('did-finish-load', handleDidFinishLoad);
     webview.addEventListener('did-fail-load', handleDidFailLoad);
+    // The session root is moved between the hidden off-screen host and the
+    // Live Browser panel via appendChild (DOM move, no remount). Re-sync the
+    // emulation observer whenever that happens.
+    const handleSlotChange = () => {
+      resizeObserver.disconnect();
+      if (webview.parentElement) {
+        resizeObserver.observe(webview.parentElement);
+        const rect = webview.parentElement.getBoundingClientRect();
+        if (rect.width > 0) updateEmulation(rect.width, rect.height);
+      }
+    };
+    window.addEventListener('oneagent-browser-slot-change', handleSlotChange);
     return () => {
       if ((window as any).activeWebview === webview) {
         (window as any).activeWebview = null;
@@ -96,6 +108,7 @@ const AgentBrowser: React.FC = () => {
       webview.removeEventListener('dom-ready', handleDomReady);
       webview.removeEventListener('did-finish-load', handleDidFinishLoad);
       webview.removeEventListener('did-fail-load', handleDidFailLoad);
+      window.removeEventListener('oneagent-browser-slot-change', handleSlotChange);
       resizeObserver.disconnect();
     };
   }, []);
@@ -105,7 +118,7 @@ const AgentBrowser: React.FC = () => {
   const reload = () => webviewRef.current?.reload();
 
   return (
-    <div className="flex flex-col h-[340px] bg-white overflow-hidden">
+    <div id="oneagent-browser-root" className="flex flex-col w-full h-full bg-white overflow-hidden">
       {/* Mini toolbar */}
       <div className="h-9 shrink-0 bg-surface flex items-center px-2 gap-1.5 border-b border-white/10">
         <button onClick={goBack} className="p-1 text-textSecondary hover:text-white hover:bg-white/10 rounded transition-colors" title="Back">

@@ -23,7 +23,7 @@ const sendInputEvent = async (opts: any) => {
 // land a beat after the agent's first browser_* call arrives — poll briefly.
 // Also waits for dom-ready: webview methods throw "must be attached to the DOM"
 // before the guest view is ready, even though the element already exists.
-export const waitForActiveWebview = async (timeoutMs = 5000): Promise<any> => {
+export const waitForActiveWebview = async (timeoutMs = 15000): Promise<any> => {
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
     const wv = (window as any).activeWebview;
@@ -89,6 +89,13 @@ export const injectSetOfMark = async (): Promise<any> => {
         // Only label elements that intersect with the current viewport
         if (rect.bottom < 0 || rect.right < 0 || rect.top > window.innerHeight || rect.left > window.innerWidth) return;
 
+        // Hit-test the center: skip elements that are covered or visually
+        // hidden (e.g. offscreen accessibility links Google keeps "visible").
+        const cx = rect.left + rect.width / 2;
+        const cy = rect.top + rect.height / 2;
+        const hit = document.elementFromPoint(cx, cy);
+        if (!hit || !(hit === el || el.contains(hit) || hit.contains(el))) return;
+
         const fullFp = fullFingerprints[idx];
         let id = somState.byFingerprint[fullFp];
         if (!id) {
@@ -119,21 +126,25 @@ export const injectSetOfMark = async (): Promise<any> => {
         const marker = document.createElement('div');
         marker.className = 'oneagent-som-marker';
         marker.textContent = id;
+        // Distinct high-contrast color per id so the model can pair each
+        // numbered badge with its outlined element even in small screenshots.
+        const somColors = ['#ff3b30', '#007aff', '#34c759', '#ff9500', '#af52de', '#00c7be', '#ff2d55', '#5856d6', '#84fc1b', '#ffcc00'];
+        const somColor = somColors[id % somColors.length];
         Object.assign(marker.style, {
           position: 'absolute',
           top: (window.scrollY + rect.top) + 'px',
           left: (window.scrollX + rect.left) + 'px',
-          background: 'rgba(255, 0, 0, 0.8)',
-          color: 'white',
-          fontSize: '12px',
-          fontWeight: 'bold',
-          padding: '2px 4px',
-          borderRadius: '4px',
+          background: somColor,
+          color: (somColor === '#ffcc00' || somColor === '#84fc1b') ? 'black' : 'white',
+          fontSize: '26px',
+          fontWeight: '900',
+          padding: '4px 8px',
+          borderRadius: '8px',
           pointerEvents: 'none',
           boxShadow: '0 0 2px rgba(0,0,0,0.5)',
           lineHeight: '1'
         });
-        
+
         const border = document.createElement('div');
         border.className = 'oneagent-som-marker';
         Object.assign(border.style, {
@@ -142,7 +153,7 @@ export const injectSetOfMark = async (): Promise<any> => {
           left: (window.scrollX + rect.left) + 'px',
           width: rect.width + 'px',
           height: rect.height + 'px',
-          border: '2px dashed rgba(255, 0, 0, 0.8)',
+          border: '3px solid ' + somColor,
           pointerEvents: 'none'
         });
 
@@ -157,7 +168,11 @@ export const injectSetOfMark = async (): Promise<any> => {
         markers.push({
           id,
           tag: el.tagName.toLowerCase(),
-          text: (el.textContent || el.value || el.alt || '').trim().substring(0, 50),
+          // innerText respects visibility and inserts line breaks between
+          // block children — textContent would fuse adjacent nodes into one
+          // garbled token (e.g. "...City of Toronto" + "Kijiji" → "TorontoKij").
+          text: ((el.innerText !== undefined ? el.innerText : '') || el.value || el.alt || '')
+            .replace(/\s+/g, ' ').trim().substring(0, 80),
           rect: { top: rect.top, left: rect.left, width: rect.width, height: rect.height }
         });
       });
@@ -359,12 +374,45 @@ const clickElementCenter = async (wv: any, id: number, highlight: boolean): Prom
         try {
           el.scrollIntoView({ block: 'center', inline: 'center' });
           const rect = el.getBoundingClientRect();
-          const targetX = Math.round(rect.left + rect.width / 2);
-          const targetY = Math.round(rect.top + rect.height / 2);
+          function hits(x, y) {
+            const t = document.elementFromPoint(x, y);
+            return !!t && (t === el || el.contains(t));
+          }
+          // Geometric center can miss (inserted badges/padding split links) —
+          // fall back to the largest hittable text-bearing descendant, then a
+          // grid scan of the rect.
+          let targetX = Math.round(rect.left + rect.width / 2);
+          let targetY = Math.round(rect.top + rect.height / 2);
+          if (!hits(targetX, targetY)) {
+            let best = null, bestScore = 0;
+            el.querySelectorAll('*').forEach(d => {
+              const dr = d.getBoundingClientRect();
+              if (dr.width < 4 || dr.height < 4) return;
+              const dx = Math.round(dr.left + dr.width / 2);
+              const dy = Math.round(dr.top + dr.height / 2);
+              if (!hits(dx, dy)) return;
+              const score = dr.width * dr.height * (((d.textContent || '').trim().length > 0) ? 2 : 1);
+              if (score > bestScore) { bestScore = score; best = { x: dx, y: dy }; }
+            });
+            if (best) { targetX = best.x; targetY = best.y; }
+            else {
+              scan: for (let gy = 0.2; gy <= 0.8; gy += 0.2) {
+                for (let gx = 0.2; gx <= 0.8; gx += 0.2) {
+                  const tx = Math.round(rect.left + rect.width * gx), ty = Math.round(rect.top + rect.height * gy);
+                  if (hits(tx, ty)) { targetX = tx; targetY = ty; break scan; }
+                }
+              }
+            }
+          }
 
           const computedCursor = window.getComputedStyle(el).cursor;
+          // Editable targets always get the I-beam — pages often restyle
+          // inputs with custom cursors that would hide it.
+          const isEditable = el.isContentEditable || ['INPUT', 'TEXTAREA'].includes(el.tagName);
           let svgContent = '';
-          if (computedCursor === 'pointer') {
+          if (isEditable) {
+            svgContent = '<svg width="24" height="40" viewBox="0 0 16 32" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M3 3H13M8 3V29M3 29H13" stroke="white" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/><path d="M4 4H12M8 4V28M4 28H12" stroke="black" stroke-width="1" stroke-linejoin="round"/></svg>';
+          } else if (computedCursor === 'pointer') {
             svgContent = '<svg width="32" height="40" viewBox="0 0 24 30" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M12 1L12 15" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><path d="M15.5 5V15" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><path d="M19 8V15" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><path d="M8.5 7V17" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><path d="M8.5 17L5.5 15.5C4 14.5 2 15.5 2.5 17L5 22C6 24 8 26 10 27C12 28 16 28 18 26C20 24 21 21 21 18V13.5C21 11.5 19 11.5 19 13.5" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><path d="M8.5 17L5.5 15.5C4 14.5 2 15.5 2.5 17L5 22C6 24 8 26 10 27C12 28 16 28 18 26C20 24 21 21 21 18V13.5C21 11.5 19 11.5 19 13.5" fill="black"/></svg>';
           } else if (computedCursor === 'text') {
             svgContent = '<svg width="24" height="40" viewBox="0 0 16 32" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M3 3H13M8 3V29M3 29H13" stroke="white" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/><path d="M4 4H12M8 4V28M4 28H12" stroke="black" stroke-width="1" stroke-linecap="round" stroke-linejoin="round"/></svg>';
@@ -372,8 +420,8 @@ const clickElementCenter = async (wv: any, id: number, highlight: boolean): Prom
             svgContent = '<svg width="32" height="48" viewBox="0 0 24 36" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M5.65376 2.15376C5.42103 1.92103 5.06847 1.8385 4.75338 1.94314C4.4383 2.04778 4.22019 2.31885 4.19702 2.65171L2.03035 33.8517C2.00844 34.1673 2.1969 34.4636 2.49603 34.5843C2.79517 34.7049 3.13653 34.6231 3.34032 34.3813L10.3704 26.0355L16.2731 34.8021C16.4805 35.1097 16.8906 35.1884 17.1889 34.978L22.4206 31.2872C22.7188 31.0768 22.7845 30.666 22.5663 30.3621L16.2238 21.5303H24.3333C24.6468 21.5303 24.9312 21.3414 25.0482 21.0558C25.1652 20.7702 25.0906 20.4431 24.8604 20.2319L5.65376 2.15376Z" fill="black" stroke="white" stroke-width="2" stroke-linejoin="round"/></svg>';
           }
 
-          const cursor = document.createElement('div');
-          cursor.innerHTML = svgContent;
+          const cursor = document.createElement('img');
+        cursor.src = 'data:image/svg+xml;base64,' + btoa(svgContent);
           Object.assign(cursor.style, {
             position: 'fixed',
             zIndex: '2147483647',
@@ -435,14 +483,44 @@ const clickElementCenter = async (wv: any, id: number, highlight: boolean): Prom
 };
 
 // Quick viewport-center lookup for a Set-of-Mark element (no cursor animation).
+// Hit-test aware: badges/inserted UI (e.g. Google's "You visit often" chip)
+// can pad an anchor's bounding box so its geometric center lands on empty
+// space — fall back to the largest text-bearing descendant that actually
+// receives the click, then to a grid scan of the rect.
 export const getElementCenter = async (wv: any, id: number): Promise<{ x: number, y: number } | null> =>
   wv.executeJavaScript(`(function(){
     var el = window.__oneagentElements && window.__oneagentElements[${id}];
     if (!el) return null;
-    if (!el.isConnected) { delete window.__oneagentElements[${id}]; return null; }
     el.scrollIntoView({ block: 'center', inline: 'center' });
     var r = el.getBoundingClientRect();
-    return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) };
+    function hits(x, y) {
+      var t = document.elementFromPoint(x, y);
+      return !!t && (t === el || el.contains(t));
+    }
+    var cx = Math.round(r.left + r.width / 2);
+    var cy = Math.round(r.top + r.height / 2);
+    if (!hits(cx, cy)) {
+      var best = null, bestScore = 0;
+      el.querySelectorAll('*').forEach(function(d) {
+        var dr = d.getBoundingClientRect();
+        if (dr.width < 4 || dr.height < 4) return;
+        var dx = Math.round(dr.left + dr.width / 2);
+        var dy = Math.round(dr.top + dr.height / 2);
+        if (!hits(dx, dy)) return;
+        var score = dr.width * dr.height * (((d.textContent || '').trim().length > 0) ? 2 : 1);
+        if (score > bestScore) { bestScore = score; best = { x: dx, y: dy }; }
+      });
+      if (best) { cx = best.x; cy = best.y; }
+      else {
+        scan: for (var gy = 0.2; gy <= 0.8; gy += 0.2) {
+          for (var gx = 0.2; gx <= 0.8; gx += 0.2) {
+            var tx = Math.round(r.left + r.width * gx), ty = Math.round(r.top + r.height * gy);
+            if (hits(tx, ty)) { cx = tx; cy = ty; break scan; }
+          }
+        }
+      }
+    }
+    return { x: cx, y: cy };
   })()`);
 
 export const browserKeystrokes = async (args: any): Promise<string> => {
@@ -845,6 +923,14 @@ const resolveTargetPoint = async (
         try {
           const el = document.elementFromPoint(targetX, targetY);
           if (el) computedCursor = window.getComputedStyle(el).cursor;
+          // Editable targets always get the I-beam — pages often restyle
+          // inputs with custom cursors that would hide it.
+          if (el && (el.isContentEditable || ['INPUT', 'TEXTAREA'].includes(el.tagName))) {
+            const editableEl = el.closest('input, textarea, [contenteditable="true"], [contenteditable=""]') || el;
+            if (editableEl && (editableEl.isContentEditable || ['INPUT', 'TEXTAREA'].includes(editableEl.tagName))) {
+              computedCursor = 'text';
+            }
+          }
         } catch(e) {}
         
         let svgContent = '';
@@ -856,8 +942,8 @@ const resolveTargetPoint = async (
           svgContent = '<svg width="32" height="48" viewBox="0 0 24 36" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M5.65376 2.15376C5.42103 1.92103 5.06847 1.8385 4.75338 1.94314C4.4383 2.04778 4.22019 2.31885 4.19702 2.65171L2.03035 33.8517C2.00844 34.1673 2.1969 34.4636 2.49603 34.5843C2.79517 34.7049 3.13653 34.6231 3.34032 34.3813L10.3704 26.0355L16.2731 34.8021C16.4805 35.1097 16.8906 35.1884 17.1889 34.978L22.4206 31.2872C22.7188 31.0768 22.7845 30.666 22.5663 30.3621L16.2238 21.5303H24.3333C24.6468 21.5303 24.9312 21.3414 25.0482 21.0558C25.1652 20.7702 25.0906 20.4431 24.8604 20.2319L5.65376 2.15376Z" fill="black" stroke="white" stroke-width="2" stroke-linejoin="round"/></svg>';
         }
 
-        const cursor = document.createElement('div');
-        cursor.innerHTML = svgContent;
+        const cursor = document.createElement('img');
+          cursor.src = 'data:image/svg+xml;base64,' + btoa(svgContent);
         Object.assign(cursor.style, {
           position: 'fixed',
           zIndex: '2147483647',

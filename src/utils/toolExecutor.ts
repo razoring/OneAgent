@@ -204,9 +204,9 @@ const HANDLERS: Record<string, Handler> = {
         elements: obs.markers.length > 0 ? obs.markers : undefined,
         dom: obs.dom.length > 0 ? obs.dom : undefined,
         meta: obs.meta && Object.keys(obs.meta).length > 0 ? obs.meta : undefined,
-        note: obs.markers.length > 0 ? 'Red numbered badges are Set-of-Mark IDs — use them with browser_click/browser_type etc.' : undefined
+        note: obs.markers.length > 0 ? 'Numbered color-coded badges are Set-of-Mark IDs — use them with browser_click/browser_type etc. Each badge shares its color with the outline of its element.' : undefined
       }),
-      imageDataUrl: await downscaleDataUrl(obs.image)
+      imageDataUrl: await downscaleDataUrl(obs.image, 1280, 0.92)
     };
   },
   browser_screenshot: async () => {
@@ -217,7 +217,7 @@ const HANDLERS: Record<string, Handler> = {
         image: 'Screenshot of the embedded browser viewport attached to this tool response.',
         elements: shot.markers.length > 0 ? shot.markers : undefined
       }),
-      imageDataUrl: await downscaleDataUrl(shot.image)
+      imageDataUrl: await downscaleDataUrl(shot.image, 1280, 0.92)
     };
   },
 

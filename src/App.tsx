@@ -2,6 +2,7 @@ import { useState } from 'react';
 import TitleBar from './components/TitleBar';
 import Sidebar from './components/Sidebar';
 import ChatArea from './components/ChatArea';
+import AgentBrowser from './components/AgentBrowser';
 
 function App() {
   const [sidebarOpen, setSidebarOpen] = useState(true);
@@ -16,6 +17,17 @@ function App() {
         <main className="flex-1 flex relative p-2 min-w-0">
           <ChatArea />
         </main>
+      </div>
+
+      {/* Persistent browser session. Lives off-screen so agent tools work
+          without any UI; the Live Browser panel moves this node into itself
+          (appendChild — no remount) to make it visible. */}
+      <div
+        id="oneagent-browser-hidden"
+        style={{ position: 'fixed', left: -20000, top: 0, width: 1280, height: 800, pointerEvents: 'none', zIndex: -1 }}
+        aria-hidden
+      >
+        <AgentBrowser />
       </div>
     </div>
   );

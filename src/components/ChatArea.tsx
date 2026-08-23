@@ -14,7 +14,6 @@ import rehypeKatex from 'rehype-katex';
 import 'katex/dist/katex.min.css';
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
 import { vscDarkPlus } from 'react-syntax-highlighter/dist/esm/styles/prism';
-import AgentBrowser from './AgentBrowser';
 import { MessageSquarePlus, Terminal, Globe, ChevronDown, ChevronRight, Trash2, Bug } from 'lucide-react';
 import { getSystemTools } from '../utils/tools';
 import { agentBrowserStore } from '../utils/agentBrowserStore';
@@ -200,6 +199,40 @@ const BlockToolbar = ({ onEdit, onRegenerate, onDelete }: { onEdit?: () => void,
 const UnifiedToolsBlock = ({ activity, isGenerating, msgIsGenerating, activityFeed, isBrowserExpanded, setIsBrowserExpanded, handleUserKillBrowser, terminatedSnapshot, onEdit, onRegenerate, onDelete }: any) => {
   const { toolCalls } = activity.data;
   const [expanded, setExpanded] = useState(true);
+  const browserSlotRef = useRef<HTMLDivElement | null>(null);
+  const isLatestBrowserBlock = activityFeed.lastBrowserToolsMessageId === activity.messageId;
+
+  // Adopt the persistent (off-screen) browser session node into this panel.
+  // appendChild MOVES the node — the webview, its session and listeners all
+  // survive; only its on-screen position changes. When hidden/terminated it
+  // returns to the off-screen host where tools keep working in the background.
+  useEffect(() => {
+    const root = document.getElementById('oneagent-browser-root');
+    const slot = browserSlotRef.current;
+    if (!root) return;
+    if (isLatestBrowserBlock && isBrowserExpanded && !terminatedSnapshot && slot) {
+      if (root.parentElement !== slot) {
+        slot.appendChild(root);
+        window.dispatchEvent(new Event('oneagent-browser-slot-change'));
+      }
+    } else {
+      const hidden = document.getElementById('oneagent-browser-hidden');
+      if (hidden && root.parentElement !== hidden) {
+        hidden.appendChild(root);
+        window.dispatchEvent(new Event('oneagent-browser-slot-change'));
+      }
+    }
+    return () => {
+      // This tools block unmounting (newer browser block took over, message
+      // deleted…) — never orphan the session node inside removed DOM.
+      const r = document.getElementById('oneagent-browser-root');
+      const hidden = document.getElementById('oneagent-browser-hidden');
+      if (r && hidden && slot && r.parentElement === slot) {
+        hidden.appendChild(r);
+        window.dispatchEvent(new Event('oneagent-browser-slot-change'));
+      }
+    };
+  }, [isLatestBrowserBlock, isBrowserExpanded, terminatedSnapshot]);
 
   return (
     <div className="w-full group relative">
@@ -283,14 +316,10 @@ const UnifiedToolsBlock = ({ activity, isGenerating, msgIsGenerating, activityFe
 
                 {isBrowserExpanded && (
                   <div className="border-t border-white/5 transition-all duration-300 ease-in-out origin-top overflow-hidden opacity-100 scale-y-100 bg-black/40 relative">
-                    {/* Terminated session: webview is fully unmounted — only
-                        the frozen grayscale snapshot shows. The next browser_*
-                        tool call clears the snapshot, remounting a fresh webview. */}
-                    {terminatedSnapshot ? (
-                      <div className="w-full h-[340px] bg-black/60" />
-                    ) : (
-                      <AgentBrowser />
-                    )}
+                    {/* The persistent webview node is adopted into this slot
+                        (see effect above). Terminated session: node stays
+                        hidden off-screen; only the grayscale snapshot shows. */}
+                    <div ref={browserSlotRef} className="w-full h-[340px]" />
                     {terminatedSnapshot && (
                       <img
                         src={terminatedSnapshot}
@@ -1248,7 +1277,10 @@ const ChatArea = () => {
         activities.push({ type: 'user', messageId: msg.id, messageIdx: msgIdx, data: msg });
       } else if (msg.role === 'assistant') {
         const tcs = msg.toolCalls || [];
-        if (msg.thinking || (msg.isGenerating && !msg.isCallingTool && !msg.content)) {
+        // Show the thinking container from the moment generation starts —
+        // waiting for the first thinking chunk left a dead gap (and sometimes
+        // no container at all) when a tool call was flagged early.
+        if (msg.thinking || (msg.isGenerating && !msg.content)) {
           const isLivePart = !!msg.isGenerating && !msg.isCallingTool && !msg.content;
           activities.push({ type: 'thinking', messageId: msg.id, messageIdx: msgIdx, partIdx: 0, text: msg.thinking || '', live: isLivePart, data: msg });
         }
