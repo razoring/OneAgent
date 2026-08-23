@@ -1,65 +1,99 @@
 import React from 'react';
-import { ShieldAlert, Check, X } from 'lucide-react';
+import { ShieldAlert, HelpCircle, ChevronLeft, ChevronRight } from 'lucide-react';
+import type { UserPrompt } from '../utils/userPromptStore';
 
-export interface PendingApproval {
-  id: string;
-  toolName: string;
-  summary: string;
-  onDecision: (approved: boolean) => void;
-}
-
-const APPROVAL_LABELS: Record<string, string> = {
-  run_command: 'Run shell command',
-  delete_file: 'Delete file',
-  switch_model: 'Switch agent model',
-  update_settings: 'Change agent parameters',
-  desktop_click: 'Control your mouse',
-  desktop_drag: 'Control your mouse',
-  desktop_type: 'Type on your keyboard',
-  desktop_hotkey: 'Press system hotkey'
-};
-
-interface ApprovalCardProps {
-  approval: PendingApproval;
-}
-
-const ApprovalCard: React.FC<ApprovalCardProps> = ({ approval }) => {
-  const label = APPROVAL_LABELS[approval.toolName] || `Allow ${approval.toolName}`;
+// Inline permission/question handler rendered inside the chat input panel.
+// Replaces the normal input while active; the chat send button submits.
+const InlineUserPrompt: React.FC<{
+  prompt: UserPrompt;
+  index: number;
+  total: number;
+  selectedIdx: number | null;   // null = custom response selected
+  customSelected: boolean;
+  onSelectOption: (i: number) => void;
+  onToggleCustom: () => void;
+  onPrev: () => void;
+  onNext: () => void;
+}> = ({ prompt, index, total, selectedIdx, customSelected, onSelectOption, onToggleCustom, onPrev, onNext }) => {
+  const Icon = prompt.kind === 'approval' ? ShieldAlert : HelpCircle;
 
   return (
-    <div className="menu-panel rounded-xl w-80 shadow-2xl border border-white/10 overflow-hidden animate-[fadeIn_0.15s_ease-out]">
-      <div className="flex items-center gap-2.5 px-4 pt-3.5 pb-2">
-        <span className="flex items-center justify-center w-7 h-7 rounded-full bg-amber-500/15 text-amber-400 shrink-0">
-          <ShieldAlert size={15} />
-        </span>
-        <span className="text-sm font-medium text-white">{label}</span>
-      </div>
+    <div className="rounded-2xl bg-white/[0.03] border border-white/10 overflow-hidden">
+      <div className="p-3 flex flex-col gap-2.5">
+        {/* Header with queue navigation */}
+        <div className="flex items-center gap-2">
+          <Icon size={14} className="text-textSecondary shrink-0" />
+          <span className="text-[13px] font-medium text-white truncate">{prompt.title}</span>
+          <span className="flex-1" />
+          <button
+            onClick={onPrev}
+            disabled={index === 0}
+            className="p-0.5 text-textSecondary hover:text-white transition-colors disabled:opacity-30"
+            title="Previous prompt"
+          >
+            <ChevronLeft size={13} />
+          </button>
+          <span className="text-[10px] font-mono text-textSecondary">{index + 1} of {total}</span>
+          <button
+            onClick={onNext}
+            disabled={index >= total - 1}
+            className="p-0.5 text-textSecondary hover:text-white transition-colors disabled:opacity-30"
+            title="Next prompt"
+          >
+            <ChevronRight size={13} />
+          </button>
+        </div>
 
-      {approval.summary && (
-        <pre className="mx-4 mb-1 px-3 py-2 rounded-lg bg-black/30 text-xs font-mono text-gray-200 whitespace-pre-wrap break-all max-h-28 overflow-y-auto select-text">
-          {approval.summary}
-        </pre>
-      )}
+        {prompt.detail && (
+          <pre className="px-3 py-2 rounded-lg bg-black/30 text-xs font-mono text-gray-200 whitespace-pre-wrap break-all max-h-28 overflow-y-auto select-text">
+            {prompt.detail}
+          </pre>
+        )}
 
-      <div className="px-3 py-3 flex justify-end gap-2">
-        <button
-          onClick={() => approval.onDecision(false)}
-          className="flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg text-sm font-medium text-textSecondary hover:bg-white/10 hover:text-white transition-colors"
-        >
-          <X size={14} />
-          Deny
-        </button>
-        <button
-          onClick={() => approval.onDecision(true)}
-          autoFocus
-          className="flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg text-sm font-medium bg-accent text-white hover:bg-accentHover transition-colors shadow-lg shadow-accent/20"
-        >
-          <Check size={14} />
-          Approve
-        </button>
+        {/* Choices — the model decides how many; custom is always available */}
+        <div className="flex flex-col gap-1">
+          {prompt.options.map((opt, i) => {
+            const selected = !customSelected && selectedIdx === i;
+            return (
+              <button
+                key={`${prompt.id}-${i}`}
+                onClick={() => onSelectOption(i)}
+                className={`flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm text-left transition-colors ${
+                  selected
+                    ? 'bg-white/10 text-white'
+                    : 'text-textSecondary hover:bg-white/5 hover:text-gray-200'
+                }`}
+              >
+                <span className={`w-3.5 h-3.5 shrink-0 rounded-full border flex items-center justify-center ${
+                  selected ? 'border-accent' : 'border-white/25'
+                }`}>
+                  {selected && <span className="w-1.5 h-1.5 rounded-full bg-accent" />}
+                </span>
+                {opt}
+              </button>
+            );
+          })}
+
+          {/* Custom answer — selecting reveals the main editor below */}
+          <button
+            onClick={onToggleCustom}
+            className={`flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm text-left transition-colors ${
+              customSelected
+                ? 'bg-white/10 text-white'
+                : 'text-textSecondary hover:bg-white/5 hover:text-gray-200'
+            }`}
+          >
+            <span className={`w-3.5 h-3.5 shrink-0 rounded-full border flex items-center justify-center ${
+              customSelected ? 'border-accent' : 'border-white/25'
+            }`}>
+              {customSelected && <span className="w-1.5 h-1.5 rounded-full bg-accent" />}
+            </span>
+            Write a custom response
+          </button>
+        </div>
       </div>
     </div>
   );
 };
 
-export default ApprovalCard;
+export default InlineUserPrompt;

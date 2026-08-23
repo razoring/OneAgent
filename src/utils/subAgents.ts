@@ -33,7 +33,7 @@ export interface SubAgentState {
 
 // Host-provided capabilities routed from the orchestrator's ChatArea.
 export interface SubAgentHost {
-  requestApproval: (toolName: string, summary: string) => Promise<boolean>;
+  requestApproval: (toolName: string, summary: string) => Promise<{ approved: boolean; message?: string }>;
   getModel: () => LLMModel | null;
   signal?: AbortSignal;
 }
@@ -285,3 +285,4 @@ const agentParamsOf = (agent: SubAgentState): SubAgentSpec => ({
   model: agent.model,
   params: agent.params
 });
+

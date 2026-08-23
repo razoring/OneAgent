@@ -247,7 +247,15 @@ export const SYSTEM_TOOLS = [
     {
       agent_ids: { type: 'array', items: { type: 'string' }, description: 'Specific ids; omit for ALL.' },
       wait_ms: num('Block up to this many ms until done (default 0 = snapshot only).')
-    })
+    }),
+
+  // ── User interaction ─────────────────────────────────────────────────────
+  fn('ask_user', 'Ask the user a question or request permission. BLOCKS until the user responds — you cannot act until then. The user sees your question with your options as multiple-choice buttons plus a free-text "custom response" field (always available, not listed in options). Use for: permission to continue, choices between approaches, checkpoints where the user must do something first (e.g. solve a captcha — offer an option like "I\'m done"). Multi-step forms: batch SEVERAL ask_user calls in ONE turn (they queue up as 1-of-N with prev/next navigation); use separate sequential calls instead when later questions depend on earlier answers.',
+    {
+      question: str('The question or permission request, shown as the prompt title.'),
+      detail: str('Optional technical detail shown in a mono block (command, URL, code snippet…).'),
+      options: { type: 'array', items: { type: 'string' }, description: '1-8 short answer options the user can click.' }
+    }, ['question'])
 ];
 
 // Tools exposed to the model. search_web is only included when a search

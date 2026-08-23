@@ -31,6 +31,7 @@ import {
   LLMModel
 } from './llm';
 import { TOOL_TIERS } from './tools';
+import { userPromptStore } from './userPromptStore';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -49,7 +50,7 @@ export interface NamedToolResult extends ToolResult {
 export interface ToolContext {
   getModel: () => LLMModel | null;
   setModel: (model: LLMModel) => void;
-  requestApproval: (toolName: string, summary: string) => Promise<boolean>;
+  requestApproval: (toolName: string, summary: string) => Promise<{ approved: boolean; message?: string }>;
   spawnAgent: (spec: any) => string;
   getAgents: (ids?: string[]) => any[];
   waitForAgents: (ids: string[] | undefined, ms: number) => Promise<any[]>;
@@ -416,7 +417,26 @@ const HANDLERS: Record<string, Handler> = {
   },
 
   // Legacy alias for old conversation replays
-  browser_keystrokes: async (args) => ok(await browserKeystrokesLegacyRouter(args))
+  browser_keystrokes: async (args) => ok(await browserKeystrokesLegacyRouter(args)),
+
+  // Blocks until the user answers the inline prompt in the chat input.
+  ask_user: async (args) => {
+    const question = String(p(args, 'question', 'Question') || '').trim();
+    if (!question) throw new Error("ask_user requires 'question'");
+    const rawOpts = p(args, 'options', 'Options');
+    const options = Array.isArray(rawOpts)
+      ? rawOpts.map((o: any) => String(o).trim()).filter(Boolean).slice(0, 8)
+      : [];
+    const detail = p(args, 'detail', 'Detail');
+    const response = await userPromptStore.enqueue({
+      kind: 'ask',
+      title: question,
+      detail: detail ? String(detail) : undefined,
+      options
+    });
+    if (response === null) return ok('No response — the prompt was dismissed. Continue without waiting or try a different approach.');
+    return ok(`USER RESPONSE: ${response}`);
+  },
 };
 
 // ─── Execution engine ────────────────────────────────────────────────────────
@@ -429,13 +449,16 @@ const runOne = async (raw: string, ctx: ToolContext): Promise<NamedToolResult> =
 
     if (TOOL_TIERS[name] === 'confirm') {
       let approved = false;
+      let denyMessage = '';
       try {
-        approved = await ctx.requestApproval(name, summarizeArgs(name, args));
+        const decision = await ctx.requestApproval(name, summarizeArgs(name, args));
+        approved = decision.approved;
+        denyMessage = decision.message || '';
       } catch {}
       if (!approved || ctx.signal?.aborted) {
         return {
           toolName: name,
-          result: `USER DENIED PERMISSION for ${name}. Do not silently retry the same call — adapt your approach or explain to the user.`,
+          result: `USER DENIED PERMISSION for ${name}.${denyMessage ? ` User says: "${denyMessage}" —` : ''} Do not silently retry the same call — adapt your approach or explain to the user.`,
           error: true
         };
       }

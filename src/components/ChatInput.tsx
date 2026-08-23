@@ -19,6 +19,8 @@ const PROVIDER_ICONS: Record<string, string> = {
 import { LLMModel, fetchModels, ModelSettings, getModelSettings, primeModel, flushModel } from '../utils/llm';
 import DEFAULT_SYSTEM_PROMPT from '../utils/systemPrompt.md?raw';
 import { modelParamsStore } from '../utils/modelParamsStore';
+import InlineUserPrompt from './ApprovalCard';
+import { userPromptStore } from '../utils/userPromptStore';
 
 const ModelItem = ({ model, isSelected, onClick }: { model: any, isSelected: boolean, onClick: () => void }) => (
   <button
@@ -187,6 +189,36 @@ const ChatInput: React.FC<ChatInputProps> = ({ onSend, onStop, disabled, editing
   const [isLoadingModels, setIsLoadingModels] = useState(false);
 
   const [isAttachMenuOpen, setIsAttachMenuOpen] = useState(false);
+
+  // Inline permission/question prompt (real): driven by the userPromptStore
+  // queue — tools block until the user answers here.
+  const [prompts, setPrompts] = useState(userPromptStore.get());
+  useEffect(() => userPromptStore.subscribe(setPrompts), []);
+  const inlinePromptOpen = prompts.length > 0;
+  const [promptIndex, setPromptIndex] = useState(0);
+  const [selectedIdx, setSelectedIdx] = useState<number | null>(0);
+  const [customSelected, setCustomSelected] = useState(false);
+  const currentPrompt = prompts[Math.min(promptIndex, Math.max(0, prompts.length - 1))];
+
+  // Keep selection state sane as the queue changes.
+  useEffect(() => {
+    setPromptIndex(i => Math.min(i, Math.max(0, prompts.length - 1)));
+    setSelectedIdx(0);
+    if (!inlinePromptOpen) setCustomSelected(false);
+  }, [prompts.length, inlinePromptOpen]);
+
+  const submitPromptResponse = () => {
+    if (!currentPrompt) return;
+    const response = customSelected
+      ? value.trim()
+      : (selectedIdx !== null ? currentPrompt.options[selectedIdx] : undefined);
+    if (!response) return;
+    userPromptStore.answer(promptIndex, response);
+    setValue('');
+    setCustomSelected(false);
+    setSelectedIdx(null);
+  };
+
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
   const [, setModelSettings] = useState<ModelSettings>(() => getModelSettings());
   const [attachments, setAttachments] = useState<any[]>([]);
@@ -452,6 +484,11 @@ const ChatInput: React.FC<ChatInputProps> = ({ onSend, onStop, disabled, editing
     {
       key: 'Enter',
       run: () => {
+        if (inlinePromptOpen) {
+          // While a prompt is open, Enter submits the prompt response.
+          if (!(customSelected && !value.trim())) submitPromptResponse();
+          return true;
+        }
         if (isMentionMenuOpenRef.current && filteredAttachmentsRef.current.length > 0) {
           insertMention(filteredAttachmentsRef.current[focusedMentionIndexRef.current]);
           return true;
@@ -464,6 +501,10 @@ const ChatInput: React.FC<ChatInputProps> = ({ onSend, onStop, disabled, editing
       shift: () => false // allow newline
     }
   ]);
+
+  // Hoisted so the hook count stays constant even when the editor subtree is
+  // conditionally hidden (inline prompt mode).
+  const mentionPlugin = useMemo(() => createMentionPlugin(() => allAttachmentsRef.current), []);
 
   const handleUpdate = useCallback((viewUpdate: ViewUpdate) => {
     if (viewUpdate.docChanged) {
@@ -748,8 +789,28 @@ const ChatInput: React.FC<ChatInputProps> = ({ onSend, onStop, disabled, editing
 
 
 
+      {/* Inline permission/question prompt — replaces the normal input while active */}
+      {inlinePromptOpen && currentPrompt && (
+        <InlineUserPrompt
+          prompt={currentPrompt}
+          index={Math.min(promptIndex, prompts.length - 1)}
+          total={prompts.length}
+          onPrev={() => setPromptIndex(i => Math.max(0, i - 1))}
+          onNext={() => setPromptIndex(i => Math.min(prompts.length - 1, i + 1))}
+          selectedIdx={selectedIdx}
+          customSelected={customSelected}
+          onSelectOption={(i: number) => { setSelectedIdx(i); setCustomSelected(false); }}
+          onToggleCustom={() => {
+            const next = !customSelected;
+            setCustomSelected(next);
+            if (next) setSelectedIdx(null);
+            else setSelectedIdx(0);
+          }}
+        />
+      )}
+
       {/* Attachments Preview Row */}
-      {attachments.length > 0 && (
+      {!inlinePromptOpen && attachments.length > 0 && (
         <div className="flex flex-col gap-3">
           <div className="flex items-center gap-3 flex-wrap">
             {attachments.map(att => (
@@ -809,19 +870,21 @@ const ChatInput: React.FC<ChatInputProps> = ({ onSend, onStop, disabled, editing
         </div>
       )}
 
-      {/* CodeMirror Input Area */}
+      {/* CodeMirror Input Area — hidden while a prompt is open, unless the
+          custom-response choice is selected */}
+      {(!inlinePromptOpen || customSelected) && (
       <div className="w-full min-h-[44px] max-h-[240px] overflow-y-auto px-2 py-1 relative z-10">
         <CodeMirror
           ref={cmRef}
           value={value}
           theme="dark"
-          placeholder="Ask anything, @ to mention"
+          placeholder={inlinePromptOpen ? 'Write a custom response' : 'Ask anything, @ to mention'}
           extensions={[
             markdown(),
             editorTheme,
             customKeymap,
             EditorView.lineWrapping,
-            useMemo(() => createMentionPlugin(() => allAttachmentsRef.current), [])
+            mentionPlugin
           ]}
           onUpdate={handleUpdate}
           basicSetup={{
@@ -842,7 +905,30 @@ const ChatInput: React.FC<ChatInputProps> = ({ onSend, onStop, disabled, editing
           className="w-full h-full !outline-none"
         />
       </div>
+      )}
 
+      {/* Prompt mode: reused send button — Check while more prompts follow,
+          ArrowUp on the last one */}
+      {inlinePromptOpen ? (
+        <div className="flex items-center justify-end mt-1 px-1">
+          <button
+            onClick={submitPromptResponse}
+            disabled={customSelected && !value.trim()}
+            className={`p-2 rounded-full transition-colors ${
+              customSelected && !value.trim()
+                ? 'bg-white/20 text-white/40'
+                : 'bg-white text-black hover:bg-gray-200 shadow-lg'
+            }`}
+            title={promptIndex < prompts.length - 1 ? 'Next prompt' : 'Submit response'}
+          >
+            {promptIndex < prompts.length - 1 ? (
+              <Check size={20} strokeWidth={3} />
+            ) : (
+              <ArrowUp size={20} strokeWidth={3} />
+            )}
+          </button>
+        </div>
+      ) : (<>
       {/* Bottom Toolbar Row */}
       <div className="flex items-center justify-between mt-1 px-1 gap-2 w-full">
 
@@ -1033,6 +1119,7 @@ const ChatInput: React.FC<ChatInputProps> = ({ onSend, onStop, disabled, editing
         </div>
 
       </div>
+      </>)}
     </div>
   );
 };

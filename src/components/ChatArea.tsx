@@ -19,7 +19,7 @@ import { getSystemTools } from '../utils/tools';
 import { agentBrowserStore } from '../utils/agentBrowserStore';
 import { terminateBrowserSession } from '../utils/browserTools';
 import { transcriptStore } from '../utils/transcriptStore';
-import ApprovalCard, { PendingApproval } from './ApprovalCard';
+import { userPromptStore } from '../utils/userPromptStore';
 
 const MarkdownComponents: any = {
   p: ({node, ...props}: any) => <p className="mb-2 last:mb-0" {...props} />,
@@ -429,33 +429,40 @@ const ChatArea = ({ onToggleSettings }: { onToggleSettings?: () => void }) => {
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
 
-  // Permission-gated tool approvals (self-modification, shell, deletion, desktop input)
-  const [pendingApprovals, setPendingApprovals] = useState<PendingApproval[]>([]);
+  // Permission-gated tool approvals + agent questions — rendered inline in the
+  // chat input via userPromptStore (no floating popups).
+  const APPROVAL_LABELS: Record<string, string> = {
+    run_command: 'Run shell command',
+    delete_file: 'Delete file',
+    switch_model: 'Switch agent model',
+    update_settings: 'Change agent parameters',
+    desktop_click: 'Control your mouse',
+    desktop_drag: 'Control your mouse',
+    desktop_type: 'Type on your keyboard',
+    desktop_hotkey: 'Press system hotkey'
+  };
+
+  const requestApproval = async (toolName: string, summary: string): Promise<{ approved: boolean; message?: string }> => {
+    const label = APPROVAL_LABELS[toolName] || `Allow ${toolName}`;
+    const response = await userPromptStore.enqueue({
+      kind: 'approval',
+      title: label,
+      detail: summary || undefined,
+      options: ['Approve once', 'Approve always', 'Deny']
+    });
+    if (response && /^Approve/i.test(response)) return { approved: true };
+    // "Deny" or a custom explanation counts as denial; custom text is passed
+    // back to the model so it understands WHY.
+    return { approved: false, message: response && !/^Deny$/i.test(response) ? response : undefined };
+  };
   // The model the agent loop should use — switchable mid-conversation by the agent itself.
   const activeModelRef = useRef<LLMModel | null>(null);
   useEffect(() => {
     activeModelRef.current = currentModel || lastUsedModel;
   }, [currentModel, lastUsedModel]);
 
-  const requestApproval = (toolName: string, summary: string): Promise<boolean> =>
-    new Promise<boolean>((resolve) => {
-      const id = Math.random().toString(36).substring(7);
-      setPendingApprovals(prev => [...prev, {
-        id,
-        toolName,
-        summary,
-        onDecision: (approved: boolean) => {
-          setPendingApprovals(prev2 => prev2.filter(p => p.id !== id));
-          resolve(approved);
-        }
-      }]);
-    });
-
-  const flushPendingApprovals = (approved: boolean) => {
-    setPendingApprovals(prev => {
-      prev.forEach(p => p.onDecision(approved));
-      return [];
-    });
+  const flushPendingApprovals = () => {
+    userPromptStore.flush();
   };
 
   const switchActiveModel = (model: LLMModel) => {
@@ -653,7 +660,7 @@ const ChatArea = ({ onToggleSettings }: { onToggleSettings?: () => void }) => {
       abortControllerRef.current.abort();
       abortControllerRef.current = null;
     }
-    flushPendingApprovals(false);
+    flushPendingApprovals();
     setIsGenerating(false);
     finalizeGeneratingMessages();
   };
@@ -1405,8 +1412,8 @@ const ChatArea = ({ onToggleSettings }: { onToggleSettings?: () => void }) => {
       <div ref={scrollContainerRef} onScroll={handleScroll} className="flex-1 flex flex-col items-center overflow-y-auto w-full relative">
         
         {activityFeed.activities.length === 0 ? (
-          <div className="flex-1 flex flex-col items-center justify-center w-full px-4">
-            <div className="flex flex-col items-center max-w-3xl w-full mt-10">
+          <div className="flex-1 flex flex-col items-center justify-center w-full px-4 sm:px-6 lg:px-8">
+            <div className="flex flex-col items-center chat-measure mt-10">
               <div className="w-16 h-16 bg-white rounded-full flex items-center justify-center mb-6">
                 <img src="https://ollama.com/public/icon-64x64.png" alt="Ollama" className="w-10 h-10" onError={(e) => e.currentTarget.style.display = 'none'} />
               </div>
@@ -1414,7 +1421,7 @@ const ChatArea = ({ onToggleSettings }: { onToggleSettings?: () => void }) => {
             </div>
           </div>
         ) : (
-          <div className="w-full max-w-3xl flex flex-col gap-4 py-6 px-4">
+          <div className="chat-measure flex flex-col gap-4 py-6 px-4 sm:px-6 lg:px-8 text-sm xl:text-base">
             {activityFeed.activities.map((activity, idx) => {
 
               if (activity.type === 'user') {
@@ -1540,15 +1547,6 @@ return null;
         )}
       </div>
 
-      {/* Tool permission approvals */}
-      {pendingApprovals.length > 0 && (
-        <div className="fixed bottom-6 right-6 z-[400] flex flex-col gap-3 items-end">
-          {pendingApprovals.map(pa => (
-            <ApprovalCard key={pa.id} approval={pa} />
-          ))}
-        </div>
-      )}
-
       {/* Selection Pop-up */}
       {selectionContext && !commentInputContext && (
         <div 
@@ -1668,8 +1666,8 @@ return null;
       )}
 
       {/* Input Area */}
-            <div className="w-full flex justify-center p-4 bg-gradient-to-t from-surface via-surface to-transparent pt-10">
-        <div className="max-w-3xl w-full">
+            <div className="w-full flex justify-center p-4 sm:px-6 lg:px-8 bg-gradient-to-t from-surface via-surface to-transparent pt-10">
+        <div className="chat-measure">
           <ChatInput 
             onSend={handleSendMessage} 
             onStop={handleStop} 

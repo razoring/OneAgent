@@ -35,7 +35,7 @@ const Sidebar = () => {
       </div>
 
       {/* Bottom Section */}
-      <div className="p-4 border-t border-white/10 space-y-1.5">
+      <div className="px-4 pb-4 space-y-1.5">
         <button className="flex items-center gap-3 w-full hover:bg-surfaceElevated transition-colors rounded-2xl p-3 text-left text-textSecondary">
           <LayoutGrid size={18} />
           Models
@@ -57,3 +57,5 @@ const Sidebar = () => {
 };
 
 export default Sidebar;
+
+
