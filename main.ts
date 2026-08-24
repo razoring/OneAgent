@@ -1,7 +1,16 @@
-import { app, BrowserWindow, ipcMain, nativeImage, shell, desktopCapturer, screen, webContents } from 'electron';
+import { app, BrowserWindow, ipcMain, nativeImage, shell, desktopCapturer, screen, webContents, dialog, protocol, net } from 'electron';
 import * as path from 'path';
 import * as fs from 'fs';
+import * as crypto from 'crypto';
+import { pathToFileURL } from 'url';
+import AdmZip from 'adm-zip';
 import * as officeParser from 'officeparser';
+
+// chat-asset:// must be registered as privileged before app ready so the
+// renderer can load local images through it over both http (dev) and file (prod).
+protocol.registerSchemesAsPrivileged([
+  { scheme: 'chat-asset', privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true } }
+]);
 
 
 const createWindow = () => {
@@ -34,9 +43,11 @@ const createWindow = () => {
 
   mainWindow.setMenu(null);
 
-  // Log renderer console messages to the terminal
+  // Log renderer console messages to the terminal (with origin file:line so
+  // things like React's "Maximum update depth exceeded" are traceable).
   mainWindow.webContents.on('console-message', (event, level, message, line, sourceId) => {
-    console.log(`[Renderer Console]: ${message} (line ${line})`);
+    const file = sourceId ? sourceId.split('/').pop() : '?';
+    console.log(`[Renderer Console]: ${message} (${file}:${line})`);
   });
 
   // Load the React app
@@ -692,7 +703,9 @@ ipcMain.handle('browser-capture', async (event, webContentsId) => {
         try {
           image = await wc.capturePage();
         } catch {
-          const { nativeImage } = require('electron');
+          // nativeImage is imported at module scope — main.ts is ESM and has
+          // no `require` (a bare require here threw ReferenceError and killed
+          // every first observation of a freshly created agent tab).
           image = nativeImage.createEmpty();
         }
       } else {
@@ -983,9 +996,21 @@ ipcMain.handle('provider-status', async (event, { providers }) => {
     try {
       if (p.id === 'ollama') {
         const base = p.endpoint.replace(/\/v1\/?$/, '');
-        const res = await fetch(`${base}/api/ps`);
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const data = await res.json();
+        const [psRes, tagsRes] = await Promise.all([
+          fetch(`${base}/api/ps`),
+          fetch(`${base}/api/tags`).catch(() => null)
+        ]);
+        if (!psRes.ok) throw new Error(`HTTP ${psRes.status}`);
+        const data = await psRes.json();
+        // On-disk sizes for EVERY installed model — lets the renderer estimate
+        // the VRAM cost of models that are not currently loaded.
+        let available: any[] = [];
+        if (tagsRes && tagsRes.ok) {
+          try {
+            const tags = await tagsRes.json();
+            available = (tags.models || []).map((m: any) => ({ id: m.name, sizeBytes: m.size }));
+          } catch { /* tags are best-effort */ }
+        }
         status[p.id] = {
           kind: 'vram',
           summary: `${data.models?.length || 0} model(s) in memory`,
@@ -994,7 +1019,8 @@ ipcMain.handle('provider-status', async (event, { providers }) => {
             sizeBytes: m.size,
             vramBytes: m.size_vram,
             expiresAt: m.expires_at
-          }))
+          })),
+          available
         };
       } else if (p.id === 'lmstudio') {
         const base = p.endpoint.replace(/\/v1\/?$/, '');
@@ -1040,10 +1066,337 @@ ipcMain.handle('vram-usage', async () => {
   }
 });
 
+// ─── Chat history persistence ────────────────────────────────────────────────
+// Layout under <userData>/chats/:
+//   index.json                    — metadata array (id, parentId, title, …)
+//   <chatId>/messages.json        — { version, meta, messages }
+//   <chatId>/assets/<hash>.<ext>  — images/screenshots extracted from data URLs
+// Chats are flat records linked by parentId; deleting a parent cascades.
+
+const chatsDir = () => path.join(app.getPath('userData'), 'chats');
+
+const chatDirOf = (chatId: string) => {
+  if (!/^[A-Za-z0-9_-]{4,64}$/.test(chatId)) throw new Error('Invalid chat id');
+  return path.join(chatsDir(), chatId);
+};
+
+const assetsDirOf = (chatId: string) => path.join(chatDirOf(chatId), 'assets');
+const messagesFileOf = (chatId: string) => path.join(chatDirOf(chatId), 'messages.json');
+const indexFile = () => path.join(chatsDir(), 'index.json');
+
+// Serialize all storage mutations so concurrent saves never interleave.
+let storeQueue: Promise<any> = Promise.resolve();
+const serialize = <T,>(fn: () => T | Promise<T>): Promise<T> => {
+  const run = storeQueue.then(fn as any, fn as any) as Promise<T>;
+  storeQueue = run.catch(() => {});
+  return run;
+};
+
+const readJson = async (filePath: string): Promise<any> => {
+  try {
+    return JSON.parse(await fs.promises.readFile(filePath, 'utf8'));
+  } catch {
+    return null;
+  }
+};
+
+const writeJsonAtomic = async (filePath: string, data: any) => {
+  await fs.promises.mkdir(path.dirname(filePath), { recursive: true });
+  const tmp = `${filePath}.tmp-${process.pid}-${Date.now()}`;
+  await fs.promises.writeFile(tmp, JSON.stringify(data));
+  await fs.promises.rename(tmp, filePath);
+};
+
+// Rebuild the index by scanning chat folders (missing/corrupt index fallback).
+const rebuildIndex = async (): Promise<any[]> => {
+  await fs.promises.mkdir(chatsDir(), { recursive: true });
+  const entries = await fs.promises.readdir(chatsDir(), { withFileTypes: true });
+  const metas: any[] = [];
+  for (const e of entries) {
+    if (!e.isDirectory()) continue;
+    const file = await readJson(messagesFileOf(e.name));
+    if (file?.meta?.id === e.name) metas.push(file.meta);
+  }
+  await writeJsonAtomic(indexFile(), metas);
+  return metas;
+};
+
+const loadIndex = async (): Promise<any[]> => {
+  const idx = await readJson(indexFile());
+  if (Array.isArray(idx)) return idx;
+  return rebuildIndex();
+};
+
+const saveIndex = (metas: any[]) => writeJsonAtomic(indexFile(), metas);
+
+// Recursively walk a message payload, extracting every inline data URL into
+// an asset file. Returns a deep copy with `chat-asset://<chatId>/<file>` refs.
+const DATA_URL_RE = /^data:([\w+.-]+\/[\w+.-]+)?(;base64)?,([\s\S]+)$/;
+const extractAssets = async (value: any, chatId: string, depth = 0): Promise<any> => {
+  if (depth > 12) return value;
+  if (typeof value === 'string') {
+    const m = DATA_URL_RE.exec(value);
+    // Only hoist substantial binary payloads; tiny data URLs stay inline.
+    if (!m || !m[2] || value.length < 4096) return value;
+    const extMap: Record<string, string> = {
+      'image/png': 'png', 'image/jpeg': 'jpg', 'image/webp': 'webp',
+      'image/gif': 'gif', 'image/svg+xml': 'svg'
+    };
+    const mime = m[1] || 'application/octet-stream';
+    const ext = extMap[mime] || 'bin';
+    let buf: Buffer;
+    try { buf = Buffer.from(m[3], 'base64'); } catch { return value; }
+    if (buf.length === 0) return value;
+    const name = `${crypto.createHash('sha1').update(buf).digest('hex')}.${ext}`;
+    const filePath = path.join(assetsDirOf(chatId), name);
+    try {
+      await fs.promises.mkdir(assetsDirOf(chatId), { recursive: true });
+      await fs.promises.writeFile(filePath, buf);
+    } catch {
+      return value; // keep the inline URL if the disk write fails
+    }
+    return `chat-asset://${chatId}/${name}`;
+  }
+  if (Array.isArray(value)) {
+    const out = new Array(value.length);
+    for (let i = 0; i < value.length; i++) out[i] = await extractAssets(value[i], chatId, depth + 1);
+    return out;
+  }
+  if (value && typeof value === 'object') {
+    const out: any = {};
+    for (const k of Object.keys(value)) out[k] = await extractAssets(value[k], chatId, depth + 1);
+    return out;
+  }
+  return value;
+};
+
+// All descendant ids of a chat (not including itself).
+const descendantIds = async (rootId: string): Promise<string[]> => {
+  const idx = await loadIndex();
+  const out: string[] = [];
+  const walk = (parentId: string) => {
+    for (const m of idx) {
+      if (m.parentId === parentId && !out.includes(m.id)) {
+        out.push(m.id);
+        walk(m.id);
+      }
+    }
+  };
+  walk(rootId);
+  return out;
+};
+
+const deleteChatTree = async (rootId: string): Promise<void> => {
+  const ids = [rootId, ...(await descendantIds(rootId))];
+  for (const id of ids) {
+    await fs.promises.rm(chatDirOf(id), { recursive: true, force: true });
+  }
+  const idx = (await loadIndex()).filter((m: any) => !ids.includes(m.id));
+  await saveIndex(idx);
+};
+
+ipcMain.handle('chats-list', async () => {
+  try {
+    return { success: true, chats: await serialize(loadIndex) };
+  } catch (e: any) {
+    return { success: false, error: String(e?.message || e), chats: [] };
+  }
+});
+
+ipcMain.handle('chats-load', async (_e, chatId: string) => {
+  try {
+    const file = await serialize(() => readJson(messagesFileOf(chatId)));
+    if (!file) throw new Error('Chat not found');
+    return { success: true, file };
+  } catch (e: any) {
+    return { success: false, error: String(e?.message || e) };
+  }
+});
+
+ipcMain.handle('chats-save', async (_e, chatId: string, payload: { meta?: any; messages?: any[] }) => {
+  try {
+    return {
+      success: true,
+      file: await serialize(async () => {
+        // Refuse to resurrect a chat that was deleted while an agent was
+        // still streaming into it.
+        const idxBefore = await loadIndex();
+        const known = idxBefore.some((m: any) => m.id === chatId);
+        const existing = await readJson(messagesFileOf(chatId));
+        if (!known && !existing) throw new Error('Chat no longer exists');
+        const now = Date.now();
+        const meta = {
+          ...existing?.meta,
+          ...(payload.meta || {}),
+          id: chatId,
+          updatedAt: now
+        };
+        const messages = await extractAssets(payload.messages ?? existing?.messages ?? [], chatId);
+        const file = { version: 1 as const, meta, messages };
+        await writeJsonAtomic(messagesFileOf(chatId), file);
+        const idx = await loadIndex();
+        const i = idx.findIndex((m: any) => m.id === chatId);
+        if (i >= 0) idx[i] = meta; else idx.push(meta);
+        await saveIndex(idx);
+        return file;
+      })
+    };
+  } catch (e: any) {
+    return { success: false, error: String(e?.message || e) };
+  }
+});
+
+ipcMain.handle('chats-create', async (_e, spec: { parentId?: string | null; title?: string; agentId?: string }) => {
+  try {
+    const meta = await serialize(async () => {
+      // Generate an id that is unique within the store.
+      const gen = () => 'chat-' + crypto.randomBytes(6).toString('hex');
+      let id = gen();
+      while (fs.existsSync(chatDirOf(id))) id = gen();
+      const now = Date.now();
+      const m: any = {
+        id,
+        parentId: spec.parentId ?? null,
+        title: spec.title || 'New Chat',
+        createdAt: now,
+        updatedAt: now,
+        ...(spec.agentId ? { agentId: spec.agentId } : {})
+      };
+      await writeJsonAtomic(messagesFileOf(id), { version: 1, meta: m, messages: [] });
+      const idx = await loadIndex();
+      idx.push(m);
+      await saveIndex(idx);
+      return m;
+    });
+    return { success: true, meta };
+  } catch (e: any) {
+    return { success: false, error: String(e?.message || e) };
+  }
+});
+
+ipcMain.handle('chats-rename', async (_e, chatId: string, title: string) => {
+  try {
+    const clean = String(title || '').trim().slice(0, 120) || 'Untitled';
+    const meta = await serialize(async () => {
+      const idx = await loadIndex();
+      const entry = idx.find((m: any) => m.id === chatId);
+      if (!entry) throw new Error('Chat not found');
+      entry.title = clean;
+      entry.updatedAt = Date.now();
+      await saveIndex(idx);
+      return entry;
+    });
+    // Keep messages.json meta in sync (best effort).
+    const file = await readJson(messagesFileOf(chatId));
+    if (file) {
+      file.meta = { ...file.meta, title: clean, updatedAt: meta.updatedAt };
+      await writeJsonAtomic(messagesFileOf(chatId), file);
+    }
+    return { success: true, meta };
+  } catch (e: any) {
+    return { success: false, error: String(e?.message || e) };
+  }
+});
+
+ipcMain.handle('chats-delete', async (_e, chatId: string) => {
+  try {
+    await serialize(() => deleteChatTree(chatId));
+    return { success: true };
+  } catch (e: any) {
+    return { success: false, error: String(e?.message || e) };
+  }
+});
+
+ipcMain.handle('chats-export-zip', async (event, chatId: string) => {
+  try {
+    const win = BrowserWindow.fromWebContents(event.sender);
+    const idx = await loadIndex();
+    const root = idx.find((m: any) => m.id === chatId);
+    if (!root) throw new Error('Chat not found');
+
+    // Logical tree layout in the zip: each chat becomes a folder named after
+    // its title, nested chats nested under their parent's folder.
+    const usedNames = new Set<string>();
+    const folderName = (meta: any) => {
+      const base = (meta.title || 'chat').replace(/[<>:"/\\|?*\x00-\x1f]/g, '').trim() || 'chat';
+      let name = base, n = 2;
+      while (usedNames.has(name.toLowerCase())) name = `${base} (${n++})`;
+      usedNames.add(name.toLowerCase());
+      return name;
+    };
+
+    const zip = new AdmZip();
+    const addChat = async (id: string, zipPath: string) => {
+      const dir = chatDirOf(id);
+      const file = await readJson(messagesFileOf(id));
+      if (file) zip.addFile(path.posix.join(zipPath, 'messages.json'), Buffer.from(JSON.stringify(file, null, 2)));
+      const assets = assetsDirOf(id);
+      if (fs.existsSync(assets)) zip.addLocalFolder(assets, path.posix.join(zipPath, 'assets'));
+      const childIds = idx.filter((m: any) => m.parentId === id).map((m: any) => m.id);
+      for (const cid of childIds) {
+        const childMeta = idx.find((m: any) => m.id === cid);
+        await addChat(cid, path.posix.join(zipPath, folderName(childMeta)));
+      }
+    };
+    await addChat(chatId, folderName(root));
+
+    const safeTitle = (root.title || 'chat').replace(/[<>:"/\\|?*\x00-\x1f]/g, '').trim() || 'chat';
+    const { canceled, filePath } = await dialog.showSaveDialog(win!, {
+      title: 'Export chat',
+      defaultPath: path.join(app.getPath('downloads'), `${safeTitle}.zip`),
+      filters: [{ name: 'Zip Archive', extensions: ['zip'] }]
+    });
+    if (canceled || !filePath) return { success: false, canceled: true };
+    zip.writeZip(filePath);
+    shell.showItemInFolder(filePath);
+    return { success: true, path: filePath };
+  } catch (e: any) {
+    return { success: false, error: String(e?.message || e) };
+  }
+});
+
+// Serve extracted chat assets to the renderer over chat-asset://<chatId>/<file>.
+// Must be registered after app ready (protocol.handle touches defaultSession).
+app.whenReady().then(() => {
+  protocol.handle('chat-asset', (request) => {
+    try {
+      const url = new URL(request.url);
+      const chatId = url.hostname;
+      const fileName = decodeURIComponent(url.pathname.slice(1));
+      if (!/^[A-Za-z0-9_-]{4,64}$/.test(chatId) || !/^[\w][\w.-]*$/.test(fileName)) {
+        return new Response('Bad request', { status: 400 });
+      }
+      return net.fetch(pathToFileURL(path.join(assetsDirOf(chatId), fileName)).toString());
+    } catch (e: any) {
+      return new Response(`Not found: ${e?.message || e}`, { status: 404 });
+    }
+  });
+});
+
+// Electron logs every failed guest/webview navigation (ad trackers, blocked
+// CSP frames, dead sync endpoints) through process.emitWarning. Financial and
+// news sites fire dozens per page-load; drop exactly that category instead of
+// flooding the terminal.
+const origEmitWarning = process.emitWarning.bind(process);
+(process as any).emitWarning = (warning: any, ...rest: any[]) => {
+  try {
+    const msg = typeof warning === 'string' ? warning : String(warning?.message ?? warning ?? '');
+    if (msg.includes('Failed to load URL')) return;
+  } catch {}
+  return origEmitWarning(warning, ...rest);
+};
+
 app.on('web-contents-created', (event, contents) => {
   if (contents.getType() === 'webview') {
+    // New windows / target=_blank links become NEW TABS in the app's shared
+    // browser shell instead of hijacking the same guest or popping an OS window.
     contents.setWindowOpenHandler(({ url }) => {
-      contents.loadURL(url);
+      if (url && /^https?:/i.test(url)) {
+        for (const win of BrowserWindow.getAllWindows()) {
+          win.webContents.send('oneagent-browser-new-tab', url);
+          break;
+        }
+      }
       return { action: 'deny' };
     });
     // Handle did-fail-load so Electron doesn't spam the console with

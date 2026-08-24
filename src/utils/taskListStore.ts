@@ -1,8 +1,11 @@
 // Formal task tree for orchestrator-driven delegation. The orchestrator
 // creates tasks after plan approval and binds sub-agents to them; this store
 // mirrors their lifecycle for the sidebar UI. Session-only (in-memory).
+//
+// 'review' = the bound agent finished WITHOUT checking the task off itself
+// (complete_task). The orchestrator must verify the result and set done/error.
 
-export type TaskStatus = 'queued' | 'running' | 'done' | 'error';
+export type TaskStatus = 'queued' | 'running' | 'done' | 'error' | 'review';
 
 export interface TaskNode {
   id: string;

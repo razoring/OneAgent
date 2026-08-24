@@ -1,8 +1,9 @@
-import { generateChatStream, getModelSettings, condenseThinking, stripSimulatedDebris, LLMModel, ModelSettings, fetchModels } from './llm';
+import { generateChatStreamWithRetry, getModelSettings, condenseThinking, stripSimulatedDebris, LLMModel, ModelSettings, fetchModels, getVramReport, estimateModelVram } from './llm';
 import { executeToolCalls, ToolContext } from './toolExecutor';
 import { getSystemTools } from './tools';
 import { buildSubAgentPrompt } from './prompts';
 import { taskListStore } from './taskListStore';
+import { chatStore, transcriptToMessages } from './chatStore';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -19,6 +20,9 @@ export interface SubAgentSpec {
   canDelegate?: boolean;
   // Nesting depth: orchestrator-spawned = 1, their children = 2 (max).
   depth?: number;
+  // Parent chat for the agent's persisted nested chat (the orchestrator's
+  // chat, or the spawner agent's own nested chat for depth-2 agents).
+  parentChatId?: string | null;
 }
 
 export type SubAgentStatus = 'queued' | 'running' | 'done' | 'error';
@@ -47,6 +51,10 @@ export interface SubAgentState {
   depth: number;
   // Only this agent's own turns — never its children's internals.
   transcript: TranscriptEntry[];
+  // Persisted nested chat backing this agent's transcript.
+  chatId?: string;
+  // True once the worker checked off its own task via complete_task.
+  selfCompleted?: boolean;
 }
 
 // Host-provided capabilities routed from the orchestrator's ChatArea.
@@ -148,8 +156,34 @@ export const spawnSubAgent = (spec: SubAgentSpec, host: SubAgentHost): string =>
   registry.set(id, state);
   hostMap.set(id, host);
   if (spec.taskId) taskListStore.update(spec.taskId, { agentId: id });
+  createNestedChat(state, spec.parentChatId ?? null);
   pumpQueue(hostMap);
   return id;
+};
+
+// Every spawned agent gets a persisted nested chat under its parent so the
+// conversation survives restarts and renders in the sidebar tree. Falls back
+// to a root chat when no parent is known.
+const createNestedChat = (state: SubAgentState, parentChatId: string | null): void => {
+  void (async () => {
+    try {
+      const meta = await chatStore.createChat(parentChatId, state.label.slice(0, 80) || 'Sub-agent', state.id);
+      state.chatId = meta.id;
+      // Persist whatever accumulated before the chat existed.
+      await chatStore.saveMessages(meta.id, transcriptToMessages(state.transcript));
+    } catch (e) {
+      console.error('[subAgents] nested chat creation failed', e);
+    }
+  })();
+};
+
+// Sync an agent's live transcript into its persisted nested chat.
+const persistTranscript = (state: SubAgentState, immediate = false): void => {
+  const chatId = state.chatId;
+  if (!chatId) return;
+  const messages = transcriptToMessages(state.transcript);
+  if (immediate) void chatStore.saveMessages(chatId, messages);
+  else chatStore.saveMessagesDebounced(chatId, messages);
 };
 
 const hostMap = new Map<string, SubAgentHost>();
@@ -181,16 +215,29 @@ export const waitForAgents = async (ids: string[] | undefined, ms: number): Prom
 
 // ─── Runner loop ─────────────────────────────────────────────────────────────
 
-const resolveModel = async (spec: SubAgentSpec, host: SubAgentHost): Promise<LLMModel> => {
+const resolveModel = async (spec: SubAgentSpec, host: SubAgentHost, agentLabel: string): Promise<LLMModel> => {
   const wanted = spec.model;
+  const fallback = host.getModel();
   if (wanted?.id) {
     const models = await fetchModels();
     const match =
       models.find(m => m.id === wanted.id && (!wanted.provider || m.provider === wanted.provider)) ||
       models.find(m => m.id.toLowerCase() === wanted.id.toLowerCase());
-    if (match) return match;
+    if (match) {
+      // Defense-in-depth against model thrash: an explicit pick that cannot
+      // fit beside the resident models falls back to the orchestrator's own
+      // (already loaded) model instead of forcing an evict/reload cycle.
+      try {
+        const report = await getVramReport();
+        const need = estimateModelVram(match.id, report);
+        if (report.supported && report.headroomBytes != null && need != null && need > report.headroomBytes && fallback) {
+          console.warn(`[subAgents] "${agentLabel}" requested ${match.id} (~${(need / 2 ** 30).toFixed(1)} GB) but headroom is ~${((report.headroomBytes || 0) / 2 ** 30).toFixed(1)} GB — inheriting orchestrator model ${fallback.id} instead`);
+          return fallback;
+        }
+      } catch {}
+      return match;
+    }
   }
-  const fallback = host.getModel();
   if (!fallback) throw new Error('No model available for sub-agent (none specified and orchestrator has none)');
   return fallback;
 };
@@ -203,8 +250,9 @@ const runSubAgent = async (agent: SubAgentState, host: SubAgentHost): Promise<vo
   }
 
   try {
-    const model = await resolveModel(agentParamsOf(agent), host);
+    const model = await resolveModel(agentParamsOf(agent), host, agent.label);
     agent.model = { id: model.id, provider: model.provider };
+    console.log(`[subAgents] "${agent.label}" → model ${model.provider}/${model.id} (preset: ${agent.tools})`);
     if (agent.taskId) {
       taskListStore.update(agent.taskId, { modelLabel: `${model.provider}/${model.id}` });
     }
@@ -213,6 +261,8 @@ const runSubAgent = async (agent: SubAgentState, host: SubAgentHost): Promise<vo
 
     const allowedTools = new Set(TOOL_PRESETS[agent.tools]);
     if (agent.canDelegate) DELEGATION_TOOLS.forEach(t => allowedTools.add(t));
+    // A bound worker may check off ONLY its own task via complete_task.
+    if (agent.taskId) allowedTools.add('complete_task');
     const toolDefs = getSystemTools().filter(t => allowedTools.has(t.function.name));
 
     const messages: any[] = [
@@ -224,6 +274,7 @@ const runSubAgent = async (agent: SubAgentState, host: SubAgentHost): Promise<vo
     const pushTurn = (role: TranscriptEntry['role'], content: string) => {
       agent.transcript.push({ role, content });
       if (agent.transcript.length > 400) agent.transcript.splice(0, agent.transcript.length - 400);
+      persistTranscript(agent);
     };
 
     const ctx: ToolContext = {
@@ -232,13 +283,15 @@ const runSubAgent = async (agent: SubAgentState, host: SubAgentHost): Promise<vo
       requestApproval: host.requestApproval,
       spawnAgent: agent.canDelegate
         ? (spec) => spawnSubAgent(
-            { ...spec, depth: agent.depth + 1, taskId: spec.taskId },
+            { ...spec, depth: agent.depth + 1, taskId: spec.taskId, parentChatId: agent.chatId ?? null },
             host
           )
         : () => '',
       getAgents: agent.canDelegate ? getAgentsSnapshot : () => [],
       waitForAgents: agent.canDelegate ? waitForAgents : async () => [],
       promptTaskId: agent.taskId,
+      ownTaskId: agent.taskId,
+      agentId: agent.id,
       signal: controller.signal
     };
 
@@ -246,11 +299,14 @@ const runSubAgent = async (agent: SubAgentState, host: SubAgentHost): Promise<vo
     // Auto-recovery: nudge models that stop after thinking without acting or
     // get cut off mid-generation by max_tokens, instead of ending the task.
     let autoContinues = 0;
+    // One dedicated nudge when an agent ends naturally without checking its
+    // task off — claims of "task complete" in prose are NOT check-offs.
+    let completeNudged = false;
     let round = 0;
     for (; round < MAX_AGENT_ROUNDS; round++) {
       if (controller.signal.aborted) throw new Error('Aborted by user');
 
-      const res = await generateChatStream(model, messages, () => {}, controller.signal, mergedSettings, toolDefs);
+      const res = await generateChatStreamWithRetry(model, messages, () => {}, controller.signal, mergedSettings, toolDefs);
       finalContent = stripSimulatedDebris(res.content) || finalContent;
 
       const rawCalls = res.toolCalls || [];
@@ -269,6 +325,24 @@ const runSubAgent = async (agent: SubAgentState, host: SubAgentHost): Promise<vo
           });
           continue;
         }
+        // Natural end without a check-off: one nudge to actually call
+        // complete_task (prose claims don't count).
+        if (agent.taskId && !agent.selfCompleted && !completeNudged &&
+            !controller.signal.aborted && round < MAX_AGENT_ROUNDS - 1 &&
+            (res.content || '').trim()) {
+          completeNudged = true;
+          pushTurn('assistant', stripSimulatedDebris(res.content) || '');
+          messages.push({
+            role: 'user',
+            content: '[System notice] Your task status is still NOT done — describing completion in text does not count. If your work genuinely satisfies the task, call complete_task(summary="<one-line result>") NOW. Only skip this if something is genuinely unfinished or failed.'
+          });
+          continue;
+        }
+        // Record the final answer as its own transcript turn — otherwise the
+        // nested chat never shows the sub-agent's closing response.
+        if ((res.content || '').trim()) {
+          pushTurn('assistant', stripSimulatedDebris(res.content) || res.content);
+        }
         break;
       }
 
@@ -281,6 +355,11 @@ const runSubAgent = async (agent: SubAgentState, host: SubAgentHost): Promise<vo
 
       const results = await executeToolCalls(rawCalls, ctx);
       agent.steps += rawCalls.length;
+      // The worker checked its own task off — remember it so the runner does
+      // not downgrade the task to 'review' when the loop ends.
+      if (agent.taskId && taskListStore.find(agent.taskId)?.status === 'done') {
+        agent.selfCompleted = true;
+      }
 
       const parts: any[] = [];
       let hasImage = false;
@@ -303,12 +382,15 @@ const runSubAgent = async (agent: SubAgentState, host: SubAgentHost): Promise<vo
       (round >= MAX_AGENT_ROUNDS || (!finalContent.trim() && agent.steps > 0)) &&
       !controller.signal.aborted;
     if (needsWrapUp) {
+      const checkOffHint = agent.taskId && !agent.selfCompleted
+        ? ' If your task is genuinely complete, you should have called complete_task — it is too late now; state your result clearly.'
+        : '';
       const wrapNotice = round >= MAX_AGENT_ROUNDS
-        ? '[System notice] Tool-call budget reached — no further tool calls will execute. Report your findings and the task outcome now, concisely.'
-        : '[System notice] You stopped without reporting. Based on your tool results, report your findings and the task outcome now, concisely.';
+        ? `[System notice] Tool-call budget reached — no further tool calls will execute. Report your findings and the task outcome now, concisely.${checkOffHint}`
+        : `[System notice] You stopped without reporting. Based on your tool results, report your findings and the task outcome now, concisely.${checkOffHint}`;
       messages.push({ role: 'user', content: wrapNotice });
       pushTurn('user', wrapNotice);
-      const wrapRes = await generateChatStream(model, messages, () => {}, controller.signal, mergedSettings, []);
+      const wrapRes = await generateChatStreamWithRetry(model, messages, () => {}, controller.signal, mergedSettings, []);
       if ((wrapRes.content || '').trim()) {
         finalContent = wrapRes.content.trim();
         pushTurn('assistant', finalContent);
@@ -323,12 +405,24 @@ const runSubAgent = async (agent: SubAgentState, host: SubAgentHost): Promise<vo
   } finally {
     agent.endedAt = Date.now();
     hostMap.delete(agent.id);
+    persistTranscript(agent, true);
     if (agent.taskId) {
-      const summary = agent.status === 'done'
-        ? (agent.result || '').split('\n')[0].slice(0, 120)
-        : (agent.error || 'failed');
+      // The agent ending is NOT the task completing. Only the worker's own
+      // complete_task call marks it done; a clean finish without one leaves
+      // the task in 'review' for the orchestrator to verify.
+      const selfDone = taskListStore.find(agent.taskId)?.status === 'done';
+      let status: 'done' | 'error' | 'review';
+      if (selfDone) status = 'done';
+      else if (agent.status === 'error') status = 'error';
+      else status = 'review';
+      const summary =
+        status === 'done'
+          ? (taskListStore.find(agent.taskId)?.resultSummary || (agent.result || '').split('\n')[0]).slice(0, 160)
+          : status === 'error'
+            ? (agent.error || 'failed').slice(0, 160)
+            : `finished without check-off: ${(agent.result || '').split('\n')[0].slice(0, 120)}`;
       taskListStore.update(agent.taskId, {
-        status: agent.status,
+        status,
         endedAt: agent.endedAt,
         resultSummary: summary
       });

@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { ChevronRight } from 'lucide-react';
+import { ChevronRight, Trash2 } from 'lucide-react';
 import { ModelSettings, getModelSettings, saveModelSettings } from '../utils/llm';
 import { modelParamsStore } from '../utils/modelParamsStore';
 import { taskListStore, TaskNode } from '../utils/taskListStore';
@@ -248,20 +248,20 @@ const RightSidebar = ({ open }: { open: boolean }) => {
         <div className="flex flex-col gap-1.5">
           <div className="flex justify-between items-center text-sm">
             <span className="text-textSecondary font-medium">Thinking Timeout</span>
-            <span className="text-textSecondary font-mono text-xs">
-              {modelSettings.thinkingTimeout === 0 ? 'No timeout' : `${modelSettings.thinkingTimeout}s`}
+            <span className="font-mono text-xs text-textSecondary">
+              {modelSettings.thinkingTimeout === 0 ? 'Unlimited' : `${modelSettings.thinkingTimeout}s`}
             </span>
           </div>
-          {/* Slider is inverted so "No timeout" sits at the right end */}
+          {/* Discrete steps: 10s … 300s, then Unlimited at the right end. */}
           <input
             type="range"
             min={0}
-            max={300}
-            step={10}
-            value={300 - modelSettings.thinkingTimeout}
-            onChange={(e) => updateSettings({ thinkingTimeout: 300 - Number(e.target.value) })}
+            max={30}
+            step={1}
+            value={thinkingTimeoutToSlider(modelSettings.thinkingTimeout)}
+            onChange={(e) => updateSettings({ thinkingTimeout: sliderToThinkingTimeout(Number(e.target.value)) })}
             className="neutral-slider w-full cursor-pointer"
-            style={{ '--fill': `${((300 - modelSettings.thinkingTimeout) / 300) * 100}%` } as React.CSSProperties}
+            style={{ '--fill': `${(thinkingTimeoutToSlider(modelSettings.thinkingTimeout) / 30) * 100}%` } as React.CSSProperties}
           />
         </div>
 
@@ -351,6 +351,17 @@ const RightSidebar = ({ open }: { open: boolean }) => {
 
 // ─── Tasks section ───────────────────────────────────────────────────────────
 
+// Thinking-timeout slider mapping: discrete stops 10s…300s, then Unlimited
+// (stored internally as 0). Unlimited is the LAST stop on purpose — it reads
+// as the risky extreme, since unbounded thinking stalls the agent.
+const THINKING_SLIDER_STOPS = 30;
+const sliderToThinkingTimeout = (raw: number): number =>
+  raw >= THINKING_SLIDER_STOPS ? 0 : (raw + 1) * 10;
+const thinkingTimeoutToSlider = (timeout: number): number =>
+  timeout === 0
+    ? THINKING_SLIDER_STOPS
+    : Math.max(0, Math.min(THINKING_SLIDER_STOPS - 1, Math.round(timeout / 10) - 1));
+
 const fmtDuration = (ms: number): string => {
   const s = Math.round(ms / 1000);
   if (s < 60) return `${s}s`;
@@ -361,6 +372,7 @@ const StatusRing = ({ status, size }: { status: TaskNode['status'], size: number
   const cls = `shrink-0 rounded-full flex items-center justify-center ${
     status === 'done' ? 'bg-accent/80'
     : status === 'running' ? 'border-2 border-accent border-t-transparent animate-spin'
+    : status === 'review' ? 'border-2 border-yellow-400/90 animate-pulse'
     : status === 'error' ? 'bg-red-500/80'
     : 'border-2 border-white/25'
   }`;
@@ -392,9 +404,11 @@ const TaskRow = ({ node, depth, onInspect }: { node: TaskNode, depth: number, on
 
   const meta = node.needsInput
     ? 'waiting for your response'
-    : [node.modelLabel, elapsed].filter(Boolean).join(' · ');
+    : node.status === 'review'
+      ? 'finished — awaiting check-off'
+      : [node.modelLabel, elapsed].filter(Boolean).join(' · ');
 
-  const titleEl = <TaskTitle running={node.status === 'running'} text={(node.needsInput ? '[ACTION REQUIRED] ' : '') + node.title} className={`${depth === 0 ? 'text-sm' : 'text-xs'} ${node.status === 'done' ? 'line-through text-textSecondary' : node.status === 'running' ? 'text-white' : 'text-textSecondary'}`} />;
+  const titleEl = <TaskTitle running={node.status === 'running'} text={(node.needsInput ? '[ACTION REQUIRED] ' : '') + (node.status === 'review' ? '[NEEDS CHECK-OFF] ' : '') + node.title} className={`${depth === 0 ? 'text-sm' : 'text-xs'} ${node.status === 'done' ? 'line-through text-textSecondary' : node.status === 'running' || node.status === 'review' ? 'text-white' : 'text-textSecondary'}`} />;
 
   return (
     <div>
@@ -432,16 +446,25 @@ const TaskRow = ({ node, depth, onInspect }: { node: TaskNode, depth: number, on
 
 const TasksSection = ({ tasks }: { tasks: TaskNode[] }) => {
   const progress = taskListStore.leafProgress();
-  const actionNeeded = tasks.filter(t => t.needsInput).length;
+  const actionNeeded = tasks.filter(t => t.needsInput || t.status === 'review').length;
   const roots = tasks.filter(n => !n.parentId);
 
   return (
     <div className="flex flex-col gap-2 mt-6 pt-5">
       <div className="flex items-center justify-between">
         <span className="menu-header">Tasks</span>
-        <span className={`text-[11px] font-mono ${actionNeeded > 0 ? 'text-accentBright animate-pulse' : 'text-textSecondary'}`}>
-          {actionNeeded > 0 ? `${actionNeeded} action required` : `${progress.done}/${progress.total}`}
-        </span>
+        <div className="flex items-center gap-2">
+          <span className={`text-[11px] font-mono ${actionNeeded > 0 ? 'text-accentBright animate-pulse' : 'text-textSecondary'}`}>
+            {actionNeeded > 0 ? `${actionNeeded} action required` : `${progress.done}/${progress.total}`}
+          </span>
+          <button
+            onClick={() => taskListStore.reset()}
+            className="p-1 rounded text-textSecondary/70 hover:text-white hover:bg-white/10 transition-colors"
+            title="Clear all tasks"
+          >
+            <Trash2 size={11} />
+          </button>
+        </div>
       </div>
       <div className="flex flex-col gap-1.5">
         {roots.map(n => <TaskRow key={n.id} node={n} depth={0} onInspect={(agentId) => window.dispatchEvent(new CustomEvent('inspect-agent', { detail: agentId }))} />)}

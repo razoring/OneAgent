@@ -2,9 +2,10 @@ import React, { useState, useRef, useEffect } from 'react';
 import ChatInput from './ChatInput';
 import ThinkingBlock from './ThinkingBlock';
 import ToolCallBlock from './ToolCallBlock';
-import { generateChatStream, condenseThinking, stripSimulatedDebris, LLMModel, fileToBase64, parseAttachmentDocument, getModelStats } from '../utils/llm';
+import { generateChatStreamWithRetry, generateChatResponse, condenseThinking, stripSimulatedDebris, LLMModel, fileToBase64, parseAttachmentDocument, getModelStats } from '../utils/llm';
 import { executeToolCalls, ToolContext } from '../utils/toolExecutor';
 import { spawnSubAgent, getAgentsSnapshot, waitForAgents, getAgentTranscript } from '../utils/subAgents';
+import { chatStore, transcriptToMessages } from '../utils/chatStore';
 import { ORCHESTRATOR_PROMPT as DEFAULT_SYSTEM_PROMPT } from '../utils/prompts';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -17,22 +18,26 @@ import { vscDarkPlus } from 'react-syntax-highlighter/dist/esm/styles/prism';
 import { MessageSquarePlus, Terminal, Globe, ChevronDown, ChevronRight, ChevronLeft, Trash2, Bug, Settings2 } from 'lucide-react';
 import { getOrchestratorTools } from '../utils/tools';
 import { agentBrowserStore } from '../utils/agentBrowserStore';
-import { terminateBrowserSession, remountWebview } from '../utils/browserTools';
+import { terminateBrowserSession } from '../utils/browserTools';
 import { transcriptStore } from '../utils/transcriptStore';
 import { userPromptStore } from '../utils/userPromptStore';
+import { taskListStore } from '../utils/taskListStore';
+import { ChatComment, ToolCall, ChatMessage } from '../types/chat';
+
+export type { ChatComment, ToolCall, ChatMessage };
 
 const MarkdownComponents: any = {
-  p: ({node, ...props}: any) => <p className="mb-2 last:mb-0" {...props} />,
-  h1: ({node, ...props}: any) => <h1 className="text-2xl font-bold mb-4 mt-6" {...props} />,
-  h2: ({node, ...props}: any) => <h2 className="text-xl font-bold mb-3 mt-5" {...props} />,
-  h3: ({node, ...props}: any) => <h3 className="text-lg font-bold mb-2 mt-4" {...props} />,
-  ul: ({node, ...props}: any) => <ul className="list-disc pl-6 mb-4 space-y-1" {...props} />,
-  ol: ({node, ...props}: any) => <ol className="list-decimal pl-6 mb-4 space-y-1" {...props} />,
-  li: ({node, ...props}: any) => <li className="leading-relaxed" {...props} />,
-  a: ({node, ...props}: any) => <a className="text-accentBright hover:underline" target="_blank" rel="noopener noreferrer" {...props} />,
-  strong: ({node, ...props}: any) => <strong className="font-bold text-gray-100" {...props} />,
-  blockquote: ({node, ...props}: any) => <blockquote className="border-l-4 border-gray-500 pl-4 py-1 italic text-textSecondary my-4" {...props} />,
-  code: ({node, inline, className, children, ...props}: any) => {
+  p: ({ node, ...props }: any) => <p className="mb-2 last:mb-0" {...props} />,
+  h1: ({ node, ...props }: any) => <h1 className="text-2xl font-bold mb-4 mt-6" {...props} />,
+  h2: ({ node, ...props }: any) => <h2 className="text-xl font-bold mb-3 mt-5" {...props} />,
+  h3: ({ node, ...props }: any) => <h3 className="text-lg font-bold mb-2 mt-4" {...props} />,
+  ul: ({ node, ...props }: any) => <ul className="list-disc pl-6 mb-4 space-y-1" {...props} />,
+  ol: ({ node, ...props }: any) => <ol className="list-decimal pl-6 mb-4 space-y-1" {...props} />,
+  li: ({ node, ...props }: any) => <li className="leading-relaxed" {...props} />,
+  a: ({ node, ...props }: any) => <a className="text-accentBright hover:underline" target="_blank" rel="noopener noreferrer" {...props} />,
+  strong: ({ node, ...props }: any) => <strong className="font-bold text-gray-100" {...props} />,
+  blockquote: ({ node, ...props }: any) => <blockquote className="border-l-4 border-gray-500 pl-4 py-1 italic text-textSecondary my-4" {...props} />,
+  code: ({ node, inline, className, children, ...props }: any) => {
     const match = /language-(\w+)/.exec(className || '');
     return !inline && match ? (
       <div className="rounded-lg overflow-hidden my-4 border border-white/10 bg-overlay">
@@ -55,43 +60,6 @@ const MarkdownComponents: any = {
     );
   }
 };
-
-export interface ChatComment {
-  id: string;
-  quote: string;
-  text: string;
-}
-
-export interface ToolCall {
-  id: string;
-  name: string;
-  args: any;
-  status: 'executing' | 'completed' | 'error';
-  result?: string;
-  raw?: string;
-  image?: string;
-  timestamp?: number;
-}
-
-export interface ChatMessage {
-  id: string;
-  role: 'user' | 'assistant' | 'system';
-  content: string;
-  thinking?: string;
-  // Per-round thinking chunks: parts[i] precedes tool-call round i+1.
-  thinkingParts?: string[];
-  attachments?: any[];
-  isGenerating?: boolean;
-  comments?: ChatComment[];
-  toolCalls?: ToolCall[];
-  isCallingTool?: boolean;
-  // Debug-transcript data: generation window, exact model-call context and
-  // settings/model snapshot at the time of the response.
-  createdAt?: number;
-  completedAt?: number;
-  internalContext?: any[];
-  modelStats?: any;
-}
 
 // ─── Debug transcript ────────────────────────────────────────────────────────
 // Compact, LLM-parseable format: flattened metadata, a round-by-round timeline
@@ -230,17 +198,17 @@ const BlockToolbar = ({ onEdit, onRegenerate, onDelete }: { onEdit?: () => void,
       <div className="flex items-center gap-1 mac-element p-1 rounded-full border border-white/5 shadow-sm">
         {onEdit && (
           <button onClick={onEdit} className="p-1.5 text-textSecondary hover:text-gray-200 hover:bg-white/10 rounded-full transition-colors" title="Edit">
-            <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/><path d="m15 5 4 4"/></svg>
+            <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z" /><path d="m15 5 4 4" /></svg>
           </button>
         )}
         {onRegenerate && (
           <button onClick={onRegenerate} className="p-1.5 text-textSecondary hover:text-gray-200 hover:bg-white/10 rounded-full transition-colors" title="Regenerate">
-            <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/></svg>
+            <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" /><path d="M3 3v5h5" /></svg>
           </button>
         )}
         {onDelete && (
           <button onClick={onDelete} className="p-1.5 text-textSecondary hover:text-gray-200 hover:bg-white/10 rounded-full transition-colors" title="Delete">
-            <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M3 6h18"/><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/><line x1="10" x2="10" y1="11" y2="17"/><line x1="14" x2="14" y1="11" y2="17"/></svg>
+            <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M3 6h18" /><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6" /><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2" /><line x1="10" x2="10" y1="11" y2="17" /><line x1="14" x2="14" y1="11" y2="17" /></svg>
           </button>
         )}
       </div>
@@ -285,20 +253,27 @@ const UnifiedToolsBlock = ({ activity, isGenerating, msgIsGenerating, activityFe
       raf = requestAnimationFrame(sync);
     };
     raf = requestAnimationFrame(sync);
-    return () => cancelAnimationFrame(raf);
+    return () => {
+      cancelAnimationFrame(raf);
+      // Park the layer offscreen when this block goes away (regeneration,
+      // chat switch, collapse) — otherwise the webview freezes visibly over
+      // whatever the feed now shows.
+      layer.style.left = '-20000px';
+      layer.style.top = '0px';
+    };
   }, [isLatestBrowserBlock, isBrowserExpanded, terminatedSnap, browserSessionId]);
 
   return (
     <div className="w-full group relative">
       {!isGenerating && !msgIsGenerating && (
-        <BlockToolbar 
-          onEdit={onEdit} 
-          onRegenerate={onRegenerate} 
-          onDelete={onDelete} 
+        <BlockToolbar
+          onEdit={onEdit}
+          onRegenerate={onRegenerate}
+          onDelete={onDelete}
         />
       )}
       <div className="w-full rounded-xl border border-white/10 bg-white/[0.03] backdrop-blur-md overflow-hidden transition-all duration-200">
-        <div 
+        <div
           onClick={() => setExpanded(!expanded)}
           className="px-3 py-2 text-xs text-textSecondary flex items-center justify-between border-b border-white/5 cursor-pointer hover:bg-white/[0.05] transition-colors group/header"
         >
@@ -311,7 +286,7 @@ const UnifiedToolsBlock = ({ activity, isGenerating, msgIsGenerating, activityFe
             {expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
           </div>
         </div>
-        
+
         {expanded && (
           <div className="p-2 flex flex-col gap-2 bg-black/20">
             {toolCalls.map((tc: any, i: number) => {
@@ -397,6 +372,18 @@ const ChatArea = ({ onToggleSettings }: { onToggleSettings?: () => void }) => {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [isGenerating, setIsGenerating] = useState(false);
 
+  // Home chat (root conversation the user types into) + nested view state.
+  // While a nested chat is open, `messages` keeps holding the home
+  // conversation untouched; the feed renders `nestedMessages` instead.
+  const homeChatIdRef = useRef<string | null>(null);
+  const [homeChatId, setHomeChatId] = useState<string | null>(null);
+  // Set only once `messages` actually holds the loaded content of homeChatId —
+  // prevents autosaving stale messages into a freshly-switched chat.
+  const loadedChatIdRef = useRef<string | null>(null);
+  const [viewingNested, setViewingNested] = useState<{ chatId: string; agentId?: string } | null>(null);
+  const [nestedMessages, setNestedMessages] = useState<ChatMessage[]>([]);
+  const [nestedMeta, setNestedMeta] = useState<{ title: string; parentId: string | null } | null>(null);
+
   // Incremented at every generation start — forces the browser adoption
   // effect to re-run (message ids alone don't change across regenerates) and
   // remounts a guaranteed-fresh webview for each new session.
@@ -406,25 +393,140 @@ const ChatArea = ({ onToggleSettings }: { onToggleSettings?: () => void }) => {
   const [hasTranscript, setHasTranscript] = useState(transcriptStore.get().length > 0);
   useEffect(() => transcriptStore.subscribe(t => setHasTranscript(t.length > 0)), []);
 
-  // Sub-agent transcript inspection — swaps the chat feed for the agent's chat.
-  const [inspectingAgentId, setInspectingAgentId] = useState<string | null>(null);
+  // Startup: initialize the store, then load the active (home) chat.
+  useEffect(() => {
+    void (async () => {
+      await chatStore.initOnce();
+      const id = chatStore.getActiveId();
+      if (!id) return;
+      homeChatIdRef.current = id;
+      setHomeChatId(id);
+      try {
+        const msgs = await chatStore.loadMessages(id);
+        setMessages(msgs);
+        loadedChatIdRef.current = id;
+      } catch (e) {
+        console.error('[ChatArea] failed to load chat', e);
+      }
+    })();
+    const flush = () => chatStore.flushSaves();
+    window.addEventListener('beforeunload', flush);
+    return () => window.removeEventListener('beforeunload', flush);
+  }, []);
+
+  // React to sidebar navigation: switching the active chat swaps the home
+  // conversation and closes any nested view.
+  useEffect(() => chatStore.subscribeActive(id => {
+    if (!id || id === homeChatIdRef.current) return;
+    chatStore.flushSaves();
+    loadedChatIdRef.current = null;
+    homeChatIdRef.current = id;
+    setHomeChatId(id);
+    setViewingNested(null);
+    setNestedMessages([]);
+    setNestedMeta(null);
+    setEditingBlock(null);
+    setEditPreview(null);
+    autoScrollEnabled.current = true;
+    void chatStore.loadMessages(id)
+      .then(msgs => {
+        // Ignore stale loads if the user switched again mid-flight.
+        if (homeChatIdRef.current !== id) return;
+        setMessages(msgs);
+        loadedChatIdRef.current = id;
+      })
+      .catch(e => console.error('[ChatArea] failed to load chat', e));
+  }), []);
+
+  // Tasks-panel inspection: open the agent's persisted nested chat. The chat
+  // is created at spawn time, so retry briefly if it hasn't landed yet.
   useEffect(() => {
     const h = (e: Event) => {
-      setInspectingAgentId((e as CustomEvent).detail);
-      autoScrollEnabled.current = true;
-      setTimeout(() => bottomRef.current?.scrollIntoView(), 50);
+      const agentId = String((e as CustomEvent).detail || '');
+      let tries = 0;
+      const attempt = () => {
+        const chatId = chatStore.getChatIdForAgent(agentId)
+          ?? chatStore.getChats().find(c => c.agentId === agentId)?.id;
+        if (chatId) {
+          openNestedChat(chatId);
+          return;
+        }
+        if (++tries < 10) setTimeout(attempt, 250);
+      };
+      attempt();
     };
     window.addEventListener('inspect-agent', h);
     return () => window.removeEventListener('inspect-agent', h);
   }, []);
 
+  // Open a nested (sub-agent) chat: disk-backed for finished agents, live-
+  // polled from the in-memory transcript while the agent still runs.
+  const openNestedChat = async (chatId: string) => {
+    chatStore.flushSaves();
+    const meta = chatStore.getMeta(chatId);
+    if (!meta) return;
+    setNestedMeta({ title: meta.title, parentId: meta.parentId });
+    setViewingNested({ chatId, ...(meta.agentId ? { agentId: meta.agentId } : {}) });
+    setEditingBlock(null);
+    setEditPreview(null);
+    autoScrollEnabled.current = true;
+    // Show the agent's own browser tab (created on demand) so the user sees
+    // exactly what this sub-agent is looking at.
+    if (meta.agentId) {
+      const tab = agentBrowserStore.ensureAgentTab(meta.agentId, meta.title);
+      agentBrowserStore.activateTab(tab.id);
+    }
+    try {
+      const stored = await chatStore.loadMessages(chatId);
+      setNestedMessages(stored);
+    } catch { setNestedMessages([]); }
+    setTimeout(() => bottomRef.current?.scrollIntoView(), 50);
+  };
+
+  const backToParentChat = () => {
+    setViewingNested(null);
+    setNestedMessages([]);
+    autoScrollEnabled.current = true;
+    setTimeout(() => bottomRef.current?.scrollIntoView(), 50);
+  };
+
+  // Live transcript polling while viewing a running agent's nested chat.
+  const viewingAgentId = viewingNested?.agentId;
+  useEffect(() => {
+    if (!viewingAgentId) return;
+    let cancelled = false;
+    const tick = () => {
+      if (cancelled) return;
+      const agent = getAgentsSnapshot([viewingAgentId])[0];
+      if (!agent) return;
+      setNestedMessages(transcriptToMessages(getAgentTranscript(viewingAgentId)));
+      if (agent.status !== 'queued' && agent.status !== 'running') return; // terminal — stop
+      timer = setTimeout(tick, 600);
+    };
+    let timer: any = setTimeout(tick, 50);
+    return () => { cancelled = true; clearTimeout(timer); };
+  }, [viewingAgentId]);
+
+  // Keep the nested header title in sync with renames. Guards against
+  // re-render cascades: only set when something actually changed.
+  useEffect(() => chatStore.subscribeChats(list => {
+    if (!viewingNested?.chatId) return;
+    const meta = list.find(c => c.id === viewingNested.chatId);
+    if (!meta) return;
+    setNestedMeta(prev =>
+      prev && prev.title === meta.title && prev.parentId === meta.parentId
+        ? prev
+        : { title: meta.title, parentId: meta.parentId }
+    );
+  }), [viewingNested?.chatId]);
+
   // Edit mode tracking
   const [editingBlock, setEditingBlock] = useState<{ id: string, type: 'user' | 'thinking' | 'response' | 'tools' } | null>(null);
   const [editPreview, setEditPreview] = useState<{ text: string, attachments: any[] } | null>(null);
-  
+
   const [currentModel, setCurrentModel] = useState<LLMModel | null>(null);
   const [lastUsedModel, setLastUsedModel] = useState<LLMModel | null>(null);
-  
+
   // Selection state
   const [selectionContext, setSelectionContext] = useState<{ text: string, x: number, y: number, msgId: string, msgType: 'user' | 'thinking' | 'response' } | null>(null);
   const [commentInputContext, setCommentInputContext] = useState<{ text: string, msgId: string, msgType: 'user' | 'thinking' | 'response' } | null>(null);
@@ -436,7 +538,7 @@ const ChatArea = ({ onToggleSettings }: { onToggleSettings?: () => void }) => {
   const commentPopupHoverRef = useRef(false);
   const isCommentPinnedRef = useRef(false);
   const commentTextareaRef = useRef<HTMLTextAreaElement>(null);
-  
+
   const autoScrollEnabled = useRef(true);
   const bottomRef = useRef<HTMLDivElement>(null);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
@@ -484,11 +586,23 @@ const ChatArea = ({ onToggleSettings }: { onToggleSettings?: () => void }) => {
     window.dispatchEvent(new CustomEvent('agent-model-changed', { detail: model }));
   };
 
+  // Per-generation orchestration gates, shared across all tool batches of one
+  // generation. Reset at every triggerGeneration.
+  const orchestratorGateRef = useRef<{ modelsListed: boolean }>({ modelsListed: false });
+
   const createToolContext = (): ToolContext => ({
     getModel: () => activeModelRef.current || lastUsedModel,
     setModel: switchActiveModel,
     requestApproval,
-    spawnAgent: (spec) => spawnSubAgent(spec, {
+    gate: orchestratorGateRef.current,
+    // Inline annotations on the assistant reply ride along with ask_user
+    // answers so the model applies them without a separate regeneration.
+    getAnnotations: () => messages.flatMap(m => (m.role === 'assistant' ? m.comments || [] : [])),
+    spawnAgent: (spec) => spawnSubAgent({
+      ...spec,
+      // Nested agent chats hang off the conversation they were spawned from.
+      parentChatId: spec.parentChatId ?? homeChatIdRef.current
+    }, {
       requestApproval,
       getModel: () => activeModelRef.current || lastUsedModel,
       signal: abortControllerRef.current?.signal
@@ -572,13 +686,13 @@ const ChatArea = ({ onToggleSettings }: { onToggleSettings?: () => void }) => {
       // Wait a tick to allow clicks on the button to process before clearing
       setTimeout(() => {
         if (commentInputContext) return;
-        
+
         const selection = window.getSelection();
         if (!selection || selection.isCollapsed) {
           setSelectionContext(null);
           return;
         }
-        
+
         const text = selection.toString().trim();
         if (!text) {
           setSelectionContext(null);
@@ -588,7 +702,7 @@ const ChatArea = ({ onToggleSettings }: { onToggleSettings?: () => void }) => {
         const range = selection.getRangeAt(0);
         let container = range.commonAncestorContainer as HTMLElement;
         if (container.nodeType === 3) container = container.parentElement!;
-        
+
         const messageBlock = container.closest('[data-msg-id]');
         if (!messageBlock) {
           setSelectionContext(null);
@@ -597,15 +711,15 @@ const ChatArea = ({ onToggleSettings }: { onToggleSettings?: () => void }) => {
 
         const msgId = messageBlock.getAttribute('data-msg-id') as string;
         const msgType = messageBlock.getAttribute('data-msg-type') as 'user' | 'thinking' | 'response';
-        
+
         // Only allow comments on responses
         if (msgType !== 'response') {
           setSelectionContext(null);
           return;
         }
-        
+
         const rect = range.getBoundingClientRect();
-        
+
         setSelectionContext({
           text,
           x: rect.left + rect.width / 2,
@@ -615,11 +729,11 @@ const ChatArea = ({ onToggleSettings }: { onToggleSettings?: () => void }) => {
         });
       }, 10);
     };
-    
+
     const handleMouseDown = (e: MouseEvent) => {
       // If clicking inside the comment input or the add comment button, don't clear
       const target = e.target as HTMLElement;
-      
+
       // Handle click on comment icon — locks in the popup
       const mark = target.closest('.comment-icon-btn');
       if (mark) {
@@ -635,10 +749,10 @@ const ChatArea = ({ onToggleSettings }: { onToggleSettings?: () => void }) => {
         setActiveComment(null);
       }
     };
-    
+
     document.addEventListener('mouseup', handleMouseUp);
     document.addEventListener('mousedown', handleMouseDown);
-    
+
     return () => {
       document.removeEventListener('mouseup', handleMouseUp);
       document.removeEventListener('mousedown', handleMouseDown);
@@ -652,6 +766,14 @@ const ChatArea = ({ onToggleSettings }: { onToggleSettings?: () => void }) => {
       bottomRef.current?.scrollIntoView({ behavior: 'auto' });
     }
   }, [messages, isGenerating]);
+
+  // Autosave the home conversation (debounced; capped wait keeps long
+  // generations checkpointed). Nested chats are persisted by subAgents.ts.
+  useEffect(() => {
+    const chatId = homeChatIdRef.current;
+    if (!chatId || chatId !== loadedChatIdRef.current || viewingNested || !chatStore.isReady) return;
+    chatStore.saveMessagesDebounced(chatId, messages);
+  }, [messages, homeChatId, viewingNested]);
 
   // Finalize any in-flight assistant message so per-block toolbars
   // (edit / regenerate / delete) become available after a manual stop.
@@ -678,6 +800,44 @@ const ChatArea = ({ onToggleSettings }: { onToggleSettings?: () => void }) => {
     finalizeGeneratingMessages();
   };
 
+  // Auto-title: after the first exchange of a default-titled chat, ask the
+  // model for a concise name. Falls back to the truncated first message.
+  const titleInFlight = useRef(false);
+  const maybeGenerateTitle = async (contextMsgs: ChatMessage[], targetModel: LLMModel, answer: string) => {
+    const chatId = homeChatIdRef.current;
+    if (!chatId || titleInFlight.current) return;
+    const meta = chatStore.getMeta(chatId);
+    if (!meta || (meta.title !== 'New Chat' && meta.title !== '')) return;
+    const firstUserText = contextMsgs.find(m => m.role === 'user')?.content?.trim() || '';
+    if (!firstUserText && !answer.trim()) return;
+
+    titleInFlight.current = true;
+    const fallback = () => {
+      const source = firstUserText || answer;
+      const t = source.replace(/\s+/g, ' ').slice(0, 48).trim();
+      if (t) void chatStore.rename(chatId, t).catch(() => { });
+    };
+    try {
+      const raw = await generateChatResponse(
+        activeModelRef.current || targetModel,
+        [
+          { role: 'system', content: 'You generate concise chat titles. Reply with ONLY the title: 2 to 6 words, no quotes, no trailing punctuation, no explanation.' },
+          { role: 'user', content: `First user message:\n${firstUserText.slice(0, 800)}\n\nAssistant reply excerpt:\n${answer.slice(0, 600)}` }
+        ]
+      );
+      const title = raw.replace(/<think>[\s\S]*?<\/think>/g, '').replace(/["'`\n]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 60);
+      // Another window may have renamed/titled this chat meanwhile.
+      const current = chatStore.getMeta(chatId);
+      if (!current || (current.title !== 'New Chat' && current.title !== '')) return;
+      if (title) await chatStore.rename(chatId, title);
+      else fallback();
+    } catch {
+      fallback();
+    } finally {
+      titleInFlight.current = false;
+    }
+  };
+
   const allAttachments = messages.flatMap(m => m.attachments || []);
 
   const escapeHtml = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
@@ -691,7 +851,7 @@ const ChatArea = ({ onToggleSettings }: { onToggleSettings?: () => void }) => {
         const escapedQuote = comment.quote.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
         // We use a regex to replace only the first occurrence to avoid messing up duplicate phrases
         const quoteRegex = new RegExp(`(${escapedQuote})`);
-        
+
         // Find the message this comment belongs to by looking at the ID of the comment (actually we don't have msgId here, but we can pass it)
         // Wait, formatMentions is called per message block, so we know the message block it's in.
         // We need the msgId and msgType to pass to openCommentEdit.
@@ -704,17 +864,17 @@ const ChatArea = ({ onToggleSettings }: { onToggleSettings?: () => void }) => {
 
     if (!processedText) return processedText;
     if (allAttachments.length === 0) return processedText;
-    
+
     const attachmentNames = allAttachments.map(a => a.display.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
     const namesRegex = attachmentNames.join('|');
-    
+
     // First, strip backticks around exactly a mention (e.g., `@IMG_0029.JPG`)
     const stripBackticksRegex = new RegExp(`\\\`@(${namesRegex})\\\``, 'g');
     processedText = processedText.replace(stripBackticksRegex, '@$1');
 
     // Match code blocks, inline code, or exact attachment names to strictly avoid replacing within code
     const regex = new RegExp(`(\`\`\`[\\s\\S]*?\`\`\`|\`[^\`]+\`)|(?<![a-zA-Z0-9])@(${namesRegex})`, 'g');
-    
+
     return processedText.replace(regex, (match, codeBlock, mention) => {
       if (codeBlock) return codeBlock;
       if (mention) {
@@ -726,23 +886,23 @@ const ChatArea = ({ onToggleSettings }: { onToggleSettings?: () => void }) => {
 
   const getFileIcon = (type: string) => {
     if (type === 'image') {
-      return <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect width="18" height="18" x="3" y="3" rx="2" ry="2"/><circle cx="9" cy="9" r="2"/><path d="m21 15-3.086-3.086a2 2 0 0 0-2.828 0L6 21"/></svg>;
+      return <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect width="18" height="18" x="3" y="3" rx="2" ry="2" /><circle cx="9" cy="9" r="2" /><path d="m21 15-3.086-3.086a2 2 0 0 0-2.828 0L6 21" /></svg>;
     } else if (type === 'folder') {
-      return <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13c0 1.1.9 2 2 2Z"/></svg>;
+      return <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13c0 1.1.9 2 2 2Z" /></svg>;
     } else {
-      return <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/><path d="M14 2v4a2 2 0 0 0 2 2h4"/><path d="M10 9H8"/><path d="M16 13H8"/><path d="M16 17H8"/></svg>;
+      return <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z" /><path d="M14 2v4a2 2 0 0 0 2 2h4" /><path d="M10 9H8" /><path d="M16 13H8" /><path d="M16 17H8" /></svg>;
     }
   };
 
   const chatComponents = {
     ...MarkdownComponents,
-    span: ({node, className, ...props}: any) => {
+    span: ({ node, className, ...props }: any) => {
       const mentionFile = props['data-mention'];
       if (mentionFile) {
         let att = allAttachments.find(a => a.display === mentionFile);
         let icon = null;
         if (att?.thumbnail && att?.type === 'image') {
-          icon = <img src={att.thumbnail} style={{width: 14, height: 14, objectFit: 'contain'}} />;
+          icon = <img src={att.thumbnail} style={{ width: 14, height: 14, objectFit: 'contain' }} />;
         } else {
           let type = att?.type || 'file';
           if (!att) {
@@ -754,7 +914,7 @@ const ChatArea = ({ onToggleSettings }: { onToggleSettings?: () => void }) => {
         }
 
         return (
-          <span 
+          <span
             className="mention inline-flex items-center gap-1.5 bg-white/10 border border-white/5 text-accentBright px-2 h-[24px] rounded-md mx-1 align-middle select-none cursor-pointer hover:underline"
             onClick={() => {
               if (att?.path) {
@@ -787,15 +947,16 @@ const ChatArea = ({ onToggleSettings }: { onToggleSettings?: () => void }) => {
 
     const newMsgs = [...messages, userMsg];
     setMessages(newMsgs);
-    
+
+    // A fresh prompt starts a new delegation cycle — clear the old task tree.
+    taskListStore.reset();
     await triggerGeneration(newMsgs, model);
   };
 
   const triggerGeneration = async (contextMsgs: ChatMessage[], targetModel: LLMModel, keepThinking?: string, feedbackComments?: ChatComment[]) => {
     setIsGenerating(true);
-    // New session: kill the old webview and remount a guaranteed-fresh one,
-    // and bump the session id so the Live Browser re-adopts the new node.
-    remountWebview();
+    // Bump the session id so the Live Browser re-adopts the node. The webview
+    // itself is NOT remounted anymore — agent tabs must survive across turns.
     setBrowserSessionId(id => id + 1);
     // Hide the titlebar Transcripts button while a new generation runs —
     // it only reappears once the response completes.
@@ -812,18 +973,18 @@ const ChatArea = ({ onToggleSettings }: { onToggleSettings?: () => void }) => {
     const genStartedAt = Date.now();
 
     // Add temporary loading message for assistant
-    setMessages([...contextMsgs, { 
+    setMessages([...contextMsgs, {
       id: assistantMsgId,
-      role: 'assistant', 
-      content: '', 
-      thinking: keepThinking || '', 
-      isGenerating: true 
+      role: 'assistant',
+      content: '',
+      thinking: keepThinking || '',
+      isGenerating: true
     }]);
 
     try {
       // Format payload for OpenAI-compatible API
       const formattedMessages: any[] = [];
-      
+
       // System prompt for multi-attachment focus weighting
       formattedMessages.push({
         role: 'system',
@@ -839,7 +1000,7 @@ const ChatArea = ({ onToggleSettings }: { onToggleSettings?: () => void }) => {
           const condensed = condenseThinking(msg.thinking);
           textContent = `<think>\n${condensed}\n</think>\n\n${textContent}`;
         }
-        
+
         // Append comments context
         if (msg.comments && msg.comments.length > 0) {
           textContent += `\n\n--- User Comments on this message ---\n`;
@@ -848,10 +1009,10 @@ const ChatArea = ({ onToggleSettings }: { onToggleSettings?: () => void }) => {
           });
           textContent += `--- End User Comments ---`;
         }
-        
+
         if (msg.attachments && msg.attachments.length > 0) {
           const content = [];
-          
+
           for (const att of msg.attachments) {
             if (att.type === 'image' && att.file) {
               const b64 = await fileToBase64(att.file);
@@ -861,7 +1022,7 @@ const ChatArea = ({ onToggleSettings }: { onToggleSettings?: () => void }) => {
               try {
                 // Parse document (Office, PDF, HTML, MHTML, Code, Text) cleanly
                 const parsedDoc = await parseAttachmentDocument(att.file);
-                
+
                 let fileText = parsedDoc.text;
                 // Perform RAG if document has chunks and user provided a query
                 // Note: user query might not be available directly here if not last msg, but we can pass textContent
@@ -875,7 +1036,7 @@ const ChatArea = ({ onToggleSettings }: { onToggleSettings?: () => void }) => {
                         chunkEmbeddings: parsedDoc.chunkEmbeddings,
                         topK: 15
                       });
-                      
+
                       if (searchRes.success && searchRes.topChunks) {
                         const topChunks = searchRes.topChunks;
                         const contextString = topChunks.map((c: any) => {
@@ -885,7 +1046,7 @@ const ChatArea = ({ onToggleSettings }: { onToggleSettings?: () => void }) => {
                           const metaStr = meta.length > 0 ? ` | ${meta.join(', ')}` : '';
                           return `[Source: ${c.metadata.source}${metaStr}]\n${c.text}`;
                         }).join('\n\n');
-                        
+
                         fileText = `[RAG Retrieved Context - Showing most relevant excerpts from @${att.display}]\n\n${contextString}`;
                         console.log(`[RAG] Retrieved ${topChunks.length} chunks for ${att.display}`);
                       }
@@ -894,18 +1055,18 @@ const ChatArea = ({ onToggleSettings }: { onToggleSettings?: () => void }) => {
                     console.error('[RAG Search] Failed:', ragError);
                   }
                 }
-                
+
                 textContent += `\n\n--- Attachment: @${att.display} ---\n${fileText}\n--- End Attachment ---`;
               } catch (err) {
                 console.error("Could not read file", err);
               }
             }
           }
-          
+
           if (textContent) {
             content.unshift({ type: 'text', text: textContent });
           }
-          
+
           if (content.length === 1 && content[0].type === 'text') {
             formattedMessages.push({ role: msg.role, content: textContent });
           } else {
@@ -946,6 +1107,23 @@ const ChatArea = ({ onToggleSettings }: { onToggleSettings?: () => void }) => {
       const MAX_AUTO_CONTINUES = 2;
       let autoContinues = 0;
 
+      // Annotatable-first flow: the orchestrator writes its full plan/reply,
+      // confirms via ask_user, and only then gets task_add back.
+      // ask_user itself is locked until a real WRITTEN reply exists —
+      // thinking and tool rounds do not count, so models cannot bypass the
+      // review by firing irrelevant clarification questions first.
+      const allOrchestratorTools = getOrchestratorTools();
+      let taskAddUnlocked = false;
+      orchestratorGateRef.current = { modelsListed: false };
+      const roundToolset = () => {
+        const draftReady = accumulatedContent.trim().length > 0;
+        return allOrchestratorTools.filter(t => {
+          if (t.function.name === 'ask_user') return draftReady;
+          if (t.function.name === 'task_add') return taskAddUnlocked;
+          return true;
+        });
+      };
+
       while (round < MAX_TOOL_ROUNDS) {
         round++;
 
@@ -955,7 +1133,7 @@ const ChatArea = ({ onToggleSettings }: { onToggleSettings?: () => void }) => {
 
         // Read the active model fresh each round so switch_model applies mid-conversation
         const roundModel = activeModelRef.current || targetModel;
-        const streamResult = await generateChatStream(roundModel, formattedMessages, update => {
+        const streamResult = await generateChatStreamWithRetry(roundModel, formattedMessages, update => {
           const currentToolCalls: ToolCall[] = (update.toolCalls || []).map((tc, i) => {
             try {
               const parsed = JSON.parse(tc);
@@ -1000,7 +1178,7 @@ const ChatArea = ({ onToggleSettings }: { onToggleSettings?: () => void }) => {
             }
             return newMsgs;
           });
-        }, roundSignal, undefined, getOrchestratorTools());
+        }, roundSignal, undefined, roundToolset());
 
         if (streamResult.thinking) {
           accumulatedThinking = accumulatedThinking ? `${accumulatedThinking}\n\n${streamResult.thinking}` : streamResult.thinking;
@@ -1082,6 +1260,14 @@ const ChatArea = ({ onToggleSettings }: { onToggleSettings?: () => void }) => {
         // browser/desktop calls serialize through shared locks.
         const execResults = await executeToolCalls(rawCalls, createToolContext());
 
+        // The user answered the go-ahead question — task creation unlocks.
+        if (!taskAddUnlocked && execResults.some(r => r.toolName === 'ask_user' && !r.error)) {
+          taskAddUnlocked = true;
+        }
+        if (!orchestratorGateRef.current.modelsListed && execResults.some(r => r.toolName === 'list_models' && !r.error)) {
+          orchestratorGateRef.current.modelsListed = true;
+        }
+
         execResults.forEach((er, i) => {
           const tcObj = roundToolCalls[i];
           tcObj.status = er.error ? 'error' : 'completed';
@@ -1146,7 +1332,7 @@ const ChatArea = ({ onToggleSettings }: { onToggleSettings?: () => void }) => {
         });
         try {
           const wrapModel = activeModelRef.current || targetModel;
-          const wrapResult = await generateChatStream(wrapModel, formattedMessages, update => {
+          const wrapResult = await generateChatStreamWithRetry(wrapModel, formattedMessages, update => {
             setMessages(prev => {
               const newMsgs = [...prev];
               const targetIdx = newMsgs.findIndex(m => m.id === assistantMsgId);
@@ -1158,12 +1344,12 @@ const ChatArea = ({ onToggleSettings }: { onToggleSettings?: () => void }) => {
           }, wrapSignal, undefined, []);
           if (wrapResult.thinking) accumulatedThinking = accumulatedThinking ? `${accumulatedThinking}\n\n${wrapResult.thinking}` : wrapResult.thinking;
           if (wrapResult.content) accumulatedContent = accumulatedContent ? `${accumulatedContent}\n\n${wrapResult.content}` : wrapResult.content;
-        } catch {}
+        } catch { }
       }
 
       const finalModel = activeModelRef.current || targetModel;
       let modelStats: any = null;
-      try { modelStats = await getModelStats(finalModel); } catch {}
+      try { modelStats = await getModelStats(finalModel); } catch { }
 
       const finalMsg: ChatMessage = {
         id: assistantMsgId,
@@ -1191,7 +1377,8 @@ const ChatArea = ({ onToggleSettings }: { onToggleSettings?: () => void }) => {
       // Generation over — the titlebar Transcripts button appears now.
       transcriptStore.set(buildTranscript(finalMsg));
 
-
+      // First exchange in a fresh chat → auto-title it via a cheap LLM call.
+      maybeGenerateTitle(contextMsgs, targetModel, accumulatedContent);
 
     } catch (e: any) {
       if (e.name === 'AbortError') {
@@ -1310,7 +1497,7 @@ const ChatArea = ({ onToggleSettings }: { onToggleSettings?: () => void }) => {
       const newMsgs = [...prev];
       const idx = newMsgs.findIndex(m => m.id === id);
       if (idx === -1) return prev;
-      
+
       if (!type || type === 'user') {
         newMsgs.splice(idx, 1);
       } else if (type === 'thinking') {
@@ -1332,14 +1519,16 @@ const ChatArea = ({ onToggleSettings }: { onToggleSettings?: () => void }) => {
   const handleRegenerate = async (id: string, type: 'user' | 'thinking' | 'response' | 'tools') => {
     const targetModel = currentModel || lastUsedModel;
     if (!targetModel) return;
+    // Regeneration restarts the delegation cycle — clear the old task tree.
+    taskListStore.reset();
     const msgIdx = messages.findIndex(m => m.id === id);
     if (msgIdx === -1) return;
     const msg = messages[msgIdx];
-    
+
     if (type === 'user' || type === 'thinking') {
       const contextMsgs = messages.slice(0, msgIdx);
       setMessages(contextMsgs);
-      
+
       // If we are regenerating a user prompt, wait, if type is 'user', the msgIdx points to the user prompt itself!
       // We need to re-add the user prompt and generate.
       if (type === 'user') {
@@ -1375,10 +1564,12 @@ const ChatArea = ({ onToggleSettings }: { onToggleSettings?: () => void }) => {
   // Build unified chronological activity feed from all messages
   // Each activity: { type, messageId, messageIdx, toolCallIdx?, data }
   // Order: user msg → thinking → tools block → response (per message), messages in array order
+  // Nested chats feed the exact same pipeline — they just swap the source.
+  const feedMessages = viewingNested ? nestedMessages : messages;
   const activityFeed = React.useMemo(() => {
     const activities: any[] = [];
 
-    messages.forEach((msg, msgIdx) => {
+    feedMessages.forEach((msg, msgIdx) => {
       if (msg.role === 'user') {
         activities.push({ type: 'user', messageId: msg.id, messageIdx: msgIdx, data: msg });
       } else if (msg.role === 'assistant') {
@@ -1401,7 +1592,7 @@ const ChatArea = ({ onToggleSettings }: { onToggleSettings?: () => void }) => {
         }
       }
     });
-    
+
     // The Live Browser "teleports": it renders inside the most recent tools
     // block that contains browser_* calls (single webview instance).
     const lastBrowserToolsMessageId = (() => {
@@ -1413,7 +1604,130 @@ const ChatArea = ({ onToggleSettings }: { onToggleSettings?: () => void }) => {
     })();
 
     return { activities, lastBrowserToolsMessageId };
-  }, [messages]);
+  }, [feedMessages]);
+
+  // One renderer for every feed block — nested chats pass isNested=true which
+  // suppresses the per-block toolbars (edit/regenerate/delete are home-only).
+  const renderActivity = (activity: any, idx: number, isNested: boolean) => {
+    if (activity.type === 'user') {
+      const msg = activity.data;
+      const isEditingUser = editingBlock?.id === msg.id && editingBlock?.type === 'user';
+      return (
+        <div key={`user-${activity.messageId}`} className="flex flex-col w-full text-gray-100 gap-2 group/msg relative shrink-0" style={{ order: idx * 2 }}>
+          <div className="flex items-center justify-between font-semibold text-sm text-textSecondary">
+            <span>You</span>
+          </div>
+          <div data-msg-id={msg.id} data-msg-type="user" className={`w-full group relative ${isEditingUser ? 'ring-2 ring-accent rounded-lg p-2 -m-2' : ''}`}>
+            {!isNested && !isGenerating && !msg.isGenerating && (
+              <BlockToolbar
+                onEdit={() => setEditingBlock({ id: msg.id, type: 'user' })}
+                onRegenerate={() => handleRegenerate(msg.id, 'user')}
+                onDelete={() => handleDelete(msg.id, 'user')}
+              />
+            )}
+            <div className="focus:outline-none [&_.mention]:inline-flex [&_.mention]:items-center [&_.mention]:gap-1.5 [&_.mention]:bg-white/10 [&_.mention]:border [&_.mention]:border-white/5 [&_.mention]:text-accentBright [&_.mention]:px-2 [&_.mention]:h-[24px] [&_.mention]:rounded-md [&_.mention]:mx-1 [&_.mention]:align-middle [&_.mention]:select-none">
+              <ReactMarkdown
+                remarkPlugins={[remarkGfm, remarkMath]}
+                rehypePlugins={[rehypeRaw, rehypeKatex]}
+                components={chatComponents}
+              >
+                {formatMentions(isEditingUser && editPreview ? editPreview.text : msg.content, msg.comments)}
+              </ReactMarkdown>
+            </div>
+            {((isEditingUser && editPreview ? editPreview.attachments : msg.attachments) || []).length > 0 && (
+              <div className="flex gap-2 mt-3 flex-wrap">
+                {((isEditingUser && editPreview ? editPreview.attachments : msg.attachments) || []).map((att: any, aIdx: number) => (
+                  <div key={aIdx} className="relative w-16 h-16 rounded-lg overflow-hidden border border-white/10 group/att">
+                    {att.type === 'image' && att.url ? (
+                      <img src={att.url} alt="attached" className="w-full h-full object-cover" />
+                    ) : att.thumbnail ? (
+                      <img src={att.thumbnail} alt={att.display} className="w-full h-full object-contain p-1 bg-black/20" />
+                    ) : (
+                      <div className="w-full h-full bg-white/5 flex items-center justify-center text-xs text-textSecondary">File</div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+      );
+    }
+
+    if (activity.type === 'thinking') {
+      const msg = activity.data;
+      const isEditingThinking = editingBlock?.id === msg.id && editingBlock?.type === 'thinking';
+      return (
+        <div key={`think-${activity.messageId}-${activity.partIdx ?? 0}`} className="flex flex-col w-full text-gray-100 gap-2 group/msg relative shrink-0" style={{ order: idx * 2 }}>
+          <div className="w-full group relative">
+            {!isNested && !isGenerating && !msg.isGenerating && (
+              <BlockToolbar
+                onEdit={() => setEditingBlock({ id: msg.id, type: 'thinking' })}
+                onRegenerate={() => handleRegenerate(msg.id, 'thinking')}
+                onDelete={() => handleDelete(msg.id, 'thinking')}
+              />
+            )}
+            <ThinkingBlock
+              thinking={(isEditingThinking && editPreview) ? editPreview.text : (activity.text || '')}
+              isGenerating={!!activity.live}
+            />
+          </div>
+        </div>
+      );
+    }
+
+    if (activity.type === 'tools') {
+      const { isGenerating: msgIsGenerating } = activity.data;
+      return (
+        <div key={`tools-${activity.messageId}`} className="flex flex-col w-full text-gray-100 gap-2 group/msg relative shrink-0" style={{ order: idx * 2 }}>
+          <UnifiedToolsBlock
+            activity={activity}
+            isGenerating={isGenerating}
+            msgIsGenerating={isNested ? true : msgIsGenerating}
+            activityFeed={activityFeed}
+            isBrowserExpanded={isBrowserExpanded}
+            setIsBrowserExpanded={setIsBrowserExpanded}
+            handleUserKillBrowser={handleUserKillBrowser}
+            browserSessionId={browserSessionId}
+            {...(isNested ? {} : {
+              onEdit: () => setEditingBlock({ id: activity.messageId, type: 'tools' }),
+              onRegenerate: () => handleRegenerate(activity.messageId, 'tools'),
+              onDelete: () => handleDelete(activity.messageId, 'tools')
+            })}
+          />
+        </div>
+      );
+    }
+
+    if (activity.type === 'response') {
+      const msg = activity.data;
+      const isEditingResponse = editingBlock?.id === msg.id && editingBlock?.type === 'response';
+      return (
+        <div key={`resp-${activity.messageId}`} className="flex flex-col w-full text-gray-100 gap-2 group/msg relative shrink-0" style={{ order: idx * 2 }}>
+          <div data-msg-id={msg.id} data-msg-type="response" className={`w-full group relative ${isEditingResponse ? 'ring-2 ring-accent rounded-lg p-2 -m-2' : ''}`}>
+            {!isNested && !isGenerating && !msg.isGenerating && (
+              <BlockToolbar
+                onEdit={() => setEditingBlock({ id: msg.id, type: 'response' })}
+                onRegenerate={() => handleRegenerate(msg.id, 'response')}
+                onDelete={() => handleDelete(msg.id, 'response')}
+              />
+            )}
+            <div className="[&_.mention]:inline-flex [&_.mention]:items-center [&_.mention]:gap-1.5 [&_.mention]:bg-white/10 [&_.mention]:border [&_.mention]:border-white/5 [&_.mention]:text-accentBright [&_.mention]:px-2 [&_.mention]:h-[24px] [&_.mention]:rounded-md [&_.mention]:mx-1 [&_.mention]:align-middle [&_.mention]:select-none">
+              <ReactMarkdown
+                remarkPlugins={[remarkGfm, remarkMath]}
+                rehypePlugins={[rehypeRaw, rehypeKatex]}
+                components={chatComponents}
+              >
+                {formatMentions(isEditingResponse && editPreview ? editPreview.text : msg.content, msg.comments) + (msg.isGenerating ? ' ⬤' : '')}
+              </ReactMarkdown>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    return null;
+  };
 
   return (
     <div className="flex-1 flex flex-col bg-surface relative rounded-lg overflow-hidden min-w-0 bevel-light">
@@ -1443,55 +1757,42 @@ const ChatArea = ({ onToggleSettings }: { onToggleSettings?: () => void }) => {
       {/* Main Content */}
       <div ref={scrollContainerRef} onScroll={handleScroll} className="flex-1 flex flex-col items-center overflow-y-auto w-full relative">
 
-        {inspectingAgentId ? (() => {
-          const agent = getAgentsSnapshot([inspectingAgentId])[0];
-          const transcript = getAgentTranscript(inspectingAgentId);
-          return (
-            <div className="chat-measure flex flex-col gap-4 py-6 px-4 sm:px-6 lg:px-8 text-sm xl:text-base w-full">
-              <div className="flex items-center gap-2 sticky top-0 z-10 bg-surface py-2">
-                <button
-                  onClick={() => setInspectingAgentId(null)}
-                  className="p-1.5 rounded-full text-textSecondary hover:text-white hover:bg-white/10 transition-colors"
-                  title="Back to orchestrator chat"
-                >
-                  <ChevronLeft size={16} />
-                </button>
-                <span className="text-sm font-medium text-white truncate">{agent?.label || 'Agent'}</span>
-                {agent?.model && <span className="text-[11px] font-mono text-textSecondary">{agent.model.provider}/{agent.model.id}</span>}
-                {agent && (
-                  <span className={`ml-auto text-[11px] font-mono shrink-0 ${
-                    agent.status === 'running' ? 'text-accentBright animate-pulse'
-                    : agent.status === 'error' ? 'text-red-400'
-                    : agent.status === 'done' ? 'text-green-400' : 'text-textSecondary'
-                  }`}>
-                    {agent.status}
-                  </span>
-                )}
-              </div>
-              {transcript.map((turn, i) => (
-                turn.role === 'system' ? null : (
-                  <div key={i} className="flex flex-col w-full text-gray-100 gap-2">
-                    <div className="font-semibold text-xs text-textSecondary">
-                      {turn.role === 'user' ? 'Task / Tool results' : turn.role === 'event' ? '' : 'Agent'}
-                    </div>
-                    <div className="w-full [&_pre]:whitespace-pre-wrap [&_code]:break-all">
-                      <ReactMarkdown
-                        remarkPlugins={[remarkGfm, remarkMath]}
-                        rehypePlugins={[rehypeRaw, rehypeKatex]}
-                        components={chatComponents}
-                      >
-                        {turn.content}
-                      </ReactMarkdown>
-                    </div>
-                  </div>
-                )
-              ))}
-              {transcript.length === 0 && (
-                <div className="text-textSecondary text-sm italic">No transcript recorded yet.</div>
-              )}
+        {viewingNested ? (
+          <div className="chat-measure flex flex-col gap-4 py-6 px-4 sm:px-6 lg:px-8 text-sm xl:text-base w-full">
+            {/* Nested chat header — chevron returns to the parent chat */}
+            <div className="flex items-center gap-2 sticky top-0 z-10 bg-surface py-2">
+              <button
+                onClick={backToParentChat}
+                className="p-1.5 rounded-full text-textSecondary hover:text-white hover:bg-white/10 transition-colors"
+                title="Back to parent chat"
+              >
+                <ChevronLeft size={16} />
+              </button>
+              <span className="text-sm font-medium text-white truncate">{nestedMeta?.title || 'Nested chat'}</span>
+              {(() => {
+                const agent = viewingAgentId ? getAgentsSnapshot([viewingAgentId])[0] : null;
+                return (
+                  <>
+                    {agent?.model && <span className="text-[11px] font-mono text-textSecondary">{agent.model.provider}/{agent.model.id}</span>}
+                    {agent && (
+                      <span className={`ml-auto text-[11px] font-mono shrink-0 ${agent.status === 'running' || agent.status === 'queued' ? 'text-accentBright animate-pulse'
+                          : agent.status === 'error' ? 'text-red-400'
+                            : 'text-green-400'
+                        }`}>
+                        {agent.status}
+                      </span>
+                    )}
+                  </>
+                );
+              })()}
             </div>
-          );
-        })() : activityFeed.activities.length === 0 ? (
+            {activityFeed.activities.map((activity, idx) => renderActivity(activity, idx, true))}
+            {activityFeed.activities.length === 0 && (
+              <div className="text-textSecondary text-sm italic">The agent hasn't produced any output yet…</div>
+            )}
+            <div ref={bottomRef} className="w-full shrink-0" />
+          </div>
+        ) : activityFeed.activities.length === 0 ? (
           <div className="flex-1 flex flex-col items-center justify-center w-full px-4 sm:px-6 lg:px-8">
             <div className="flex flex-col items-center chat-measure mt-10">
               <div className="w-16 h-16 bg-white rounded-full flex items-center justify-center mb-6">
@@ -1502,125 +1803,7 @@ const ChatArea = ({ onToggleSettings }: { onToggleSettings?: () => void }) => {
           </div>
         ) : (
           <div className="chat-measure flex flex-col gap-4 py-6 px-4 sm:px-6 lg:px-8 text-sm xl:text-base">
-            {activityFeed.activities.map((activity, idx) => {
-
-              if (activity.type === 'user') {
-                const msg = activity.data;
-                const isEditingUser = editingBlock?.id === msg.id && editingBlock?.type === 'user';
-                return (
-                  <div key={`user-${activity.messageId}`} className="flex flex-col w-full text-gray-100 gap-2 group/msg relative shrink-0" style={{ order: idx * 2 }}>
-                    <div className="flex items-center justify-between font-semibold text-sm text-textSecondary">
-                      <span>You</span>
-                    </div>
-                    <div data-msg-id={msg.id} data-msg-type="user" className={`w-full group relative ${isEditingUser ? 'ring-2 ring-accent rounded-lg p-2 -m-2' : ''}`}>
-                      {!isGenerating && !msg.isGenerating && (
-                        <BlockToolbar 
-                          onEdit={() => setEditingBlock({ id: msg.id, type: 'user' })} 
-                          onRegenerate={() => handleRegenerate(msg.id, 'user')} 
-                          onDelete={() => handleDelete(msg.id, 'user')} 
-                        />
-                      )}
-                      <div className="focus:outline-none [&_.mention]:inline-flex [&_.mention]:items-center [&_.mention]:gap-1.5 [&_.mention]:bg-white/10 [&_.mention]:border [&_.mention]:border-white/5 [&_.mention]:text-accentBright [&_.mention]:px-2 [&_.mention]:h-[24px] [&_.mention]:rounded-md [&_.mention]:mx-1 [&_.mention]:align-middle [&_.mention]:select-none">
-                        <ReactMarkdown 
-                          remarkPlugins={[remarkGfm, remarkMath]} 
-                          rehypePlugins={[rehypeRaw, rehypeKatex]} 
-                          components={chatComponents}
-                        >
-                          {formatMentions(isEditingUser && editPreview ? editPreview.text : msg.content, msg.comments)}
-                        </ReactMarkdown>
-                      </div>
-                      {((isEditingUser && editPreview ? editPreview.attachments : msg.attachments) || []).length > 0 && (
-                        <div className="flex gap-2 mt-3 flex-wrap">
-                          {((isEditingUser && editPreview ? editPreview.attachments : msg.attachments) || []).map((att: any, aIdx: number) => (
-                            <div key={aIdx} className="relative w-16 h-16 rounded-lg overflow-hidden border border-white/10 group/att">
-                              {att.type === 'image' && att.url ? (
-                                <img src={att.url} alt="attached" className="w-full h-full object-cover" />
-                              ) : att.thumbnail ? (
-                                <img src={att.thumbnail} alt={att.display} className="w-full h-full object-contain p-1 bg-black/20" />
-                              ) : (
-                                <div className="w-full h-full bg-white/5 flex items-center justify-center text-xs text-textSecondary">File</div>
-                              )}
-                            </div>
-                          ))}
-                        </div>
-                      )}
-                    </div>
-                  </div>
-                );
-              }
-              
-              if (activity.type === 'thinking') {
-                const msg = activity.data;
-                const isEditingThinking = editingBlock?.id === msg.id && editingBlock?.type === 'thinking';
-                return (
-                  <div key={`think-${activity.messageId}-${activity.partIdx ?? 0}`} className="flex flex-col w-full text-gray-100 gap-2 group/msg relative shrink-0" style={{ order: idx * 2 }}>
-                    <div className="w-full group relative">
-                      {!isGenerating && !msg.isGenerating && (
-                        <BlockToolbar
-                          onEdit={() => setEditingBlock({ id: msg.id, type: 'thinking' })}
-                          onRegenerate={() => handleRegenerate(msg.id, 'thinking')}
-                          onDelete={() => handleDelete(msg.id, 'thinking')}
-                        />
-                      )}
-                      <ThinkingBlock
-                        thinking={(isEditingThinking && editPreview) ? editPreview.text : (activity.text || '')}
-                        isGenerating={!!activity.live}
-                      />
-                    </div>
-                  </div>
-                );
-              }
-              
-              if (activity.type === 'tools') {
-                const { isGenerating: msgIsGenerating } = activity.data;
-                return (
-                  <div key={`tools-${activity.messageId}`} className="flex flex-col w-full text-gray-100 gap-2 group/msg relative shrink-0" style={{ order: idx * 2 }}>
-                    <UnifiedToolsBlock
-                      activity={activity}
-                      isGenerating={isGenerating}
-                      msgIsGenerating={msgIsGenerating}
-                      activityFeed={activityFeed}
-                      isBrowserExpanded={isBrowserExpanded}
-                      setIsBrowserExpanded={setIsBrowserExpanded}
-                      handleUserKillBrowser={handleUserKillBrowser}
-                      browserSessionId={browserSessionId}
-                      onEdit={() => setEditingBlock({ id: activity.messageId, type: 'tools' })}
-                      onRegenerate={() => handleRegenerate(activity.messageId, 'tools')}
-                      onDelete={() => handleDelete(activity.messageId, 'tools')}
-                    />
-                  </div>
-                );
-              }
-              
-              if (activity.type === 'response') {
-                const msg = activity.data;
-                const isEditingResponse = editingBlock?.id === msg.id && editingBlock?.type === 'response';
-                return (
-                  <div key={`resp-${activity.messageId}`} className="flex flex-col w-full text-gray-100 gap-2 group/msg relative shrink-0" style={{ order: idx * 2 }}>
-                    <div data-msg-id={msg.id} data-msg-type="response" className={`w-full group relative ${isEditingResponse ? 'ring-2 ring-accent rounded-lg p-2 -m-2' : ''}`}>
-                      {!isGenerating && !msg.isGenerating && (
-                        <BlockToolbar 
-                          onEdit={() => setEditingBlock({ id: msg.id, type: 'response' })} 
-                          onRegenerate={() => handleRegenerate(msg.id, 'response')} 
-                          onDelete={() => handleDelete(msg.id, 'response')} 
-                        />
-                      )}
-                      <div className="[&_.mention]:inline-flex [&_.mention]:items-center [&_.mention]:gap-1.5 [&_.mention]:bg-white/10 [&_.mention]:border [&_.mention]:border-white/5 [&_.mention]:text-accentBright [&_.mention]:px-2 [&_.mention]:h-[24px] [&_.mention]:rounded-md [&_.mention]:mx-1 [&_.mention]:align-middle [&_.mention]:select-none">
-                        <ReactMarkdown 
-                          remarkPlugins={[remarkGfm, remarkMath]} 
-                          rehypePlugins={[rehypeRaw, rehypeKatex]} 
-                          components={chatComponents}
-                        >
-                          {formatMentions(isEditingResponse && editPreview ? editPreview.text : msg.content, msg.comments) + (msg.isGenerating ? ' ⬤' : '')}
-                        </ReactMarkdown>
-                      </div>
-                    </div>
-                  </div>
-                );
-              }
-              
-return null;
-            })}
+            {activityFeed.activities.map((activity, idx) => renderActivity(activity, idx, false))}
 
             <div ref={bottomRef} className="w-full shrink-0" style={{ order: 999999 }} />
           </div>
@@ -1629,7 +1812,7 @@ return null;
 
       {/* Selection Pop-up */}
       {selectionContext && !commentInputContext && (
-        <div 
+        <div
           className="fixed z-50 transform -translate-x-1/2 -translate-y-full pb-2 comment-popup-ui"
           style={{ left: selectionContext.x, top: selectionContext.y }}
         >
@@ -1746,12 +1929,12 @@ return null;
       )}
 
       {/* Input Area */}
-            <div className="w-full flex justify-center p-4 sm:px-6 lg:px-8 bg-gradient-to-t from-surface via-surface to-transparent pt-10">
+      <div className="w-full flex justify-center p-4 sm:px-6 lg:px-8 bg-gradient-to-t from-surface via-surface to-transparent pt-10">
         <div className="chat-measure">
-          <ChatInput 
-            onSend={handleSendMessage} 
-            onStop={handleStop} 
-            disabled={isGenerating} 
+          <ChatInput
+            onSend={handleSendMessage}
+            onStop={handleStop}
+            disabled={isGenerating || !!viewingNested}
             editingBlock={editingBlock}
             onSaveEdit={handleSaveEdit}
             onCancelEdit={() => {
@@ -1762,9 +1945,6 @@ return null;
             onEditPreview={(text, attachments) => setEditPreview({ text, attachments })}
             messages={messages}
           />
-          <div className="text-center text-xs text-textSecondary mt-3">
-            AI models can make mistakes. Verify important information.
-          </div>
         </div>
       </div>
     </div>

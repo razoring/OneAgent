@@ -1,6 +1,37 @@
-import { agentBrowserStore } from './agentBrowserStore';
+import { agentBrowserStore, getCurrentActor } from './agentBrowserStore';
+
+// Per-tab webview registry owned by AgentBrowser: tabId -> { wv, ready }.
+const tabRegistry = (): Map<string, { wv: any; ready: boolean }> | undefined =>
+  (window as any).__oneagentTabs;
 
 export const getActiveWebview = () => (window as any).activeWebview;
+
+// Actor-aware target resolution: a sub-agent's browser_* calls hit ITS OWN
+// tab; the user / orchestrator hit the currently visible one. An actor whose
+// webview is not registered YET resolves to null — waitForActiveWebview keeps
+// polling instead of crossing into another tab's page.
+const resolveTargetWebview = (): any => {
+  const registry = tabRegistry();
+  if (!registry || registry.size === 0) return getActiveWebview();
+  const actor = getCurrentActor();
+  let tabId: string | null | undefined;
+  if (actor) {
+    // Actor has no tab yet — lazily create one so tools never cross wires.
+    tabId = agentBrowserStore.getTabIdForAgent(actor) ?? agentBrowserStore.ensureAgentTab(actor).id;
+    return registry.get(tabId)?.wv ?? null;
+  }
+  tabId = agentBrowserStore.getActiveId();
+  return tabId ? (registry.get(tabId)?.wv ?? getActiveWebview()) : getActiveWebview();
+};
+
+const isTargetReady = (wv: any): boolean => {
+  if (!wv) return false;
+  const registry = tabRegistry();
+  for (const entry of registry?.values() ?? []) {
+    if (entry.wv === wv) return entry.ready && wv.isConnected;
+  }
+  return !!(window as any).activeWebviewReady && wv.isConnected;
+};
 
 // Device-emulation scale applied to the agent webview (set by AgentBrowser on
 // dom-ready, currently 0.5). Input events are injected in widget space while
@@ -26,10 +57,10 @@ const sendInputEvent = async (opts: any) => {
 export const waitForActiveWebview = async (timeoutMs = 15000): Promise<any> => {
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
-    const wv = (window as any).activeWebview;
+    const wv = resolveTargetWebview();
     // isConnected matters: the ready flag can outlive the element (recreate /
     // reparent races) and calling methods on a detached webview throws.
-    if (wv && (window as any).activeWebviewReady && wv.isConnected) return wv;
+    if (wv && isTargetReady(wv)) return wv;
     await new Promise(r => setTimeout(r, 100));
   }
   throw new Error("No active webview available");
@@ -840,13 +871,13 @@ export const executeBrowserNavigation = async (action: string, url?: string): Pr
       while (Date.now() - start < 15000) {
         try {
           if (!wv.isLoading()) {
-            agentBrowserStore.navigate(wv.getURL());
+            patchTabUrlForWebview(wv);
             return "Navigation complete: " + wv.getURL();
           }
         } catch {}
         await new Promise(r => setTimeout(r, 150));
       }
-      agentBrowserStore.navigate(wv.getURL());
+      patchTabUrlForWebview(wv);
       return "Navigation still in progress after 15s: " + wv.getURL();
     }
     case 'back':
@@ -864,6 +895,18 @@ export const executeBrowserNavigation = async (action: string, url?: string): Pr
   return "OK";
 };
 
+// Maps a webview element back to its tab and records the new URL.
+const patchTabUrlForWebview = (wv: any) => {
+  const registry = tabRegistry();
+  if (!registry) return;
+  for (const [tabId, entry] of registry) {
+    if (entry.wv === wv) {
+      try { agentBrowserStore.patchTab(tabId, { url: wv.getURL(), loading: false }); } catch {}
+      return;
+    }
+  }
+};
+
 // Destroys the current <webview> element and mounts a fresh one at the
 // store's current URL. AgentBrowser listens for this event; the new instance
 // re-registers window.activeWebview once its guest attaches (dom-ready).
@@ -871,10 +914,15 @@ export const remountWebview = (): void => {
   window.dispatchEvent(new Event('oneagent-browser-recreate'));
 };
 
-// Kills the live webview session: stops in-flight loads, resets the URL store
-// and remounts a brand-new webview on the start page. Used by both the agent's
-// browser_terminate tool and the user-facing trash button in the Live Browser header.
+// Kills browser sessions. Actor-aware: a sub-agent's browser_terminate closes
+// only ITS OWN tab; the user's trash button (no actor) closes everything.
 export const terminateBrowserSession = async (): Promise<void> => {
+  const actor = getCurrentActor();
+  if (actor) {
+    const tabId = agentBrowserStore.getTabIdForAgent(actor);
+    if (tabId) agentBrowserStore.closeTab(tabId);
+    return;
+  }
   const wv = getActiveWebview();
   if (wv) {
     // Capture the final frame first — the Live Browser panel shows it as a
@@ -888,7 +936,6 @@ export const terminateBrowserSession = async (): Promise<void> => {
     // main-process GUEST_VIEW_MANAGER_CALL handler.
     try { wv.stop(); } catch {}
   }
-  agentBrowserStore.navigate('https://html.duckduckgo.com/');
   remountWebview();
 };
 

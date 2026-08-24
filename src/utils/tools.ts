@@ -204,7 +204,7 @@ export const SYSTEM_TOOLS = [
     { keys: { type: 'array', items: { type: 'string' }, description: "Modifier/key names, e.g. ['control','shift','t']." } }, ['keys']),
 
   // ── Self-modification (requires approval) ─────────────────────────────────
-  fn('list_models', 'List every model available across enabled providers. Read-only, instant. Call before switch_model to see valid options.',
+  fn('list_models', 'List every model available across enabled providers — including live VRAM data for local providers: which models are loaded and each model\'s estimated VRAM cost vs the remaining headroom. Read-only, instant. Call before switch_model or spawn_agent.',
     {}),
   fn('get_settings', 'Read your current generation settings (temperature, top_p, thinking level, token limits, context window). Read-only, instant.',
     {}),
@@ -228,10 +228,10 @@ export const SYSTEM_TOOLS = [
   // ── Sub-agents (instant to spawn; sub-agents inherit the approval gate) ───
   fn('spawn_agent', 'Spawn an autonomous sub-agent that works on ONE focused task with its own context window and tool subset, while you keep orchestrating. It reports back a concise final answer. IMPORTANT: independent subtasks get one agent EACH, all spawned in the SAME turn — up to 5 run in parallel (e.g. five stock quotes = five browser agents, one per ticker). Sub-agents never receive desktop tools.',
     {
-      task: str('Precise, self-contained instructions. Include everything the sub-agent needs — it cannot see this conversation.'),
+      task: str('REQUIRED — the full self-contained instructions for the sub-agent (it cannot see this conversation). Put the actual work order here, NOT in context.'),
       tools: { type: 'string', enum: ['general', 'browser', 'files', 'web', 'observe'], description: 'Tool preset (default general: safe reads everywhere). browser = full virtual browser kit; files = file read/write/search; web = search + browse; observe = read-only page inspection.' },
-      context: str('Optional extra data to hand over (text, URLs, prior findings).'),
-      model: str('Model id for the sub-agent (see list_models). Defaults to YOUR current model.'),
+      context: str('Optional extra DATA only (URLs, prior findings) — never the work order itself.'),
+      model: str('Model id for the sub-agent (see list_models) — a real model id, never a tool-preset name. MUST fit within the VRAM headroom shown by list_models, or it evicts loaded models mid-run. Safest: omit to inherit YOUR model.'),
       provider: str('Provider id for the model (optional disambiguation).'),
       params: { type: 'object', properties: {
         temperature: num('Override temperature for this run.'),
@@ -269,12 +269,16 @@ export const SYSTEM_TOOLS = [
     {}),
 
   // ── User interaction ─────────────────────────────────────────────────────
+  fn('complete_task', 'Mark YOUR OWN assigned task as COMPLETED. Call it exactly once, ONLY when your work genuinely satisfies the task and you can state the final result. Finishing your turn without this call leaves the task flagged "needs check-off" for the orchestrator to verify. Requires no arguments except a summary.',
+    {
+      summary: str('One-line final result of the task (what was accomplished / found).')
+    }, ['summary']),
   fn('ask_user', 'Ask the user a question or request permission. BLOCKS until the user responds — you cannot act until then. The user sees your question with your options as multiple-choice buttons plus a free-text "custom response" field (always available, not listed in options). Use for: permission to continue, choices between approaches, checkpoints where the user must do something first (e.g. solve a captcha — offer an option like "I\'m done"). Multi-step forms: batch SEVERAL ask_user calls in ONE turn (they queue up as 1-of-N with prev/next navigation); use separate sequential calls instead when later questions depend on earlier answers.',
     {
       question: str('The question or permission request, shown as the prompt title.'),
       detail: str('Optional technical detail shown in a mono block (command, URL, code snippet…).'),
-      options: { type: 'array', items: { type: 'string' }, description: '1-8 short answer options the user can click.' }
-    }, ['question'])
+      options: { type: 'array', items: { type: 'string' }, description: 'REQUIRED — at least one CONCRETE clickable answer (standard approval flow: ["Proceed"]). Free-text is always available to the user additionally.' }
+    }, ['question', 'options'])
 ];
 
 // Tools exposed to the model. search_web is only included when a search

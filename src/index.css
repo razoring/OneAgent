@@ -201,6 +201,15 @@ body {
   background: #505050;
 }
 
+/* Hide scrollbars while keeping scrollability (browser tab strip) */
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+.no-scrollbar {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
 /*codemirror dark theme*/
 .cm-editor {
   background-color: transparent !important;

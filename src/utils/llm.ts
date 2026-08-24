@@ -255,13 +255,86 @@ export const getProviderStatus = async (): Promise<Record<string, any>> => {
 
 // Combined self-stats snapshot consumed by the get_model_stats tool.
 export const getModelStats = async (activeModel?: LLMModel | null) => {
-  const [loaded] = await Promise.all([getProviderStatus()]);
+  const [report] = await Promise.all([getVramReport()]);
   return {
     activeModel: activeModel ? { id: activeModel.id, provider: activeModel.provider } : null,
     settings: getModelSettings(),
     tokenUsage: getSessionUsage(),
-    loadedModels: loaded
+    loadedModels: report.loadedModels,
+    ...(report.totalBytes != null ? {
+      vram: {
+        usedBytes: report.usedBytes,
+        totalBytes: report.totalBytes,
+        headroomBytes: report.headroomBytes,
+        note: 'A sub-agent/switch model must fit within headroomBytes or it will evict loaded models.'
+      }
+    } : {})
   };
+};
+
+// ─── VRAM awareness ──────────────────────────────────────────────────────────
+// Local providers keep a finite model cache: loading a new model can evict
+// resident ones (e.g. the orchestrator itself). These helpers give the agent
+// the numbers it needs to pick models that FIT alongside what is already
+// loaded, instead of triggering evict/reload thrash mid-task.
+
+export interface VramReport {
+  // False when only token-metered cloud providers are enabled.
+  supported: boolean;
+  usedBytes?: number;
+  totalBytes?: number;
+  headroomBytes?: number;
+  // providerId -> currently resident models (exact footprints when reported).
+  loadedModels: Record<string, { id: string; vramBytes?: number; sizeBytes?: number }[]>;
+  // lowercase model id -> on-disk size (estimation source for unloaded models).
+  diskSizes: Record<string, number>;
+}
+
+export const getVramReport = async (): Promise<VramReport> => {
+  const [status, gpu] = await Promise.all([
+    getProviderStatus(),
+    ((window as any).electronAPI?.vramUsage?.() ?? Promise.resolve({ success: false })) as Promise<any>
+  ]);
+  const loadedModels: VramReport['loadedModels'] = {};
+  const diskSizes: Record<string, number> = {};
+  let anyLocal = false;
+  for (const [pid, s] of Object.entries(status || {})) {
+    const st: any = s;
+    if (st?.kind === 'vram') {
+      anyLocal = true;
+      loadedModels[pid] = (st.models || []).map((m: any) => ({ id: m.id, vramBytes: m.vramBytes, sizeBytes: m.sizeBytes }));
+      for (const m of st.available || []) diskSizes[String(m.id).toLowerCase()] = m.sizeBytes;
+    } else if (st?.kind === 'load-state') {
+      anyLocal = true;
+      loadedModels[pid] = (st.models || []).map((m: any) => ({ id: m.id }));
+    }
+  }
+  const usedBytes = gpu?.success ? gpu.usedBytes : undefined;
+  const totalBytes = gpu?.success ? gpu.totalBytes : undefined;
+  return {
+    supported: anyLocal,
+    usedBytes,
+    totalBytes,
+    headroomBytes: usedBytes != null && totalBytes != null ? Math.max(0, totalBytes - usedBytes) : undefined,
+    loadedModels,
+    diskSizes
+  };
+};
+
+// Rough VRAM requirement for a model: exact footprint when already resident,
+// otherwise its on-disk size plus an allowance for KV cache/activations at
+// default context (~0.8 GiB — deliberately generous so estimates err safe).
+const VRAM_OVERHEAD_BYTES = Math.round(0.8 * 1024 * 1024 * 1024);
+
+export const estimateModelVram = (modelId: string, report: VramReport): number | undefined => {
+  const key = String(modelId).toLowerCase();
+  for (const models of Object.values(report.loadedModels)) {
+    const hit = models.find(m => String(m.id).toLowerCase() === key);
+    if (hit?.vramBytes != null) return hit.vramBytes;
+  }
+  const disk = report.diskSizes[key];
+  if (disk == null) return undefined;
+  return disk + VRAM_OVERHEAD_BYTES;
 };
 
 // Provider-specific reasoning/thinking parameters.
@@ -810,6 +883,38 @@ export const generateChatStream = async (
     isCallingTool: parsed.isCallingTool
   });
   return { content: parsed.content, thinking: parsed.thinking, toolCalls: parsed.toolCalls, isCallingTool: parsed.isCallingTool };
+};
+
+// Local inference servers (Ollama especially) fail individual requests with
+// transient 5xx api_errors when the model emits malformed/truncated tool-call
+// syntax or the runner hiccups ("EOF", XML parse errors). These are per-request
+// failures — the next request usually succeeds — so agent loops retry instead
+// of dying mid-task.
+const TRANSIENT_ERROR_RE = /status: 5\d\d|\bEOF\b|ECONNRESET|ECONNREFUSED|socket hang up|network|fetch failed/i;
+
+export const generateChatStreamWithRetry = async (
+  model: LLMModel,
+  messages: any[],
+  onUpdate: (update: StreamUpdate) => void,
+  signal?: AbortSignal,
+  settings?: ModelSettings,
+  tools?: any[],
+  maxAttempts: number = 3
+): Promise<ChatStreamResult> => {
+  let lastError: any;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
+    try {
+      return await generateChatStream(model, messages, onUpdate, signal, settings, tools);
+    } catch (e: any) {
+      lastError = e;
+      const msg = String(e?.message || e);
+      if (e?.name === 'AbortError' || !TRANSIENT_ERROR_RE.test(msg) || attempt === maxAttempts) throw e;
+      console.warn(`[llm] transient stream error (attempt ${attempt}/${maxAttempts}), retrying: ${msg}`);
+      await new Promise(r => setTimeout(r, 600 * attempt));
+    }
+  }
+  throw lastError;
 };
 
 export const generateChatResponse = async (

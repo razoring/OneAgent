@@ -63,4 +63,20 @@ const { ipcRenderer, webUtils } = require('electron');
   desktopDrag: (opts: { fromX: number, fromY: number, toX: number, toY: number }) => ipcRenderer.invoke('desktop-drag', opts),
   desktopType: (text: string) => ipcRenderer.invoke('desktop-type', { text }),
   desktopHotkey: (opts: { keys: string[] }) => ipcRenderer.invoke('desktop-hotkey', opts),
+
+  // Chat history
+  chatsList: () => ipcRenderer.invoke('chats-list'),
+  chatsLoad: (chatId: string) => ipcRenderer.invoke('chats-load', chatId),
+  chatsSave: (chatId: string, payload: { meta?: any; messages?: any[] }) => ipcRenderer.invoke('chats-save', chatId, payload),
+  chatsCreate: (spec: { parentId?: string | null; title?: string; agentId?: string }) => ipcRenderer.invoke('chats-create', spec),
+  chatsRename: (chatId: string, title: string) => ipcRenderer.invoke('chats-rename', chatId, title),
+  chatsDelete: (chatId: string) => ipcRenderer.invoke('chats-delete', chatId),
+  chatsExportZip: (chatId: string) => ipcRenderer.invoke('chats-export-zip', chatId),
+
+  // Browser shell — link targets open as new tabs in the shared browser
+  onBrowserNewTab: (callback: (url: string) => void) => {
+    const handler = (_e: any, url: string) => callback(url);
+    ipcRenderer.on('oneagent-browser-new-tab', handler);
+    return () => ipcRenderer.removeListener('oneagent-browser-new-tab', handler);
+  },
 };
