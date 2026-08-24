@@ -226,7 +226,7 @@ export const SYSTEM_TOOLS = [
     }),
 
   // ── Sub-agents (instant to spawn; sub-agents inherit the approval gate) ───
-  fn('spawn_agent', 'Spawn an autonomous sub-agent that works on ONE focused task with its own context window and tool subset, while you keep orchestrating. It reports back a concise final answer. Use for bulky visual processing (e.g. interpreting Set-of-Mark screenshots), independent research threads, or parallelizable chunks. Sub-agents cannot spawn further agents and never receive desktop tools.',
+  fn('spawn_agent', 'Spawn an autonomous sub-agent that works on ONE focused task with its own context window and tool subset, while you keep orchestrating. It reports back a concise final answer. IMPORTANT: independent subtasks get one agent EACH, all spawned in the SAME turn — up to 5 run in parallel (e.g. five stock quotes = five browser agents, one per ticker). Sub-agents never receive desktop tools.',
     {
       task: str('Precise, self-contained instructions. Include everything the sub-agent needs — it cannot see this conversation.'),
       tools: { type: 'string', enum: ['general', 'browser', 'files', 'web', 'observe'], description: 'Tool preset (default general: safe reads everywhere). browser = full virtual browser kit; files = file read/write/search; web = search + browse; observe = read-only page inspection.' },
@@ -241,6 +241,8 @@ export const SYSTEM_TOOLS = [
         context_window: num('Override context window.')
       }, description: 'Parameter overrides applied to this sub-agent only.' },
       label: str('Short human-readable label shown in the UI (e.g. "SoM reader A").'),
+      task_id: str('Bind this agent to a formal task from task_list — its status/timing then track in the UI automatically.'),
+      can_delegate: bool('Grant this agent spawn_agent/check_agents/task_* tools so IT can delegate further (depth-limited).'),
       wait_ms: num('If set, block up to this many ms for completion before returning (poll-friendly); otherwise spawn-and-continue.')
     }, ['task']),
   fn('check_agents', 'Check status/results of spawned sub-agents. Optionally block until they finish or time out.',
@@ -248,6 +250,23 @@ export const SYSTEM_TOOLS = [
       agent_ids: { type: 'array', items: { type: 'string' }, description: 'Specific ids; omit for ALL.' },
       wait_ms: num('Block up to this many ms until done (default 0 = snapshot only).')
     }),
+
+  // ── Formal task tree ──────────────────────────────────────────────────────
+  fn('task_add', 'Create formal tasks (shown live in the UI). Use after plan approval: one node per delegable step, children under a parent via parent_id.',
+    {
+      items: { type: 'array', items: { type: 'object', properties: { title: { type: 'string' }, detail: { type: 'string', description: 'Optional acceptance criteria / notes.' } }, required: ['title'] }, description: 'Tasks to create.' },
+      parent_id: str('Nest these tasks under an existing task id.'),
+      title: str('Single-task shorthand (use instead of items).'),
+      detail: str('Detail for the single-task shorthand.')
+    }),
+  fn('task_update', 'Update a formal task: set status (queued/running/done/error) or attach a short result summary.',
+    {
+      task_id: str('Task id from task_list.'),
+      status: { type: 'string', enum: ['queued', 'running', 'done', 'error'] },
+      summary: str('Short outcome summary (first line shown in the UI).')
+    }, ['task_id']),
+  fn('task_list', 'List all formal tasks with ids, statuses, nesting and overall leaf progress.',
+    {}),
 
   // ── User interaction ─────────────────────────────────────────────────────
   fn('ask_user', 'Ask the user a question or request permission. BLOCKS until the user responds — you cannot act until then. The user sees your question with your options as multiple-choice buttons plus a free-text "custom response" field (always available, not listed in options). Use for: permission to continue, choices between approaches, checkpoints where the user must do something first (e.g. solve a captcha — offer an option like "I\'m done"). Multi-step forms: batch SEVERAL ask_user calls in ONE turn (they queue up as 1-of-N with prev/next navigation); use separate sequential calls instead when later questions depend on earlier answers.',
@@ -263,3 +282,16 @@ export const SYSTEM_TOOLS = [
 // the embedded browser tools to search.
 export const getSystemTools = () =>
   isWebSearchConfigured() ? SYSTEM_TOOLS : SYSTEM_TOOLS.filter(t => t.function.name !== 'search_web');
+
+// The orchestrator supervises instead of executing: no file/shell/browser/
+// desktop/switch tools. It plans, delegates via sub-agents, tracks tasks,
+// introspects models/settings, and talks to the user. Enforcement lives here
+// rather than only in prompts — the model cannot call tools it was never given.
+const ORCHESTRATOR_TOOL_NAMES = new Set([
+  'spawn_agent', 'check_agents', 'task_add', 'task_update', 'task_list',
+  'list_models', 'get_model_stats', 'get_settings',
+  'ask_user'
+]);
+
+export const getOrchestratorTools = () =>
+  SYSTEM_TOOLS.filter(t => ORCHESTRATOR_TOOL_NAMES.has(t.function.name));

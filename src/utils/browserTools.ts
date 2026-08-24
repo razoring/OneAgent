@@ -27,7 +27,9 @@ export const waitForActiveWebview = async (timeoutMs = 15000): Promise<any> => {
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
     const wv = (window as any).activeWebview;
-    if (wv && (window as any).activeWebviewReady) return wv;
+    // isConnected matters: the ready flag can outlive the element (recreate /
+    // reparent races) and calling methods on a detached webview throws.
+    if (wv && (window as any).activeWebviewReady && wv.isConnected) return wv;
     await new Promise(r => setTimeout(r, 100));
   }
   throw new Error("No active webview available");
@@ -826,7 +828,11 @@ export const executeBrowserNavigation = async (action: string, url?: string): Pr
       if (wv.getURL() !== url) {
         // Swallow rejections: ERR_ABORTED here means a navigation was
         // superseded, which is expected during rapid agent driving.
-        Promise.resolve(wv.loadURL(url)).catch(() => {});
+        // The synchronous throw ("must be attached to the DOM") happens if the
+        // webview is torn down between acquisition and this call.
+        try {
+          Promise.resolve(wv.loadURL(url)).catch(() => {});
+        } catch {}
       }
       // Wait for the page to settle so a following browser_get_dom reads
       // the finished page instead of racing the load.
@@ -858,29 +864,32 @@ export const executeBrowserNavigation = async (action: string, url?: string): Pr
   return "OK";
 };
 
-// Kills the live webview session: captures a final screenshot, stops in-flight
-// loads, blanks the page and syncs the URL store. Used by both the agent's
+// Destroys the current <webview> element and mounts a fresh one at the
+// store's current URL. AgentBrowser listens for this event; the new instance
+// re-registers window.activeWebview once its guest attaches (dom-ready).
+export const remountWebview = (): void => {
+  window.dispatchEvent(new Event('oneagent-browser-recreate'));
+};
+
+// Kills the live webview session: stops in-flight loads, resets the URL store
+// and remounts a brand-new webview on the start page. Used by both the agent's
 // browser_terminate tool and the user-facing trash button in the Live Browser header.
 export const terminateBrowserSession = async (): Promise<void> => {
   const wv = getActiveWebview();
-  if (!wv) return;
-  // Capture final screenshot before killing
-  try {
-    const electronAPI = (window as any).electronAPI;
-    const res = await electronAPI?.browserCapture?.(wv.getWebContentsId());
-    if (res?.success && res.image) {
-      agentBrowserStore.setTerminatedSnapshot(res.image);
-    }
-  } catch {}
-  // Stop any in-flight navigation. Deliberately do NOT loadURL('about:blank'):
-  // guest-view navigation during teardown rejects with ERR_FAILED (-2) in the
-  // main-process GUEST_VIEW_MANAGER_CALL handler. The grayscale snapshot is
-  // displayed instead, and the next browser_* tool call remounts a fresh webview.
-  try { wv.stop(); } catch {}
-  // Sync the URL store AFTER setting the snapshot: navigate() clears any
-  // terminated snapshot (it means "fresh navigation started"), so calling it
-  // first would immediately wipe the grayscale image we just captured.
+  if (wv) {
+    // Capture the final frame first — the Live Browser panel shows it as a
+    // grayscale overlay until the next browser_* call resumes the session.
+    try {
+      const res = await (window as any).electronAPI?.browserCapture?.(wv.getWebContentsId());
+      if (res?.success && res.image) agentBrowserStore.setTerminatedSnapshot(res.image);
+    } catch {}
+    // Stop any in-flight navigation. Deliberately do NOT loadURL('about:blank'):
+    // guest-view navigation during teardown rejects with ERR_FAILED (-2) in the
+    // main-process GUEST_VIEW_MANAGER_CALL handler.
+    try { wv.stop(); } catch {}
+  }
   agentBrowserStore.navigate('https://html.duckduckgo.com/');
+  remountWebview();
 };
 
 export const executeBrowserTerminate = async (): Promise<string> => {

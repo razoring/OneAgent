@@ -508,10 +508,48 @@ const THINKING_INJECTION_LIMIT = 700;
 const DECISION_LINE =
   /((browser|desktop|view|list|search|write_to|replace_file|run_command|delete|spawn|switch|get|update)_\w+|→|->|\b(?:id|ids)\s*[:#=]?\s*\d|\b(click|scroll|navigate|typed?|submit|select|observe|download|wait)\b)/i;
 
+// Lines that are hallucinated tool-session debris (REPL-style simulated
+// calls/outputs or foreign channel tokens). Re-injecting these teaches the
+// model that fake execution "works" — they must never survive condensation.
+const POISON_LINE = /^\/tool_(code|output)\b|<\|channel>|^\s*print\(browser_/i;
+
+// Removes simulated tool-session debris from generated CONTENT: /tool_code +
+// /tool_output blocks (including their fabricated JSON bodies), stray
+// <|channel> tokens, and REPL-style print() calls. Without this, a model that
+// role-plays tool execution in plain text passes the "non-empty content"
+// check and its fantasy transcript renders as the final answer.
+export const stripSimulatedDebris = (text: string | undefined | null): string => {
+  if (!text) return '';
+  const out: string[] = [];
+  let balance = 0;
+  let inBlock = false;
+  for (const line of text.split('\n')) {
+    const t = line.trim();
+    if (/^\/tool_(code|output)\b/i.test(t)) {
+      inBlock = /^\/tool_output/i.test(t);
+      balance = 0;
+      continue;
+    }
+    if (inBlock) {
+      // Skip the fabricated JSON payload until brackets rebalance.
+      balance += (line.match(/[\[{]/g) || []).length - (line.match(/[\]}]/g) || []).length;
+      if (balance <= 0) inBlock = false;
+      continue;
+    }
+    if (POISON_LINE.test(line)) continue;
+    out.push(line);
+  }
+  return out.join('\n').replace(/<\|channel>[a-z]*\s*/gi, '').trim();
+};
+
 export const condenseThinking = (thinking: string | undefined | null, maxChars = THINKING_INJECTION_LIMIT): string => {
   const t = (thinking || '').trim();
-  if (!t || t.length <= maxChars) return t;
-  const lines = t.split('\n').map(l => l.trim()).filter(Boolean);
+  if (!t || t.length <= maxChars) {
+    // Short thinking still gets poison lines stripped before passthrough.
+    const clean = t ? t.split('\n').filter(l => !POISON_LINE.test(l)).join('\n').trim() : t;
+    return clean;
+  }
+  const lines = t.split('\n').map(l => l.trim()).filter(Boolean).filter(l => !POISON_LINE.test(l));
 
   // Walk newest → oldest; keep the latest line unconditionally (current
   // state), other lines only when they look like decisions.
@@ -633,7 +671,7 @@ export const generateChatStream = async (
         }
         if (data.content) {
           accumulatedContent += data.content;
-          
+
           // Detect and abort on known model hallucination loops (e.g. Gemma4 <|channel> loops)
           if (accumulatedContent.endsWith('<|channel>thought<|channel>thought<|channel>thought')) {
             (window as any).electronAPI?.abortChatStream(streamId);
@@ -641,6 +679,27 @@ export const generateChatStream = async (
             cleanup();
             const parsed = extractThinkingAndContent(accumulatedContent);
             const combinedThinking = [accumulatedReasoning, parsed.thinking].filter(Boolean).join('\\n\\n').trim();
+            onUpdate({
+              content: parsed.content,
+              thinking: combinedThinking,
+              isGenerating: false,
+              toolCalls: parsed.toolCalls,
+              isCallingTool: parsed.isCallingTool
+            });
+            resolve({ content: parsed.content, thinking: combinedThinking, toolCalls: parsed.toolCalls, isCallingTool: parsed.isCallingTool });
+            return;
+          }
+
+          // Detect simulated tool sessions: models with code-REPL training
+          // (Gemma /tool_code + /tool_output) sometimes "execute" tools in
+          // their head with fabricated results instead of emitting real calls.
+          // Two simulated calls = confirmed pattern, abort to save the budget.
+          if ((accumulatedContent.match(/\/tool_(code|output)/g) || []).length >= 2) {
+            (window as any).electronAPI?.abortChatStream(streamId);
+            accumulatedContent += '\n\n[Generation aborted: you were simulating tool output (/tool_code//tool_output). Tools only run via real <tool_call> JSON — emit one now.]';
+            cleanup();
+            const parsed = extractThinkingAndContent(accumulatedContent);
+            const combinedThinking = [accumulatedReasoning, parsed.thinking].filter(Boolean).join('\n\n').trim();
             onUpdate({
               content: parsed.content,
               thinking: combinedThinking,

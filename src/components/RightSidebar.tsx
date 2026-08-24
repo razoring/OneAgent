@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { ChevronRight } from 'lucide-react';
 import { ModelSettings, getModelSettings, saveModelSettings } from '../utils/llm';
 import { modelParamsStore } from '../utils/modelParamsStore';
+import { taskListStore, TaskNode } from '../utils/taskListStore';
 
 // Task title: truncates normally; running tasks whose text overflows get a
 // slow edge-faded marquee driven by rAF (exact end-to-end travel, no overshoot).
@@ -68,13 +69,90 @@ const TaskTitle = ({ text, running, className }: { text: string, running?: boole
   );
 };
 
+// ─── Donut chart ─────────────────────────────────────────────────────────────
+
+const fmtBytes = (bytes: number): string => {
+  if (!bytes) return '0 B';
+  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+  const i = Math.min(units.length - 1, Math.floor(Math.log(bytes) / Math.log(1024)));
+  return `${(bytes / Math.pow(1024, i)).toFixed(i > 1 ? 1 : 0)} ${units[i]}`;
+};
+
+// SVG donut + column legend. Arcs are proportional to their share of `total`;
+// when pctBase is set (e.g. the context window) percentages and any remainder
+// ring are measured against that larger base instead of the segment sum.
+const DonutBreakdown = ({ title, segments, total, centerTop, centerBottom, pctBase, hidePctFor }: {
+  title: string;
+  segments: { key: string; label: string; value: number; color: string }[];
+  total: number;
+  centerTop: string;
+  centerBottom: string;
+  pctBase?: number;
+  hidePctFor?: string;
+}) => {
+  const size = 76;
+  const stroke = 8;
+  const r = (size - stroke) / 2;
+  const c = 2 * Math.PI * r;
+  const base = pctBase ?? total;
+
+  let offset = 0;
+  const arcs = segments.map(seg => {
+    const frac = base > 0 ? Math.min(1, seg.value / base) : 0;
+    const arc = { ...seg, dash: frac * c, gap: c - frac * c, offset };
+    offset += frac * c;
+    return arc;
+  });
+
+  return (
+    <div className="flex-1 min-w-0 flex flex-col gap-2">
+      <span className="menu-header !text-[10px]">{title}</span>
+      <div className="flex items-center gap-3">
+        <div className="relative shrink-0" style={{ width: size, height: size }}>
+          <svg width={size} height={size} className="-rotate-90">
+            <circle cx={size / 2} cy={size / 2} r={r} fill="none" stroke="rgba(255,255,255,0.08)" strokeWidth={stroke} />
+            {arcs.filter(a => a.dash > 0).map(a => (
+              <circle
+                key={a.key}
+                cx={size / 2} cy={size / 2} r={r} fill="none"
+                stroke={a.color} strokeWidth={stroke}
+                strokeDasharray={`${Math.max(0, a.dash - 1)} ${a.gap + 1}`}
+                strokeDashoffset={-a.offset}
+              />
+            ))}
+          </svg>
+          <div className="absolute inset-0 flex flex-col items-center justify-center">
+            <span className="text-[11px] font-semibold text-white font-mono leading-none">{centerTop}</span>
+            <span className="text-[9px] text-textSecondary font-mono mt-0.5">{centerBottom}</span>
+          </div>
+        </div>
+        <div className="flex-1 min-w-0 grid grid-cols-1 gap-1 text-[10px] text-textSecondary">
+          {segments.length > 0 ? segments.map(seg => (
+            <div key={seg.key} className="grid grid-cols-[auto_1fr_auto] items-center gap-1.5">
+              <span className="w-1.5 h-1.5 rounded-full shrink-0" style={{ backgroundColor: seg.color }} />
+              <span className="truncate" title={seg.label}>{seg.label}</span>
+              <span className="font-mono tabular-nums">{hidePctFor === seg.key ? fmtBytes(seg.value) : base > 0 ? `${Math.round((seg.value / base) * 100)}%` : '0%'}</span>
+            </div>
+          )) : (
+            <span className="font-mono text-textSecondary/60">No models resident</span>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+};
+
+// Right-hand settings sidebar hosting the Model Parameters controls
+
 // Right-hand settings sidebar hosting the Model Parameters controls
 // (moved out of the chat input's drop-up menu).
 const RightSidebar = ({ open }: { open: boolean }) => {
   const [modelSettings, setModelSettings] = useState<ModelSettings>(() => getModelSettings());
   const [estimatedTokens, setEstimatedTokens] = useState<{ system: number; history: number; prompt: number } | null>(modelParamsStore.get());
+  const [tasks, setTasks] = useState<TaskNode[]>(taskListStore.get());
 
   useEffect(() => modelParamsStore.subscribe(setEstimatedTokens), []);
+  useEffect(() => taskListStore.subscribe(setTasks), []);
 
   // Only count/update tokens while this sidebar is open.
   useEffect(() => {
@@ -96,38 +174,51 @@ const RightSidebar = ({ open }: { open: boolean }) => {
   ];
   const totalTokens = (estimatedTokens?.system ?? 0) + (estimatedTokens?.history ?? 0) + (estimatedTokens?.prompt ?? 0);
 
+  // Live VRAM monitor (total system usage) — only polls while this panel is open.
+  const [vram, setVram] = useState<{ usedBytes: number; totalBytes: number } | null>(null);
+  useEffect(() => {
+    if (!open) return;
+    let cancelled = false;
+    const poll = async () => {
+      try {
+        const res = await (window as any).electronAPI?.vramUsage?.();
+        if (!cancelled) setVram(res?.success ? { usedBytes: res.usedBytes, totalBytes: res.totalBytes } : null);
+      } catch {
+        if (!cancelled) setVram(null);
+      }
+    };
+    poll();
+    const t = setInterval(poll, 2000);
+    return () => { cancelled = true; clearInterval(t); };
+  }, [open]);
+
   return (
-    <div className={`overflow-hidden transition-all duration-300 ease-in-out ${open ? 'w-[320px]' : 'w-0'}`}>
-      <div className="w-[320px] h-full bg-background flex flex-col gap-4 p-4 overflow-y-auto text-textSecondary">
+    <div className={`overflow-hidden transition-all duration-300 ease-in-out ${open ? 'w-[400px]' : 'w-0'}`}>
+      <div className="w-[400px] h-full bg-background flex flex-col gap-4 p-4 overflow-y-auto text-textSecondary">
         <span className="menu-header">Model Parameters</span>
 
-        {/* Context Usage Chart */}
-        <div className="flex flex-col gap-2">
-          <div className="flex items-baseline justify-between">
-            <span className="text-sm font-semibold text-white font-mono">
-              {totalTokens.toLocaleString()}
-            </span>
-            <span className="text-xs text-textSecondary font-mono">
-              of {contextLimit.toLocaleString()} tokens
-            </span>
-          </div>
-          <div className="flex h-2 w-full rounded-full overflow-hidden bg-white/10">
-            {usageSegments.map((seg) => (
-              <div
-                key={seg.key}
-                className="h-full"
-                style={{ width: `${(seg.tokens / contextLimit) * 100}%`, backgroundColor: seg.color }}
-              />
-            ))}
-          </div>
-          <div className="flex items-center justify-between text-xs text-textSecondary px-0.5">
-            {usageSegments.map((seg) => (
-              <span key={seg.key} className="flex items-center gap-1.5">
-                <span className="w-1.5 h-1.5 rounded-full" style={{ backgroundColor: seg.color }} />
-                {seg.label} {Math.round((seg.tokens / contextLimit) * 100)}%
-              </span>
-            ))}
-          </div>
+        {/* Context Usage + VRAM — side-by-side donut breakdowns */}
+        <div className="flex items-start gap-3">
+          <DonutBreakdown
+            title="Context"
+            segments={usageSegments.map(s => ({ key: s.key, label: s.label, value: s.tokens, color: s.color }))}
+            total={contextLimit}
+            centerTop={totalTokens.toLocaleString()}
+            centerBottom="tokens"
+            pctBase={contextLimit}
+          />
+          <DonutBreakdown
+            title="VRAM"
+            segments={vram ? [
+              { key: 'used', label: 'Used', value: vram.usedBytes, color: 'rgb(var(--accent-rgb))' },
+              { key: 'free', label: 'Free', value: Math.max(0, vram.totalBytes - vram.usedBytes), color: 'rgba(255,255,255,0.12)' },
+            ] : []}
+            total={vram?.totalBytes ?? 0}
+            centerTop={vram ? fmtBytes(vram.usedBytes) : '—'}
+            centerBottom={vram ? `/ ${fmtBytes(vram.totalBytes)}` : 'no GPU data'}
+            pctBase={vram?.totalBytes}
+            hidePctFor="free"
+          />
         </div>
 
         {/* Thinking Level */}
@@ -161,15 +252,16 @@ const RightSidebar = ({ open }: { open: boolean }) => {
               {modelSettings.thinkingTimeout === 0 ? 'No timeout' : `${modelSettings.thinkingTimeout}s`}
             </span>
           </div>
+          {/* Slider is inverted so "No timeout" sits at the right end */}
           <input
             type="range"
             min={0}
             max={300}
             step={10}
-            value={modelSettings.thinkingTimeout}
-            onChange={(e) => updateSettings({ thinkingTimeout: Number(e.target.value) })}
+            value={300 - modelSettings.thinkingTimeout}
+            onChange={(e) => updateSettings({ thinkingTimeout: 300 - Number(e.target.value) })}
             className="neutral-slider w-full cursor-pointer"
-            style={{ '--fill': `${(modelSettings.thinkingTimeout / 300) * 100}%` } as React.CSSProperties}
+            style={{ '--fill': `${((300 - modelSettings.thinkingTimeout) / 300) * 100}%` } as React.CSSProperties}
           />
         </div>
 
@@ -249,83 +341,115 @@ const RightSidebar = ({ open }: { open: boolean }) => {
           />
         </div>
 
-        {/* Tasks — sub-agent tasks, nestable (orchestrator → sub-agents).
-            Static mockup, no functionality yet */}
-        <div className="flex flex-col gap-2 mt-6 pt-5">
-          <div className="flex items-center justify-between">
-            <span className="menu-header">Tasks</span>
-            <span className="text-[11px] font-mono text-textSecondary">1/4</span>
-          </div>
-
-          {/* Orchestrator task with nested children */}
-          <div className="rounded-xl border border-white/5 bg-black/20 p-2.5">
-            <button className="w-full flex items-center gap-2.5 text-left hover:bg-white/[0.04] rounded-lg -m-1 p-1 transition-colors group">
-              <span className="w-4 h-4 shrink-0 rounded-full border-2 border-accent border-t-transparent animate-spin" />
-              <div className="min-w-0 flex-1">
-                <TaskTitle running text="Collect 10 contractor contacts from Toronto-area listing websites" className="text-sm text-white" />
-                <div className="text-[11px] text-textSecondary/70 font-mono">gemma4:12b · running</div>
-              </div>
-              <ChevronRight size={14} className="rotate-90 text-textSecondary group-hover:text-white transition-colors shrink-0" />
-            </button>
-
-            {/* Nested children — indented with a guide rail */}
-            <div className="mt-2 ml-[11px] pl-3 border-l border-white/10 flex flex-col gap-1.5">
-
-              {/* Child: done */}
-              <button className="rounded-lg bg-black/30 p-2 flex items-center gap-2 text-left hover:bg-white/[0.04] transition-colors group">
-                <span className="w-3.5 h-3.5 shrink-0 rounded-full bg-accent/80 flex items-center justify-center">
-                  <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><path d="M20 6 9 17l-5-5"/></svg>
-                </span>
-                <div className="min-w-0 flex-1">
-                  <div className="text-xs text-textSecondary line-through truncate">Search Toronto contractors</div>
-                  <div className="text-[10px] text-textSecondary/70 font-mono">gemma3:4b · 14.2s</div>
-                </div>
-                <ChevronRight size={12} className="text-textSecondary group-hover:text-white transition-colors shrink-0" />
-              </button>
-
-              {/* Child: running */}
-              <button className="rounded-lg border border-accent/30 bg-white/[0.03] p-2 flex items-center gap-2 text-left transition-colors group">
-                <span className="w-3.5 h-3.5 shrink-0 rounded-full border-2 border-accent border-t-transparent animate-spin" />
-                <div className="min-w-0 flex-1">
-                  <TaskTitle running text="Extract contact emails and phone numbers from the top-ranked contractor sites" className="text-xs text-white" />
-                  <div className="text-[10px] text-textSecondary/70 font-mono">gemma3:4b · running</div>
-                </div>
-                <ChevronRight size={12} className="text-textSecondary group-hover:text-white transition-colors shrink-0" />
-              </button>
-
-              {/* Grandchild (depth 2): queued */}
-              <div className="ml-[11px] pl-3 border-l border-white/10 flex flex-col gap-1.5">
-                <div className="rounded-lg bg-black/30 p-2 flex items-center gap-2 opacity-70">
-                  <span className="w-3 h-3 shrink-0 rounded-full border-2 border-white/25" />
-                  <div className="min-w-0 flex-1">
-                    <div className="text-xs text-textSecondary truncate">Visit kijiji.ca listings</div>
-                    <div className="text-[10px] text-textSecondary/70 font-mono">gemma3:4b · queued</div>
-                  </div>
-                </div>
-              </div>
-            </div>
-          </div>
-
-          {/* Standalone leaf task */}
-          <div className="rounded-xl border border-white/5 bg-black/20 p-2.5 flex items-center gap-2.5 opacity-70">
-            <span className="w-4 h-4 shrink-0 rounded-full border-2 border-white/25" />
-            <div className="min-w-0 flex-1">
-              <div className="text-sm text-textSecondary truncate">Summarize findings</div>
-              <div className="text-[11px] text-textSecondary/70 font-mono">gemma3:4b · queued</div>
-            </div>
-          </div>
-
-          <button className="menu-item !py-1.5 justify-center text-xs text-textSecondary hover:text-white">
-            View all tasks
-          </button>
-        </div>
+        {tasks.length > 0 && (
+          <TasksSection tasks={tasks} />
+        )}
       </div>
     </div>
   );
 };
 
+// ─── Tasks section ───────────────────────────────────────────────────────────
+
+const fmtDuration = (ms: number): string => {
+  const s = Math.round(ms / 1000);
+  if (s < 60) return `${s}s`;
+  return `${Math.floor(s / 60)}m ${s % 60}s`;
+};
+
+const StatusRing = ({ status, size }: { status: TaskNode['status'], size: number }) => {
+  const cls = `shrink-0 rounded-full flex items-center justify-center ${
+    status === 'done' ? 'bg-accent/80'
+    : status === 'running' ? 'border-2 border-accent border-t-transparent animate-spin'
+    : status === 'error' ? 'bg-red-500/80'
+    : 'border-2 border-white/25'
+  }`;
+  return (
+    <span className={cls} style={{ width: size, height: size }}>
+      {status === 'done' && (
+        <svg width={size * 0.6} height={size * 0.6} viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><path d="M20 6 9 17l-5-5"/></svg>
+      )}
+    </span>
+  );
+};
+
+// One task row (or subtree). Running + overflowing titles marquee-scroll;
+// anything else truncates. needsInput prefixes "[ACTION REQUIRED]".
+const TaskRow = ({ node, depth, onInspect }: { node: TaskNode, depth: number, onInspect: (agentId: string) => void }) => {
+  const [, setTick] = useState(0);
+  useEffect(() => {
+    if (node.status !== 'running') return;
+    const t = setInterval(() => setTick(x => x + 1), 1000);
+    return () => clearInterval(t);
+  }, [node.status]);
+
+  const children = taskListStore.get().filter(n => n.parentId === node.id);
+  const elapsed = node.status === 'running' && node.startedAt
+    ? fmtDuration(Date.now() - node.startedAt)
+    : node.status !== 'queued' && node.startedAt && node.endedAt
+      ? fmtDuration(node.endedAt - node.startedAt)
+      : undefined;
+
+  const meta = node.needsInput
+    ? 'waiting for your response'
+    : [node.modelLabel, elapsed].filter(Boolean).join(' · ');
+
+  const titleEl = <TaskTitle running={node.status === 'running'} text={(node.needsInput ? '[ACTION REQUIRED] ' : '') + node.title} className={`${depth === 0 ? 'text-sm' : 'text-xs'} ${node.status === 'done' ? 'line-through text-textSecondary' : node.status === 'running' ? 'text-white' : 'text-textSecondary'}`} />;
+
+  return (
+    <div>
+      <button
+        onClick={() => { if (node.agentId) onInspect(node.agentId); }}
+        disabled={!node.agentId}
+        className={`w-full rounded-lg p-2 flex items-center gap-2 text-left transition-colors group ${
+          node.needsInput ? 'border border-accent/30 bg-white/[0.04]'
+          : node.agentId ? 'bg-black/30 hover:bg-white/[0.05]'
+          : 'bg-black/30 opacity-80'
+        }`}
+        style={{ marginLeft: depth * 12 }}
+      >
+        <StatusRing status={node.status} size={depth === 0 ? 16 : 14} />
+        <div className="min-w-0 flex-1">
+          {titleEl}
+          {(meta || node.resultSummary) && (
+            <div className="text-[10px] text-textSecondary/70 font-mono truncate">
+              {[meta, node.resultSummary && !node.needsInput ? node.resultSummary : undefined].filter(Boolean).join(' · ')}
+            </div>
+          )}
+        </div>
+        {node.agentId && (
+          <ChevronRight size={12} className="text-textSecondary group-hover:text-white transition-colors shrink-0" />
+        )}
+      </button>
+      {children.length > 0 && (
+        <div className="mt-1.5 ml-[11px] pl-3 border-l border-white/10 flex flex-col gap-1.5">
+          {children.map(c => <TaskRow key={c.id} node={c} depth={depth + 1} onInspect={onInspect} />)}
+        </div>
+      )}
+    </div>
+  );
+};
+
+const TasksSection = ({ tasks }: { tasks: TaskNode[] }) => {
+  const progress = taskListStore.leafProgress();
+  const actionNeeded = tasks.filter(t => t.needsInput).length;
+  const roots = tasks.filter(n => !n.parentId);
+
+  return (
+    <div className="flex flex-col gap-2 mt-6 pt-5">
+      <div className="flex items-center justify-between">
+        <span className="menu-header">Tasks</span>
+        <span className={`text-[11px] font-mono ${actionNeeded > 0 ? 'text-accentBright animate-pulse' : 'text-textSecondary'}`}>
+          {actionNeeded > 0 ? `${actionNeeded} action required` : `${progress.done}/${progress.total}`}
+        </span>
+      </div>
+      <div className="flex flex-col gap-1.5">
+        {roots.map(n => <TaskRow key={n.id} node={n} depth={0} onInspect={(agentId) => window.dispatchEvent(new CustomEvent('inspect-agent', { detail: agentId }))} />)}
+      </div>
+    </div>
+  );
+};
+
+
 export default RightSidebar;
-
-
-
 

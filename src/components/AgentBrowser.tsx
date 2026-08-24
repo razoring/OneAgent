@@ -11,6 +11,23 @@ const AgentBrowser: React.FC = () => {
   const [displayUrl, setDisplayUrl] = useState(initialSrc);
   const webviewRef = useRef<any>(null);
 
+  // Reparenting a <webview> mid-load can permanently detach its guest
+  // (compositing dies, element renders blank). The only reliable recovery is
+  // destroying the element and building a fresh one — triggered via this event.
+  const [webviewKey, setWebviewKey] = useState(0);
+  const [webviewSrc, setWebviewSrc] = useState(initialSrc);
+  useEffect(() => {
+    const recreate = () => {
+      try { (window as any).activeWebview?.stop(); } catch {}
+      (window as any).activeWebview = null;
+      (window as any).activeWebviewReady = false;
+      setWebviewSrc(agentBrowserStore.getUrl());
+      setWebviewKey(k => k + 1);
+    };
+    window.addEventListener('oneagent-browser-recreate', recreate);
+    return () => window.removeEventListener('oneagent-browser-recreate', recreate);
+  }, []);
+
   useEffect(() => agentBrowserStore.subscribe(url => setDisplayUrl(url)), []);
 
   // Scale is updated dynamically via ResizeObserver
@@ -60,6 +77,10 @@ const AgentBrowser: React.FC = () => {
     });
 
     const handleDomReady = () => {
+      // Only the currently registered webview may flip the ready flag — a
+      // dying/replaced instance firing a late dom-ready would mark itself
+      // usable while the session has already moved on.
+      if ((window as any).activeWebview !== webview) return;
       (window as any).activeWebviewReady = true;
       if (webview.parentElement) {
         resizeObserver.observe(webview.parentElement);
@@ -72,9 +93,6 @@ const AgentBrowser: React.FC = () => {
     };
 
     const handleDidFinishLoad = () => {
-      // A terminated session shows a frozen grayscale snapshot — don't let a
-      // late did-finish-load from the dying page clear it.
-      if (agentBrowserStore.getTerminatedSnapshot()) return;
       agentBrowserStore.navigate(webview.getURL());
     };
 
@@ -88,18 +106,6 @@ const AgentBrowser: React.FC = () => {
     webview.addEventListener('dom-ready', handleDomReady);
     webview.addEventListener('did-finish-load', handleDidFinishLoad);
     webview.addEventListener('did-fail-load', handleDidFailLoad);
-    // The session root is moved between the hidden off-screen host and the
-    // Live Browser panel via appendChild (DOM move, no remount). Re-sync the
-    // emulation observer whenever that happens.
-    const handleSlotChange = () => {
-      resizeObserver.disconnect();
-      if (webview.parentElement) {
-        resizeObserver.observe(webview.parentElement);
-        const rect = webview.parentElement.getBoundingClientRect();
-        if (rect.width > 0) updateEmulation(rect.width, rect.height);
-      }
-    };
-    window.addEventListener('oneagent-browser-slot-change', handleSlotChange);
     return () => {
       if ((window as any).activeWebview === webview) {
         (window as any).activeWebview = null;
@@ -108,10 +114,9 @@ const AgentBrowser: React.FC = () => {
       webview.removeEventListener('dom-ready', handleDomReady);
       webview.removeEventListener('did-finish-load', handleDidFinishLoad);
       webview.removeEventListener('did-fail-load', handleDidFailLoad);
-      window.removeEventListener('oneagent-browser-slot-change', handleSlotChange);
       resizeObserver.disconnect();
     };
-  }, []);
+  }, [webviewKey]);
 
   const goBack = () => webviewRef.current?.goBack();
   const goForward = () => webviewRef.current?.goForward();
@@ -140,8 +145,9 @@ const AgentBrowser: React.FC = () => {
       <div className="relative flex-1 w-full overflow-hidden bg-white">
         {/* @ts-ignore - webview is a custom element in Electron */}
         <webview
+          key={webviewKey}
           ref={webviewRef}
-          src={initialSrc}
+          src={webviewSrc}
           className="w-full h-full"
           partition="persist:oneagent_browser"
           webpreferences="contextIsolation=yes,javascript=yes"

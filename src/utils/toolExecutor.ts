@@ -32,6 +32,7 @@ import {
 } from './llm';
 import { TOOL_TIERS } from './tools';
 import { userPromptStore } from './userPromptStore';
+import { taskListStore } from './taskListStore';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -54,6 +55,8 @@ export interface ToolContext {
   spawnAgent: (spec: any) => string;
   getAgents: (ids?: string[]) => any[];
   waitForAgents: (ids: string[] | undefined, ms: number) => Promise<any[]>;
+  // When set, ask_user prompts flip this formal task's needsInput flag.
+  promptTaskId?: string;
   signal?: AbortSignal;
 }
 
@@ -396,9 +399,14 @@ const HANDLERS: Record<string, Handler> = {
         thinkingLevel: rawParams.thinking_level ?? rawParams.thinkingLevel,
         maxOutputLength: rawParams.max_output_length ?? rawParams.maxOutputLength,
         contextWindow: rawParams.context_window ?? rawParams.contextWindow
-      }
+      },
+      taskId: (p(args, 'task_id', 'taskId') || undefined) as string | undefined,
+      canDelegate: !!(p(args, 'can_delegate', 'canDelegate'))
     };
     const agentId = ctx.spawnAgent(spec);
+    if (spec.taskId && !taskListStore.find(spec.taskId)) {
+      return ok(j({ agent_id: agentId, status: 'spawned', warning: `task_id "${spec.taskId}" not found — use task_list for valid ids.` }));
+    }
     const waitMs = Number(p(args, 'wait_ms', 'waitMs')) || 0;
     if (waitMs > 0) {
       const states = await ctx.waitForAgents([agentId], waitMs);
@@ -406,6 +414,44 @@ const HANDLERS: Record<string, Handler> = {
     }
     return ok(j({ agent_id: agentId, status: 'spawned', note: `Poll with check_agents(agent_ids=["${agentId}"]).` }));
   },
+
+  // ── Formal task tree ───────────────────────────────────────────────────────
+  task_add: async (args) => {
+    const raw = p(args, 'items', 'Items');
+    const parentId = (p(args, 'parent_id', 'parentId') || null) as string | null;
+    let items = Array.isArray(raw) ? raw : null;
+    if (!items && (args.title || args.Title)) {
+      items = [{ title: String(p(args, 'title', 'Title')), detail: p(args, 'detail', 'Detail') }];
+    }
+    if (!items || items.length === 0) throw new Error("task_add requires 'items' ([{title, detail?}]) or 'title'");
+    if (parentId && !taskListStore.find(parentId)) throw new Error(`task_add: parent_id "${parentId}" not found`);
+    const created = taskListStore.add(
+      items.map((it: any) => ({ title: String(it?.title ?? ''), detail: it?.detail ? String(it.detail) : undefined })),
+      parentId
+    );
+    return ok(j({ created: created.map(n => ({ id: n.id, title: n.title })) }));
+  },
+
+  task_update: async (args) => {
+    const id = String(p(args, 'task_id', 'taskId') || '');
+    if (!id) throw new Error("task_update requires 'task_id'");
+    if (!taskListStore.find(id)) throw new Error(`task_update: task "${id}" not found`);
+    const status = p(args, 'status', 'Status');
+    const summary = p(args, 'summary', 'Summary');
+    const patch: any = {};
+    if (status) {
+      const s = String(status);
+      if (!['queued', 'running', 'done', 'error'].includes(s)) throw new Error(`task_update: invalid status "${s}"`);
+      patch.status = s;
+      if (s === 'done' || s === 'error') patch.endedAt = Date.now();
+    }
+    if (summary) patch.resultSummary = String(summary).slice(0, 200);
+    taskListStore.update(id, patch);
+    return ok(j({ updated: id, ...patch }));
+  },
+
+  task_list: async () => ok(j({ tasks: taskListStore.get(), progress: taskListStore.leafProgress() })),
+
   check_agents: async (args, ctx) => {
     const ids = p(args, 'agent_ids', 'agentIds', 'ids');
     const waitMs = Number(p(args, 'wait_ms', 'waitMs')) || 0;
@@ -420,7 +466,7 @@ const HANDLERS: Record<string, Handler> = {
   browser_keystrokes: async (args) => ok(await browserKeystrokesLegacyRouter(args)),
 
   // Blocks until the user answers the inline prompt in the chat input.
-  ask_user: async (args) => {
+  ask_user: async (args, ctx) => {
     const question = String(p(args, 'question', 'Question') || '').trim();
     if (!question) throw new Error("ask_user requires 'question'");
     const rawOpts = p(args, 'options', 'Options');
@@ -433,7 +479,7 @@ const HANDLERS: Record<string, Handler> = {
       title: question,
       detail: detail ? String(detail) : undefined,
       options
-    });
+    }, ctx.promptTaskId);
     if (response === null) return ok('No response — the prompt was dismissed. Continue without waiting or try a different approach.');
     return ok(`USER RESPONSE: ${response}`);
   },
@@ -475,7 +521,7 @@ const runOne = async (raw: string, ctx: ToolContext): Promise<NamedToolResult> =
     }
 
     // Browsing resumed after a terminated session — drop the grayscale
-    // snapshot overlay so the live webview shows through again.
+    // snapshot so the live (remounted) webview shows through again.
     if ((name.startsWith('browser') || name === 'find_in_page') && agentBrowserStore.getTerminatedSnapshot()) {
       agentBrowserStore.setTerminatedSnapshot(null);
     }

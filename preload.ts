@@ -56,6 +56,7 @@ const { ipcRenderer, webUtils } = require('electron');
   findInPage: (options: any) => ipcRenderer.invoke('find-in-page', options),
   browserDownload: (options: any) => ipcRenderer.invoke('browser-download', options),
   providerStatus: (options: any) => ipcRenderer.invoke('provider-status', options),
+  vramUsage: () => ipcRenderer.invoke('vram-usage'),
 
   takeScreenshot: () => ipcRenderer.invoke('take-screenshot'),
   desktopClick: (opts: { x: number, y: number, button?: string, double?: boolean }) => ipcRenderer.invoke('desktop-click', opts),

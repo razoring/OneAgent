@@ -17,7 +17,7 @@ const PROVIDER_ICONS: Record<string, string> = {
 };
 
 import { LLMModel, fetchModels, ModelSettings, getModelSettings, primeModel, flushModel } from '../utils/llm';
-import DEFAULT_SYSTEM_PROMPT from '../utils/systemPrompt.md?raw';
+import { ORCHESTRATOR_PROMPT as DEFAULT_SYSTEM_PROMPT } from '../utils/prompts';
 import { modelParamsStore } from '../utils/modelParamsStore';
 import InlineUserPrompt from './ApprovalCard';
 import { userPromptStore } from '../utils/userPromptStore';
@@ -347,11 +347,14 @@ const ChatInput: React.FC<ChatInputProps> = ({ onSend, onStop, disabled, editing
     }
   }, [attachments]);
 
+  const onModelChangeRef = useRef(onModelChange);
+  useEffect(() => { onModelChangeRef.current = onModelChange; }, [onModelChange]);
+
   useEffect(() => {
-    if (onModelChange) {
-      onModelChange(selectedModel);
+    if (onModelChangeRef.current) {
+      onModelChangeRef.current(selectedModel);
     }
-  }, [selectedModel, onModelChange]);
+  }, [selectedModel]);
 
   // Stay in sync when the AGENT switches its own model or tunes parameters
   // via tools (switch_model / update_settings dispatch these events).
@@ -360,7 +363,9 @@ const ChatInput: React.FC<ChatInputProps> = ({ onSend, onStop, disabled, editing
     const onAgentModelChanged = (e: Event) => {
       const detail = (e as CustomEvent).detail;
       if (detail && detail.id && detail.provider) {
-        setSelectedModel(detail);
+        setSelectedModel(prev =>
+          prev && prev.id === detail.id && prev.provider === detail.provider ? prev : detail
+        );
       }
     };
     window.addEventListener('model-settings-updated', onSettingsChanged);

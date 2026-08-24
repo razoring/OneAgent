@@ -9,3 +9,6 @@ update settings menu (be provider-agnostic but create quick-action chips to quic
 allow attachments to flow through into the browser (images, documents)
 agent tool (copy/paste)
 autonomous import from chrome profile.
+real browser
+implement chat history before implementing agent inspection
+orchestrator told sub agent to search for 5 stocks instead of creating 5 tasks and doing them in parallel

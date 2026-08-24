@@ -129,6 +129,20 @@ export function extractThinkingAndContent(raw: string): ParsedThinkingResult {
     content = (content.slice(0, thinkOpenIndex) + '\n\n' + content.slice(thinkCloseIndex + 8)).trim();
   }
 
+  // 1b. Strip <reasoning_digest> echoes. Digest blocks are OUR context-injection
+  //     format; models sometimes parrot them from history into their answer.
+  while (true) {
+    const digestOpen = content.indexOf('<reasoning_digest>');
+    if (digestOpen === -1) break;
+    const digestClose = content.indexOf('</reasoning_digest>', digestOpen);
+    if (digestClose === -1) {
+      // Unterminated digest: everything after the opener is scaffolding.
+      content = content.slice(0, digestOpen).trim();
+      break;
+    }
+    content = (content.slice(0, digestOpen) + '\n' + content.slice(digestClose + 19)).trim();
+  }
+
   // 2. Extract Tool Calls
   const toolCalls: string[] = [];
   let isCallingTool = false;

@@ -13,17 +13,14 @@ const snapshotListeners = new Set<SnapshotListener>();
 // by the next browser_* tool call so the agent learns why its session died.
 let userKilledBrowser = false;
 
-// Grayscale snapshot displayed after kill — agent restarts with browser_navigate.
+// Grayscale snapshot captured at terminate time — displayed over the Live
+// Browser slot until the next browser_* tool call resumes the session.
 let terminatedSnapshot: string | null = null;
 
 export const agentBrowserStore = {
   getUrl: () => currentUrl,
-  getTerminatedSnapshot: () => terminatedSnapshot,
   navigate: (url: string) => {
     if (!url || currentUrl === url) return;
-    // Starting a fresh navigation — clear any terminated snapshot so the
-    // live webview shows instead of the grayscale image.
-    if (url !== 'about:blank') terminatedSnapshot = null;
     currentUrl = url;
     listeners.forEach(l => l(url));
   },
@@ -31,18 +28,19 @@ export const agentBrowserStore = {
     listeners.add(l);
     return () => { listeners.delete(l); };
   },
-  subscribeSnapshot: (l: SnapshotListener) => {
-    snapshotListeners.add(l);
-    return () => { snapshotListeners.delete(l); };
-  },
   markUserKilled: () => { userKilledBrowser = true; },
   consumeUserKill: () => {
     if (!userKilledBrowser) return false;
     userKilledBrowser = false;
     return true;
   },
-  setTerminatedSnapshot: (img: string | null) => { 
-    terminatedSnapshot = img; 
+  getTerminatedSnapshot: (): string | null => terminatedSnapshot,
+  setTerminatedSnapshot: (img: string | null) => {
+    terminatedSnapshot = img;
     snapshotListeners.forEach(l => l(img));
+  },
+  subscribeSnapshot: (l: SnapshotListener) => {
+    snapshotListeners.add(l);
+    return () => { snapshotListeners.delete(l); };
   },
 };

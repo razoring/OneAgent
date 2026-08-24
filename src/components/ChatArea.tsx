@@ -2,10 +2,10 @@ import React, { useState, useRef, useEffect } from 'react';
 import ChatInput from './ChatInput';
 import ThinkingBlock from './ThinkingBlock';
 import ToolCallBlock from './ToolCallBlock';
-import { generateChatStream, condenseThinking, LLMModel, fileToBase64, parseAttachmentDocument, getModelStats } from '../utils/llm';
+import { generateChatStream, condenseThinking, stripSimulatedDebris, LLMModel, fileToBase64, parseAttachmentDocument, getModelStats } from '../utils/llm';
 import { executeToolCalls, ToolContext } from '../utils/toolExecutor';
-import { spawnSubAgent, getAgentsSnapshot, waitForAgents } from '../utils/subAgents';
-import DEFAULT_SYSTEM_PROMPT from '../utils/systemPrompt.md?raw';
+import { spawnSubAgent, getAgentsSnapshot, waitForAgents, getAgentTranscript } from '../utils/subAgents';
+import { ORCHESTRATOR_PROMPT as DEFAULT_SYSTEM_PROMPT } from '../utils/prompts';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import rehypeRaw from 'rehype-raw';
@@ -14,10 +14,10 @@ import rehypeKatex from 'rehype-katex';
 import 'katex/dist/katex.min.css';
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
 import { vscDarkPlus } from 'react-syntax-highlighter/dist/esm/styles/prism';
-import { MessageSquarePlus, Terminal, Globe, ChevronDown, ChevronRight, Trash2, Bug, Settings2 } from 'lucide-react';
-import { getSystemTools } from '../utils/tools';
+import { MessageSquarePlus, Terminal, Globe, ChevronDown, ChevronRight, ChevronLeft, Trash2, Bug, Settings2 } from 'lucide-react';
+import { getOrchestratorTools } from '../utils/tools';
 import { agentBrowserStore } from '../utils/agentBrowserStore';
-import { terminateBrowserSession } from '../utils/browserTools';
+import { terminateBrowserSession, remountWebview } from '../utils/browserTools';
 import { transcriptStore } from '../utils/transcriptStore';
 import { userPromptStore } from '../utils/userPromptStore';
 
@@ -248,43 +248,45 @@ const BlockToolbar = ({ onEdit, onRegenerate, onDelete }: { onEdit?: () => void,
   );
 };
 
-const UnifiedToolsBlock = ({ activity, isGenerating, msgIsGenerating, activityFeed, isBrowserExpanded, setIsBrowserExpanded, handleUserKillBrowser, terminatedSnapshot, onEdit, onRegenerate, onDelete }: any) => {
+const UnifiedToolsBlock = ({ activity, isGenerating, msgIsGenerating, activityFeed, isBrowserExpanded, setIsBrowserExpanded, handleUserKillBrowser, browserSessionId, onEdit, onRegenerate, onDelete }: any) => {
   const { toolCalls } = activity.data;
   const [expanded, setExpanded] = useState(true);
   const browserSlotRef = useRef<HTMLDivElement | null>(null);
   const isLatestBrowserBlock = activityFeed.lastBrowserToolsMessageId === activity.messageId;
 
-  // Adopt the persistent (off-screen) browser session node into this panel.
-  // appendChild MOVES the node — the webview, its session and listeners all
-  // survive; only its on-screen position changes. When hidden/terminated it
-  // returns to the off-screen host where tools keep working in the background.
+  // Terminated-session snapshot (grayscale overlay over the live slot).
+  const [terminatedSnap, setTerminatedSnap] = useState<string | null>(agentBrowserStore.getTerminatedSnapshot());
+  useEffect(() => agentBrowserStore.subscribeSnapshot(setTerminatedSnap), []);
+
+  // Visual teleport: the session element is NEVER moved in the DOM (Electron
+  // webview guests tear down on reparenting). Instead this slot measures its
+  // own position every frame and the persistent fixed layer glues itself over
+  // it. Collapsed/hidden/terminated → the layer parks off-screen at full size
+  // and tools keep working against the live webview in the background.
   useEffect(() => {
-    const root = document.getElementById('oneagent-browser-root');
-    const slot = browserSlotRef.current;
-    if (!root) return;
-    if (isLatestBrowserBlock && isBrowserExpanded && !terminatedSnapshot && slot) {
-      if (root.parentElement !== slot) {
-        slot.appendChild(root);
-        window.dispatchEvent(new Event('oneagent-browser-slot-change'));
-      }
-    } else {
-      const hidden = document.getElementById('oneagent-browser-hidden');
-      if (hidden && root.parentElement !== hidden) {
-        hidden.appendChild(root);
-        window.dispatchEvent(new Event('oneagent-browser-slot-change'));
-      }
+    const layer = document.getElementById('oneagent-browser-layer');
+    if (!layer) return;
+    const show = isLatestBrowserBlock && isBrowserExpanded && !terminatedSnap && !!browserSlotRef.current;
+    if (!show) {
+      layer.style.left = '-20000px';
+      layer.style.top = '0px';
+      return;
     }
-    return () => {
-      // This tools block unmounting (newer browser block took over, message
-      // deleted…) — never orphan the session node inside removed DOM.
-      const r = document.getElementById('oneagent-browser-root');
-      const hidden = document.getElementById('oneagent-browser-hidden');
-      if (r && hidden && slot && r.parentElement === slot) {
-        hidden.appendChild(r);
-        window.dispatchEvent(new Event('oneagent-browser-slot-change'));
+    let raf = 0;
+    const sync = () => {
+      const slot = browserSlotRef.current;
+      if (slot) {
+        const r = slot.getBoundingClientRect();
+        layer.style.left = `${r.left}px`;
+        layer.style.top = `${r.top}px`;
+        layer.style.width = `${r.width}px`;
+        layer.style.height = `${r.height}px`;
       }
+      raf = requestAnimationFrame(sync);
     };
-  }, [isLatestBrowserBlock, isBrowserExpanded, terminatedSnapshot]);
+    raf = requestAnimationFrame(sync);
+    return () => cancelAnimationFrame(raf);
+  }, [isLatestBrowserBlock, isBrowserExpanded, terminatedSnap, browserSessionId]);
 
   return (
     <div className="w-full group relative">
@@ -331,59 +333,60 @@ const UnifiedToolsBlock = ({ activity, isGenerating, msgIsGenerating, activityFe
                 />
               );
             })}
-            
-            {/* Live Browser — teleports into the latest browser-bearing tools block */}
-            {activityFeed.lastBrowserToolsMessageId === activity.messageId && (
-              <div className="w-full rounded-xl border border-white/10 bg-white/[0.03] backdrop-blur-md overflow-hidden transition-all duration-200">
-                <div
-                  onClick={() => setIsBrowserExpanded(!isBrowserExpanded)}
-                  className="flex items-center justify-between px-3 py-2 cursor-pointer hover:bg-white/[0.05] transition-colors select-none text-xs text-textSecondary group"
-                >
-                  <div className="flex items-center gap-2 min-w-0">
-                    <Globe size={14} className="text-blue-400 shrink-0" />
-                    <span className="font-medium text-textSecondary group-hover:text-white transition-colors shrink-0">Live Browser Session</span>
-                  </div>
-                  <div className="flex items-center gap-2 shrink-0 ml-2">
-                    {terminatedSnapshot ? (
-                      <div className="w-2 h-2 rounded-full bg-red-500" title="Browser terminated" />
-                    ) : (
-                      <>
-                        <button
-                          onClick={(e) => { e.stopPropagation(); handleUserKillBrowser(); }}
-                          className="p-1 rounded hover:bg-red-500/20 text-textSecondary hover:text-red-400 transition-colors"
-                          title="Kill browser session"
-                        >
-                          <Trash2 size={14} />
-                        </button>
-                        <div className="w-2 h-2 rounded-full bg-green-500 animate-pulse" />
-                      </>
-                    )}
-                    {isBrowserExpanded ? (
-                      <ChevronDown size={14} className="text-textSecondary group-hover:text-gray-200 transition-transform" />
-                    ) : (
-                      <ChevronRight size={14} className="text-textSecondary group-hover:text-gray-200 transition-transform" />
-                    )}
-                  </div>
-                </div>
+          </div>
+        )}
 
-                {isBrowserExpanded && (
-                  <div className="border-t border-white/5 transition-all duration-300 ease-in-out origin-top overflow-hidden opacity-100 scale-y-100 bg-black/40 relative">
-                    {/* The persistent webview node is adopted into this slot
-                        (see effect above). Terminated session: node stays
-                        hidden off-screen; only the grayscale snapshot shows. */}
-                    <div ref={browserSlotRef} className="w-full h-[340px]" />
-                    {terminatedSnapshot && (
-                      <img
-                        src={terminatedSnapshot}
-                        alt="Terminated browser session"
-                        className="absolute inset-0 w-full h-full object-cover grayscale"
-                      />
-                    )}
-                  </div>
+        {/* Live Browser — always visible at the bottom of this tools block,
+            styled flush with the container: same header palette, rounded
+            bottom corners via the parent's clip, square inner corners. */}
+        {activityFeed.lastBrowserToolsMessageId === activity.messageId && (
+          <>
+            <div
+              onClick={() => setIsBrowserExpanded(!isBrowserExpanded)}
+              className="px-3 py-2 text-xs text-textSecondary flex items-center justify-between border-t border-white/5 cursor-pointer hover:bg-white/[0.05] transition-colors select-none group/header"
+            >
+              <div className="flex items-center gap-2 min-w-0">
+                <Globe size={14} className={terminatedSnap ? 'text-red-400 shrink-0' : 'text-blue-400 shrink-0'} />
+                <span className="font-medium group-hover/header:text-white transition-colors shrink-0">Live Browser Session</span>
+                {terminatedSnap && <span className="text-[10px] font-mono text-red-400">terminated</span>}
+              </div>
+              <div className="flex items-center gap-2 shrink-0 ml-2 text-textSecondary group-hover/header:text-gray-200 transition-colors">
+                {!terminatedSnap && (
+                  <>
+                    <button
+                      onClick={(e) => { e.stopPropagation(); handleUserKillBrowser(); }}
+                      className="p-1 rounded hover:bg-red-500/20 hover:text-red-400 transition-colors"
+                      title="Kill browser session"
+                    >
+                      <Trash2 size={14} />
+                    </button>
+                    <div className="w-2 h-2 rounded-full bg-green-500 animate-pulse" />
+                  </>
+                )}
+                {isBrowserExpanded ? (
+                  <ChevronDown size={14} className="transition-transform" />
+                ) : (
+                  <ChevronRight size={14} className="transition-transform" />
+                )}
+              </div>
+            </div>
+
+            {isBrowserExpanded && (
+              <div className="relative bg-black/20">
+                {/* Slot the fixed session layer positions itself over.
+                    Terminated: grayscale snapshot covers it. The next
+                    browser_* call clears the snapshot and resumes live. */}
+                <div ref={browserSlotRef} className="w-full aspect-video px-2 pb-2" />
+                {terminatedSnap && (
+                  <img
+                    src={terminatedSnap}
+                    alt="Terminated browser session"
+                    className="absolute inset-0 w-full h-full object-cover grayscale"
+                  />
                 )}
               </div>
             )}
-          </div>
+          </>
         )}
       </div>
     </div>
@@ -394,14 +397,26 @@ const ChatArea = ({ onToggleSettings }: { onToggleSettings?: () => void }) => {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [isGenerating, setIsGenerating] = useState(false);
 
-  // Terminated-browser grayscale snapshot. Read via state (not the store's
-  // getter) so snapshot changes actually trigger a re-render.
-  const [terminatedSnapshot, setTerminatedSnapshot] = useState<string | null>(agentBrowserStore.getTerminatedSnapshot());
-  useEffect(() => agentBrowserStore.subscribeSnapshot(setTerminatedSnapshot), []);
+  // Incremented at every generation start — forces the browser adoption
+  // effect to re-run (message ids alone don't change across regenerates) and
+  // remounts a guaranteed-fresh webview for each new session.
+  const [browserSessionId, setBrowserSessionId] = useState(0);
 
   // Debug-transcript availability — button only shows after a generation completes.
   const [hasTranscript, setHasTranscript] = useState(transcriptStore.get().length > 0);
   useEffect(() => transcriptStore.subscribe(t => setHasTranscript(t.length > 0)), []);
+
+  // Sub-agent transcript inspection — swaps the chat feed for the agent's chat.
+  const [inspectingAgentId, setInspectingAgentId] = useState<string | null>(null);
+  useEffect(() => {
+    const h = (e: Event) => {
+      setInspectingAgentId((e as CustomEvent).detail);
+      autoScrollEnabled.current = true;
+      setTimeout(() => bottomRef.current?.scrollIntoView(), 50);
+    };
+    window.addEventListener('inspect-agent', h);
+    return () => window.removeEventListener('inspect-agent', h);
+  }, []);
 
   // Edit mode tracking
   const [editingBlock, setEditingBlock] = useState<{ id: string, type: 'user' | 'thinking' | 'response' | 'tools' } | null>(null);
@@ -417,9 +432,7 @@ const ChatArea = ({ onToggleSettings }: { onToggleSettings?: () => void }) => {
   const [activeComment, setActiveComment] = useState<{ commentId: string, msgId: string, msgType: 'user' | 'thinking' | 'response', quote: string, x: number, y: number } | null>(null);
   const [isCommentPinned, setIsCommentPinned] = useState(false);
   const [commentDraft, setCommentDraft] = useState('');
-  const [isBrowserExpanded, setIsBrowserExpanded] = useState(false);
-  const [, setBrowserSnapshotTick] = useState(0);
-  useEffect(() => agentBrowserStore.subscribeSnapshot(() => setBrowserSnapshotTick(t => t + 1)), []);
+  const [isBrowserExpanded, setIsBrowserExpanded] = useState(true);
   const commentPopupHoverRef = useRef(false);
   const isCommentPinnedRef = useRef(false);
   const commentTextareaRef = useRef<HTMLTextAreaElement>(null);
@@ -780,6 +793,10 @@ const ChatArea = ({ onToggleSettings }: { onToggleSettings?: () => void }) => {
 
   const triggerGeneration = async (contextMsgs: ChatMessage[], targetModel: LLMModel, keepThinking?: string, feedbackComments?: ChatComment[]) => {
     setIsGenerating(true);
+    // New session: kill the old webview and remount a guaranteed-fresh one,
+    // and bump the session id so the Live Browser re-adopts the new node.
+    remountWebview();
+    setBrowserSessionId(id => id + 1);
     // Hide the titlebar Transcripts button while a new generation runs —
     // it only reappears once the response completes.
     transcriptStore.set('');
@@ -983,7 +1000,7 @@ const ChatArea = ({ onToggleSettings }: { onToggleSettings?: () => void }) => {
             }
             return newMsgs;
           });
-        }, roundSignal, undefined, getSystemTools());
+        }, roundSignal, undefined, getOrchestratorTools());
 
         if (streamResult.thinking) {
           accumulatedThinking = accumulatedThinking ? `${accumulatedThinking}\n\n${streamResult.thinking}` : streamResult.thinking;
@@ -991,7 +1008,12 @@ const ChatArea = ({ onToggleSettings }: { onToggleSettings?: () => void }) => {
           roundThinkingParts.push(streamResult.thinking);
         }
         if (streamResult.content) {
-          accumulatedContent = accumulatedContent ? `${accumulatedContent}\n\n${streamResult.content}` : streamResult.content;
+          // Strip simulated tool-session debris so it never accumulates into
+          // the visible answer or counts as "substantive" content below.
+          const cleanContent = stripSimulatedDebris(streamResult.content);
+          if (cleanContent) {
+            accumulatedContent = accumulatedContent ? `${accumulatedContent}\n\n${cleanContent}` : cleanContent;
+          }
         }
 
         const rawCalls = streamResult.toolCalls || [];
@@ -1001,7 +1023,10 @@ const ChatArea = ({ onToggleSettings }: { onToggleSettings?: () => void }) => {
           // manual kill, not a silent stop; never auto-continue it.
           const aborted = roundSignal.aborted || !abortControllerRef.current;
           const wentSilent = !aborted && !streamResult.content.trim() && !!streamResult.thinking.trim();
-          if ((truncated || wentSilent) && autoContinues < MAX_AUTO_CONTINUES && round < MAX_TOOL_ROUNDS) {
+          // Content that is ONLY simulated-tool debris (no <think> wrapper, no
+          // real calls) must not pass as a final answer — treat as a stall.
+          const debrisOnly = !aborted && !!streamResult.content.trim() && !stripSimulatedDebris(streamResult.content);
+          if ((truncated || wentSilent || debrisOnly) && autoContinues < MAX_AUTO_CONTINUES && round < MAX_TOOL_ROUNDS) {
             autoContinues++;
             // Carry the interrupted round's conclusions forward — otherwise the
             // next attempt re-derives everything from scratch and loops.
@@ -1012,13 +1037,15 @@ const ChatArea = ({ onToggleSettings }: { onToggleSettings?: () => void }) => {
               : ' Do NOT re-analyze from scratch.';
             const reason = truncated
               ? 'Your reply hit the token limit mid-generation.'
-              : 'Your reasoning ended without a tool call or answer.';
-            const note = `[Auto-continued: ${truncated ? 'token cutoff' : 'stopped without acting'}]`;
+              : debrisOnly
+                ? 'You simulated tool execution instead of calling tools. Fabricated output is discarded.'
+                : 'Your reasoning ended without a tool call or answer.';
+            const note = `[Auto-continued: ${truncated ? 'token cutoff' : debrisOnly ? 'simulated tools' : 'stopped without acting'}]`;
             accumulatedThinking = accumulatedThinking ? `${accumulatedThinking}\n\n${note}` : note;
             roundThinkingParts.push(note);
             formattedMessages.push({
               role: 'user',
-              content: `[System notice] ${reason} The task is not done.${digest ? `\nConclusions already reached (trust these):\n${digest}` : ''}${strict} Respond with your next tool call now.`
+              content: `[System notice] ${reason} The task is not done.${digest ? `\nConclusions already reached (trust these):\n${digest}` : ''}${strict} Respond with your next REAL tool call as <tool_call> JSON now.`
             });
             continue;
           }
@@ -1103,14 +1130,19 @@ const ChatArea = ({ onToggleSettings }: { onToggleSettings?: () => void }) => {
         });
       }
 
-      // Tool budget exhausted: give the model one final tools-free turn to
-      // answer, otherwise the message ends with no/partial text (or leaked
-      // reasoning) because the loop cut it off right after a tool execution.
+      // Give the model one final tools-free turn to answer when it would
+      // otherwise end with no/partial text: budget exhausted right after a
+      // tool call, or tool work happened but no answer text was produced.
       const wrapSignal = abortControllerRef.current?.signal;
-      if (round >= MAX_TOOL_ROUNDS && wrapSignal && !wrapSignal.aborted) {
+      const needsWrapUp =
+        (round >= MAX_TOOL_ROUNDS || (!accumulatedContent.trim() && allToolCalls.length > 0)) &&
+        !!wrapSignal && !wrapSignal!.aborted;
+      if (needsWrapUp) {
         formattedMessages.push({
           role: 'user',
-          content: '[System notice] Tool-call budget reached — no further tool calls will execute. Based on everything gathered so far, give your final answer to the task now in clean, complete sentences.'
+          content: round >= MAX_TOOL_ROUNDS
+            ? '[System notice] Tool-call budget reached — no further tool calls will execute. Based on everything gathered so far, give your final answer to the task now in clean, complete sentences.'
+            : '[System notice] You stopped without giving an answer. Based on your tool results, give your final answer to the task now in clean, complete sentences.'
         });
         try {
           const wrapModel = activeModelRef.current || targetModel;
@@ -1410,8 +1442,56 @@ const ChatArea = ({ onToggleSettings }: { onToggleSettings?: () => void }) => {
 
       {/* Main Content */}
       <div ref={scrollContainerRef} onScroll={handleScroll} className="flex-1 flex flex-col items-center overflow-y-auto w-full relative">
-        
-        {activityFeed.activities.length === 0 ? (
+
+        {inspectingAgentId ? (() => {
+          const agent = getAgentsSnapshot([inspectingAgentId])[0];
+          const transcript = getAgentTranscript(inspectingAgentId);
+          return (
+            <div className="chat-measure flex flex-col gap-4 py-6 px-4 sm:px-6 lg:px-8 text-sm xl:text-base w-full">
+              <div className="flex items-center gap-2 sticky top-0 z-10 bg-surface py-2">
+                <button
+                  onClick={() => setInspectingAgentId(null)}
+                  className="p-1.5 rounded-full text-textSecondary hover:text-white hover:bg-white/10 transition-colors"
+                  title="Back to orchestrator chat"
+                >
+                  <ChevronLeft size={16} />
+                </button>
+                <span className="text-sm font-medium text-white truncate">{agent?.label || 'Agent'}</span>
+                {agent?.model && <span className="text-[11px] font-mono text-textSecondary">{agent.model.provider}/{agent.model.id}</span>}
+                {agent && (
+                  <span className={`ml-auto text-[11px] font-mono shrink-0 ${
+                    agent.status === 'running' ? 'text-accentBright animate-pulse'
+                    : agent.status === 'error' ? 'text-red-400'
+                    : agent.status === 'done' ? 'text-green-400' : 'text-textSecondary'
+                  }`}>
+                    {agent.status}
+                  </span>
+                )}
+              </div>
+              {transcript.map((turn, i) => (
+                turn.role === 'system' ? null : (
+                  <div key={i} className="flex flex-col w-full text-gray-100 gap-2">
+                    <div className="font-semibold text-xs text-textSecondary">
+                      {turn.role === 'user' ? 'Task / Tool results' : turn.role === 'event' ? '' : 'Agent'}
+                    </div>
+                    <div className="w-full [&_pre]:whitespace-pre-wrap [&_code]:break-all">
+                      <ReactMarkdown
+                        remarkPlugins={[remarkGfm, remarkMath]}
+                        rehypePlugins={[rehypeRaw, rehypeKatex]}
+                        components={chatComponents}
+                      >
+                        {turn.content}
+                      </ReactMarkdown>
+                    </div>
+                  </div>
+                )
+              ))}
+              {transcript.length === 0 && (
+                <div className="text-textSecondary text-sm italic">No transcript recorded yet.</div>
+              )}
+            </div>
+          );
+        })() : activityFeed.activities.length === 0 ? (
           <div className="flex-1 flex flex-col items-center justify-center w-full px-4 sm:px-6 lg:px-8">
             <div className="flex flex-col items-center chat-measure mt-10">
               <div className="w-16 h-16 bg-white rounded-full flex items-center justify-center mb-6">
@@ -1503,7 +1583,7 @@ const ChatArea = ({ onToggleSettings }: { onToggleSettings?: () => void }) => {
                       isBrowserExpanded={isBrowserExpanded}
                       setIsBrowserExpanded={setIsBrowserExpanded}
                       handleUserKillBrowser={handleUserKillBrowser}
-                      terminatedSnapshot={terminatedSnapshot}
+                      browserSessionId={browserSessionId}
                       onEdit={() => setEditingBlock({ id: activity.messageId, type: 'tools' })}
                       onRegenerate={() => handleRegenerate(activity.messageId, 'tools')}
                       onDelete={() => handleDelete(activity.messageId, 'tools')}

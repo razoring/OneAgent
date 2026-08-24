@@ -25,13 +25,13 @@ function App() {
         <RightSidebar open={rightSidebarOpen} />
       </div>
 
-      {/* Persistent browser session. Lives off-screen so agent tools work
-          without any UI; the Live Browser panel moves this node into itself
-          (appendChild — no remount) to make it visible. */}
+      {/* Persistent browser session. Mounted ONCE and never moved in the DOM
+          (Electron webview guests tear down on reparenting). The Live Browser
+          panel positions this layer over its slot via fixed coordinates; when
+          hidden it parks off-screen at full size so tools keep working. */}
       <div
-        id="oneagent-browser-hidden"
-        style={{ position: 'fixed', left: -20000, top: 0, width: 1280, height: 800, pointerEvents: 'none', zIndex: -1 }}
-        aria-hidden
+        id="oneagent-browser-layer"
+        style={{ position: 'fixed', left: -20000, top: 0, width: 1280, height: 800, zIndex: 30 }}
       >
         <AgentBrowser />
       </div>

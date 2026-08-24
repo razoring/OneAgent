@@ -1018,6 +1018,28 @@ ipcMain.handle('provider-status', async (event, { providers }) => {
   return { success: true, status };
 });
 
+// Total system VRAM usage across all GPUs (used/total bytes). Uses
+// nvidia-smi when an NVIDIA driver is present; otherwise reports nothing.
+ipcMain.handle('vram-usage', async () => {
+  try {
+    const { execFile } = await import('child_process');
+    const out = await new Promise<string>((resolve, reject) => {
+      execFile('nvidia-smi', ['--query-gpu=memory.used,memory.total', '--format=csv,noheader,nounits'], { timeout: 3000 }, (err, stdout) => {
+        if (err) reject(err); else resolve(String(stdout));
+      });
+    });
+    let usedBytes = 0, totalBytes = 0;
+    for (const line of out.trim().split('\n')) {
+      const [u, t] = line.split(',').map(s => parseInt(s.trim(), 10));
+      if (!isNaN(u) && !isNaN(t)) { usedBytes += u * 1024 * 1024; totalBytes += t * 1024 * 1024; }
+    }
+    if (totalBytes > 0) return { success: true, usedBytes, totalBytes };
+    return { success: false };
+  } catch {
+    return { success: false };
+  }
+});
+
 app.on('web-contents-created', (event, contents) => {
   if (contents.getType() === 'webview') {
     contents.setWindowOpenHandler(({ url }) => {

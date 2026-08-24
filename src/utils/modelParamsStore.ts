@@ -19,7 +19,12 @@ export const modelParamsStore = {
     if (a) recompute?.();
     else { stats = null; listeners.forEach(l => l(stats)); }
   },
-  publish: (s: TokenStats) => { stats = s; listeners.forEach(l => l(s)); },
+  publish: (s: TokenStats) => {
+    if (stats && s && stats.system === s.system && stats.history === s.history && stats.prompt === s.prompt) return;
+    if (stats === null && s === null) return;
+    stats = s;
+    listeners.forEach(l => l(s));
+  },
   subscribe: (l: (s: TokenStats) => void) => {
     listeners.add(l);
     return () => { listeners.delete(l); };
