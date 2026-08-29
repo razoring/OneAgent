@@ -2,9 +2,10 @@ import React, { useState, useRef, useEffect } from 'react';
 import ChatInput from './ChatInput';
 import ThinkingBlock from './ThinkingBlock';
 import ToolCallBlock from './ToolCallBlock';
-import { generateChatStream, condenseThinking, LLMModel, fileToBase64, parseAttachmentDocument, getModelStats } from '../utils/llm';
+import { generateChatStream, generateChatResponse, condenseThinking, LLMModel, fileToBase64, parseAttachmentDocument, getModelStats } from '../utils/llm';
 import { executeToolCalls, ToolContext } from '../utils/toolExecutor';
 import { spawnSubAgent, getAgentsSnapshot, waitForAgents } from '../utils/subAgents';
+import { chatStore } from '../utils/chatStore';
 import DEFAULT_SYSTEM_PROMPT from '../utils/systemPrompt.md?raw';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -394,6 +395,61 @@ const ChatArea = ({ onToggleSettings }: { onToggleSettings?: () => void }) => {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [isGenerating, setIsGenerating] = useState(false);
 
+  // ─── Chat history ──────────────────────────────────────────────────────────
+  const [homeChatId, setHomeChatId] = useState<string | null>(() => (chatStore as any).getActiveId?.() ?? null);
+  const homeChatIdRef = useRef<string | null>(homeChatId);
+  const loadedChatIdRef = useRef<string | null>(null);
+  useEffect(() => { homeChatIdRef.current = homeChatId; }, [homeChatId]);
+
+  // Subscribe to active chat switches (Sidebar) — load its messages.
+  useEffect(() => {
+    const unsub = chatStore.subscribeActive((id) => {
+      setHomeChatId(id);
+      if (!id) { setMessages([]); loadedChatIdRef.current = null; return; }
+      // Flush any pending saves for the previous chat before switching.
+      chatStore.flushSaves();
+      loadedChatIdRef.current = id;
+      void chatStore.loadMessages(id).then((msgs) => {
+        // Guard against race if active switched again while loading
+        if (homeChatIdRef.current !== id) return;
+        setMessages(msgs);
+        setEditingBlock(null);
+        setEditPreview(null);
+        autoScrollEnabled.current = true;
+        setTimeout(() => bottomRef.current?.scrollIntoView({ behavior: 'auto' }), 50);
+      }).catch(() => {
+        if (homeChatIdRef.current === id) setMessages([]);
+      });
+    });
+    // Ensure store is initialized (Sidebar also does this; idempotent)
+    void chatStore.initOnce().then(() => {
+      const cur = chatStore.getActiveId();
+      if (cur && !loadedChatIdRef.current) {
+        // Trigger load if subscription missed initial value
+        setHomeChatId(cur);
+        loadedChatIdRef.current = cur;
+        void chatStore.loadMessages(cur).then(msgs => {
+          if (homeChatIdRef.current === cur) setMessages(msgs);
+        });
+      }
+    });
+    return () => { unsub(); };
+  }, []);
+
+  // Autosave the home conversation (debounced; capped wait keeps long generations checkpointed).
+  useEffect(() => {
+    const chatId = homeChatIdRef.current;
+    if (!chatId || chatId !== loadedChatIdRef.current || !chatStore.isReady) return;
+    chatStore.saveMessagesDebounced(chatId, messages);
+  }, [messages, homeChatId]);
+
+  // Flush pending saves on window close / refresh.
+  useEffect(() => {
+    const h = () => chatStore.flushSaves();
+    window.addEventListener('beforeunload', h);
+    return () => window.removeEventListener('beforeunload', h);
+  }, []);
+
   // Terminated-browser grayscale snapshot. Read via state (not the store's
   // getter) so snapshot changes actually trigger a re-render.
   const [terminatedSnapshot, setTerminatedSnapshot] = useState<string | null>(agentBrowserStore.getTerminatedSnapshot());
@@ -475,6 +531,7 @@ const ChatArea = ({ onToggleSettings }: { onToggleSettings?: () => void }) => {
     getModel: () => activeModelRef.current || lastUsedModel,
     setModel: switchActiveModel,
     requestApproval,
+    getAnnotations: () => messages.flatMap(m => (m.role === 'assistant' ? (m.comments || []) : [])),
     spawnAgent: (spec) => spawnSubAgent(spec, {
       requestApproval,
       getModel: () => activeModelRef.current || lastUsedModel,
@@ -484,6 +541,41 @@ const ChatArea = ({ onToggleSettings }: { onToggleSettings?: () => void }) => {
     waitForAgents,
     signal: abortControllerRef.current?.signal
   });
+
+  // Auto-title: after the first exchange of a default-titled chat, ask the model for a concise name.
+  const titleInFlight = useRef(false);
+  const maybeGenerateTitle = async (contextMsgs: ChatMessage[], targetModel: LLMModel, answer: string) => {
+    const chatId = homeChatIdRef.current;
+    if (!chatId || titleInFlight.current) return;
+    const meta = chatStore.getMeta(chatId);
+    if (!meta || (meta.title !== 'New Chat' && meta.title !== '')) return;
+    const firstUserText = contextMsgs.find(m => m.role === 'user')?.content?.trim() || '';
+    if (!firstUserText && !answer.trim()) return;
+    titleInFlight.current = true;
+    const fallback = () => {
+      const source = firstUserText || answer;
+      const t = source.replace(/\s+/g, ' ').slice(0, 48).trim();
+      if (t) void chatStore.rename(chatId, t).catch(() => { });
+    };
+    try {
+      const raw = await generateChatResponse(
+        activeModelRef.current || targetModel,
+        [
+          { role: 'system', content: 'You generate concise chat titles. Reply with ONLY the title: 2 to 6 words, no quotes, no trailing punctuation, no explanation.' },
+          { role: 'user', content: `First user message:\n${firstUserText.slice(0, 800)}\n\nAssistant reply excerpt:\n${answer.slice(0, 600)}` }
+        ]
+      );
+      const title = raw.replace(/<think>[\s\S]*?<\/think>/g, '').replace(/["'`\n]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 60);
+      const current = chatStore.getMeta(chatId);
+      if (!current || (current.title !== 'New Chat' && current.title !== '')) return;
+      if (title) await chatStore.rename(chatId, title);
+      else fallback();
+    } catch {
+      fallback();
+    } finally {
+      titleInFlight.current = false;
+    }
+  };
 
   const handleScroll = () => {
     if (!scrollContainerRef.current) return;
@@ -764,6 +856,19 @@ const ChatArea = ({ onToggleSettings }: { onToggleSettings?: () => void }) => {
     if (!text.trim() && attachments.length === 0) return;
     setLastUsedModel(model);
 
+    // Ensure a home chat exists (flat history guarantees one, but guard race)
+    if (!homeChatIdRef.current) {
+      try {
+        const meta = await chatStore.createChat(null);
+        homeChatIdRef.current = meta.id;
+        loadedChatIdRef.current = meta.id;
+        setHomeChatId(meta.id);
+        chatStore.setActive(meta.id);
+      } catch (e) {
+        console.error('[ChatArea] failed to ensure chat', e);
+      }
+    }
+
     // Build the user message
     const userMsg: ChatMessage = {
       id: Math.random().toString(36).substring(7),
@@ -929,6 +1034,15 @@ const ChatArea = ({ onToggleSettings }: { onToggleSettings?: () => void }) => {
       const MAX_AUTO_CONTINUES = 2;
       let autoContinues = 0;
 
+      // Plan-first gate: ask_user locked until a substantive written reply exists.
+      // Mirrors 1535081 orchestrator.md without task_add/spawn gating.
+      let planDraftReady = accumulatedContent.trim().length > 0;
+      const roundToolset = () => {
+        const all = getSystemTools();
+        if (!planDraftReady) return all.filter((t: any) => t.function.name !== 'ask_user');
+        return all;
+      };
+
       while (round < MAX_TOOL_ROUNDS) {
         round++;
 
@@ -983,7 +1097,7 @@ const ChatArea = ({ onToggleSettings }: { onToggleSettings?: () => void }) => {
             }
             return newMsgs;
           });
-        }, roundSignal, undefined, getSystemTools());
+        }, roundSignal, undefined, roundToolset());
 
         if (streamResult.thinking) {
           accumulatedThinking = accumulatedThinking ? `${accumulatedThinking}\n\n${streamResult.thinking}` : streamResult.thinking;
@@ -993,6 +1107,8 @@ const ChatArea = ({ onToggleSettings }: { onToggleSettings?: () => void }) => {
         if (streamResult.content) {
           accumulatedContent = accumulatedContent ? `${accumulatedContent}\n\n${streamResult.content}` : streamResult.content;
         }
+        // Unlock ask_user once a substantive draft exists (plan-first gating).
+        if (accumulatedContent.trim().length > 0) planDraftReady = true;
 
         const rawCalls = streamResult.toolCalls || [];
         if (rawCalls.length === 0) {
@@ -1152,12 +1268,20 @@ const ChatArea = ({ onToggleSettings }: { onToggleSettings?: () => void }) => {
         const targetIdx = newMsgs.findIndex(m => m.id === assistantMsgId);
         if (targetIdx !== -1) {
           newMsgs[targetIdx] = finalMsg;
+        } else {
+          newMsgs.push(finalMsg);
+        }
+        // Immediate persistence at completion boundary
+        const cid = homeChatIdRef.current;
+        if (cid && loadedChatIdRef.current === cid) {
+          void chatStore.saveMessages(cid, newMsgs);
         }
         return newMsgs;
       });
 
       // Generation over — the titlebar Transcripts button appears now.
       transcriptStore.set(buildTranscript(finalMsg));
+      void maybeGenerateTitle(contextMsgs, targetModel, accumulatedContent);
 
 
 

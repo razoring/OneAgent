@@ -254,8 +254,8 @@ export const SYSTEM_TOOLS = [
     {
       question: str('The question or permission request, shown as the prompt title.'),
       detail: str('Optional technical detail shown in a mono block (command, URL, code snippet…).'),
-      options: { type: 'array', items: { type: 'string' }, description: '1-8 short answer options the user can click.' }
-    }, ['question'])
+      options: { type: 'array', items: { type: 'string' }, description: 'REQUIRED — at least one CONCRETE clickable answer (standard approval flow: ["Proceed"]). Free-text is always available to the user additionally.' }
+    }, ['question', 'options'])
 ];
 
 // Tools exposed to the model. search_web is only included when a search

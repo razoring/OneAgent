@@ -54,6 +54,8 @@ export interface ToolContext {
   spawnAgent: (spec: any) => string;
   getAgents: (ids?: string[]) => any[];
   waitForAgents: (ids: string[] | undefined, ms: number) => Promise<any[]>;
+  // Inline annotations on the assistant reply — delivered with ask_user answers.
+  getAnnotations?: () => { quote: string; text: string }[];
   signal?: AbortSignal;
 }
 
@@ -420,13 +422,19 @@ const HANDLERS: Record<string, Handler> = {
   browser_keystrokes: async (args) => ok(await browserKeystrokesLegacyRouter(args)),
 
   // Blocks until the user answers the inline prompt in the chat input.
-  ask_user: async (args) => {
+  ask_user: async (args, ctx) => {
     const question = String(p(args, 'question', 'Question') || '').trim();
     if (!question) throw new Error("ask_user requires 'question'");
-    const rawOpts = p(args, 'options', 'Options');
+    const rawOpts = p(args, 'options', 'Options', 'Option');
     const options = Array.isArray(rawOpts)
       ? rawOpts.map((o: any) => String(o).trim()).filter(Boolean).slice(0, 8)
       : [];
+    if (options.length === 0) {
+      throw new Error(
+        'ask_user requires at least one CONCRETE answer option (e.g. ["Proceed"]). ' +
+        'Free-text is always available to the user additionally. Retry with real options.'
+      );
+    }
     const detail = p(args, 'detail', 'Detail');
     const response = await userPromptStore.enqueue({
       kind: 'ask',
@@ -435,7 +443,16 @@ const HANDLERS: Record<string, Handler> = {
       options
     });
     if (response === null) return ok('No response — the prompt was dismissed. Continue without waiting or try a different approach.');
-    return ok(`USER RESPONSE: ${response}`);
+    // Inline annotations the user made on the reply travel with the answer.
+    let annotations = '';
+    try {
+      const notes = ctx.getAnnotations?.() || [];
+      if (notes.length > 0) {
+        annotations = '\n\nUser inline annotations on your reply (apply them):\n' +
+          notes.slice(0, 20).map(c => `- On "${String(c.quote).slice(0, 100)}": ${c.text}`).join('\n');
+      }
+    } catch {}
+    return ok(`USER RESPONSE: ${response}${annotations}`);
   },
 };
 

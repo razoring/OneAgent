@@ -1,5 +1,4 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { ChevronRight } from 'lucide-react';
 import { ModelSettings, getModelSettings, saveModelSettings } from '../utils/llm';
 import { modelParamsStore } from '../utils/modelParamsStore';
 
@@ -249,71 +248,54 @@ const RightSidebar = ({ open }: { open: boolean }) => {
           />
         </div>
 
-        {/* Tasks — sub-agent tasks, nestable (orchestrator → sub-agents).
-            Static mockup, no functionality yet */}
+        {/* Tasks — flat list, no nesting */}
         <div className="flex flex-col gap-2 mt-6 pt-5">
           <div className="flex items-center justify-between">
             <span className="menu-header">Tasks</span>
             <span className="text-[11px] font-mono text-textSecondary">1/4</span>
           </div>
 
-          {/* Orchestrator task with nested children */}
-          <div className="rounded-xl border border-white/5 bg-black/20 p-2.5">
-            <button className="w-full flex items-center gap-2.5 text-left hover:bg-white/[0.04] rounded-lg -m-1 p-1 transition-colors group">
-              <span className="w-4 h-4 shrink-0 rounded-full border-2 border-accent border-t-transparent animate-spin" />
-              <div className="min-w-0 flex-1">
-                <TaskTitle running text="Collect 10 contractor contacts from Toronto-area listing websites" className="text-sm text-white" />
-                <div className="text-[11px] text-textSecondary/70 font-mono">gemma4:12b · running</div>
-              </div>
-              <ChevronRight size={14} className="rotate-90 text-textSecondary group-hover:text-white transition-colors shrink-0" />
-            </button>
-
-            {/* Nested children — indented with a guide rail */}
-            <div className="mt-2 ml-[11px] pl-3 border-l border-white/10 flex flex-col gap-1.5">
-
-              {/* Child: done */}
-              <button className="rounded-lg bg-black/30 p-2 flex items-center gap-2 text-left hover:bg-white/[0.04] transition-colors group">
-                <span className="w-3.5 h-3.5 shrink-0 rounded-full bg-accent/80 flex items-center justify-center">
-                  <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><path d="M20 6 9 17l-5-5"/></svg>
-                </span>
-                <div className="min-w-0 flex-1">
-                  <div className="text-xs text-textSecondary line-through truncate">Search Toronto contractors</div>
-                  <div className="text-[10px] text-textSecondary/70 font-mono">gemma3:4b · 14.2s</div>
-                </div>
-                <ChevronRight size={12} className="text-textSecondary group-hover:text-white transition-colors shrink-0" />
-              </button>
-
-              {/* Child: running */}
-              <button className="rounded-lg border border-accent/30 bg-white/[0.03] p-2 flex items-center gap-2 text-left transition-colors group">
-                <span className="w-3.5 h-3.5 shrink-0 rounded-full border-2 border-accent border-t-transparent animate-spin" />
-                <div className="min-w-0 flex-1">
-                  <TaskTitle running text="Extract contact emails and phone numbers from the top-ranked contractor sites" className="text-xs text-white" />
-                  <div className="text-[10px] text-textSecondary/70 font-mono">gemma3:4b · running</div>
-                </div>
-                <ChevronRight size={12} className="text-textSecondary group-hover:text-white transition-colors shrink-0" />
-              </button>
-
-              {/* Grandchild (depth 2): queued */}
-              <div className="ml-[11px] pl-3 border-l border-white/10 flex flex-col gap-1.5">
-                <div className="rounded-lg bg-black/30 p-2 flex items-center gap-2 opacity-70">
-                  <span className="w-3 h-3 shrink-0 rounded-full border-2 border-white/25" />
-                  <div className="min-w-0 flex-1">
-                    <div className="text-xs text-textSecondary truncate">Visit kijiji.ca listings</div>
-                    <div className="text-[10px] text-textSecondary/70 font-mono">gemma3:4b · queued</div>
-                  </div>
-                </div>
-              </div>
+          <button className="w-full rounded-xl border border-white/5 bg-black/20 p-2.5 flex items-center gap-2.5 text-left hover:bg-white/[0.04] transition-colors group">
+            <span className="w-4 h-4 shrink-0 rounded-full border-2 border-accent border-t-transparent animate-spin" />
+            <div className="min-w-0 flex-1">
+              <TaskTitle running text="Collect 10 contractor contacts from Toronto-area listing websites" className="text-sm text-white" />
+              <div className="text-[11px] text-textSecondary/70 font-mono">gemma4:12b · running</div>
             </div>
-          </div>
+          </button>
 
-          {/* Standalone leaf task */}
-          <div className="rounded-xl border border-white/5 bg-black/20 p-2.5 flex items-center gap-2.5 opacity-70">
+          <button className="w-full rounded-xl border border-white/5 bg-black/20 p-2.5 flex items-center gap-2.5 text-left hover:bg-white/[0.04] transition-colors group opacity-70">
+            <span className="w-3.5 h-3.5 shrink-0 rounded-full bg-accent/80 flex items-center justify-center">
+              <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><path d="M20 6 9 17l-5-5"/></svg>
+            </span>
+            <div className="min-w-0 flex-1">
+              <div className="text-sm text-textSecondary line-through truncate">Search Toronto contractors</div>
+              <div className="text-[11px] text-textSecondary/70 font-mono">gemma3:4b · 14.2s</div>
+            </div>
+          </button>
+
+          <button className="w-full rounded-xl border border-white/5 bg-black/20 p-2.5 flex items-center gap-2.5 text-left hover:bg-white/[0.04] transition-colors group">
+            <span className="w-4 h-4 shrink-0 rounded-full border-2 border-accent border-t-transparent animate-spin" />
+            <div className="min-w-0 flex-1">
+              <TaskTitle running text="Extract contact emails and phone numbers from the top-ranked contractor sites" className="text-sm text-white" />
+              <div className="text-[11px] text-textSecondary/70 font-mono">gemma3:4b · running</div>
+            </div>
+          </button>
+
+          <button className="w-full rounded-xl border border-white/5 bg-black/20 p-2.5 flex items-center gap-2.5 text-left hover:bg-white/[0.04] transition-colors group opacity-70">
+            <span className="w-4 h-4 shrink-0 rounded-full border-2 border-white/25" />
+            <div className="min-w-0 flex-1">
+              <div className="text-sm text-textSecondary truncate">Visit kijiji.ca listings</div>
+              <div className="text-[11px] text-textSecondary/70 font-mono">gemma3:4b · queued</div>
+            </div>
+          </button>
+
+          <button className="w-full rounded-xl border border-white/5 bg-black/20 p-2.5 flex items-center gap-2.5 text-left hover:bg-white/[0.04] transition-colors group opacity-70">
             <span className="w-4 h-4 shrink-0 rounded-full border-2 border-white/25" />
             <div className="min-w-0 flex-1">
               <div className="text-sm text-textSecondary truncate">Summarize findings</div>
               <div className="text-[11px] text-textSecondary/70 font-mono">gemma3:4b · queued</div>
             </div>
-          </div>
+          </button>
 
           <button className="menu-item !py-1.5 justify-center text-xs text-textSecondary hover:text-white">
             View all tasks
