@@ -3,8 +3,8 @@ import ChatInput from './ChatInput';
 import ThinkingBlock from './ThinkingBlock';
 import ToolCallBlock from './ToolCallBlock';
 import { generateChatStreamWithRetry, generateChatResponse, condenseThinking, stripSimulatedDebris, LLMModel, fileToBase64, parseAttachmentDocument, getModelStats } from '../utils/llm';
-import { executeToolCalls, ToolContext } from '../utils/toolExecutor';
-import { spawnSubAgent, getAgentsSnapshot, waitForAgents, getAgentTranscript } from '../utils/subAgents';
+import { getAgentsSnapshot, getAgentTranscript, runApprovedSteps, StepRunResult } from '../utils/subAgents';
+import { classifyNeedsExecution, extractSteps, heuristicNeedsExecution, PlanStep } from '../utils/delegation';
 import { chatStore, transcriptToMessages } from '../utils/chatStore';
 import { ORCHESTRATOR_PROMPT as DEFAULT_SYSTEM_PROMPT } from '../utils/prompts';
 import ReactMarkdown from 'react-markdown';
@@ -16,9 +16,9 @@ import 'katex/dist/katex.min.css';
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
 import { vscDarkPlus } from 'react-syntax-highlighter/dist/esm/styles/prism';
 import { MessageSquarePlus, Terminal, Globe, ChevronDown, ChevronRight, ChevronLeft, Trash2, Bug, Settings2 } from 'lucide-react';
-import { getOrchestratorTools } from '../utils/tools';
 import { agentBrowserStore } from '../utils/agentBrowserStore';
 import { terminateBrowserSession } from '../utils/browserTools';
+import LiveEmbeddedContainer from './LiveEmbeddedContainer';
 import { transcriptStore } from '../utils/transcriptStore';
 import { userPromptStore } from '../utils/userPromptStore';
 import { taskListStore } from '../utils/taskListStore';
@@ -189,9 +189,6 @@ const downloadTranscript = () => {
 // Safety cap so a model stuck in tool-call loops can't run forever
 const MAX_TOOL_ROUNDS = 10;
 
-const truncateForContext = (s: string, max = 6000) =>
-  s.length > max ? s.slice(0, max) + `\n...[truncated ${s.length - max} chars]` : s;
-
 const BlockToolbar = ({ onEdit, onRegenerate, onDelete }: { onEdit?: () => void, onRegenerate?: () => void, onDelete?: () => void }) => {
   return (
     <div className="absolute -top-[38px] right-0 pb-1.5 opacity-0 pointer-events-none group-hover:opacity-100 group-hover:pointer-events-auto transition-opacity z-20">
@@ -216,52 +213,16 @@ const BlockToolbar = ({ onEdit, onRegenerate, onDelete }: { onEdit?: () => void,
   );
 };
 
-const UnifiedToolsBlock = ({ activity, isGenerating, msgIsGenerating, activityFeed, isBrowserExpanded, setIsBrowserExpanded, handleUserKillBrowser, browserSessionId, onEdit, onRegenerate, onDelete }: any) => {
+const UnifiedToolsBlock = ({ activity, isGenerating, msgIsGenerating, activityFeed, isBrowserExpanded, setIsBrowserExpanded, handleUserKillBrowser, _browserSessionId, onEdit, onRegenerate, onDelete }: any) => {
   const { toolCalls } = activity.data;
   const [expanded, setExpanded] = useState(true);
-  const browserSlotRef = useRef<HTMLDivElement | null>(null);
   const isLatestBrowserBlock = activityFeed.lastBrowserToolsMessageId === activity.messageId;
 
   // Terminated-session snapshot (grayscale overlay over the live slot).
   const [terminatedSnap, setTerminatedSnap] = useState<string | null>(agentBrowserStore.getTerminatedSnapshot());
   useEffect(() => agentBrowserStore.subscribeSnapshot(setTerminatedSnap), []);
-
-  // Visual teleport: the session element is NEVER moved in the DOM (Electron
-  // webview guests tear down on reparenting). Instead this slot measures its
-  // own position every frame and the persistent fixed layer glues itself over
-  // it. Collapsed/hidden/terminated → the layer parks off-screen at full size
-  // and tools keep working against the live webview in the background.
-  useEffect(() => {
-    const layer = document.getElementById('oneagent-browser-layer');
-    if (!layer) return;
-    const show = isLatestBrowserBlock && isBrowserExpanded && !terminatedSnap && !!browserSlotRef.current;
-    if (!show) {
-      layer.style.left = '-20000px';
-      layer.style.top = '0px';
-      return;
-    }
-    let raf = 0;
-    const sync = () => {
-      const slot = browserSlotRef.current;
-      if (slot) {
-        const r = slot.getBoundingClientRect();
-        layer.style.left = `${r.left}px`;
-        layer.style.top = `${r.top}px`;
-        layer.style.width = `${r.width}px`;
-        layer.style.height = `${r.height}px`;
-      }
-      raf = requestAnimationFrame(sync);
-    };
-    raf = requestAnimationFrame(sync);
-    return () => {
-      cancelAnimationFrame(raf);
-      // Park the layer offscreen when this block goes away (regeneration,
-      // chat switch, collapse) — otherwise the webview freezes visibly over
-      // whatever the feed now shows.
-      layer.style.left = '-20000px';
-      layer.style.top = '0px';
-    };
-  }, [isLatestBrowserBlock, isBrowserExpanded, terminatedSnap, browserSessionId]);
+  // No teleport — LiveEmbeddedContainer parks headless offscreen when not visible,
+  // so tools keep working without needing a global fixed layer.
 
   return (
     <div className="w-full group relative">
@@ -348,10 +309,9 @@ const UnifiedToolsBlock = ({ activity, isGenerating, msgIsGenerating, activityFe
 
             {isBrowserExpanded && (
               <div className="relative bg-black/20">
-                {/* Slot the fixed session layer positions itself over.
-                    Terminated: grayscale snapshot covers it. The next
-                    browser_* call clears the snapshot and resumes live. */}
-                <div ref={browserSlotRef} className="w-full aspect-video px-2 pb-2" />
+                <div className="w-full aspect-video px-2 pb-2">
+                  <LiveEmbeddedContainer isVisible={isLatestBrowserBlock && isBrowserExpanded && !terminatedSnap} />
+                </div>
                 {terminatedSnap && (
                   <img
                     src={terminatedSnap}
@@ -579,38 +539,6 @@ const ChatArea = ({ onToggleSettings }: { onToggleSettings?: () => void }) => {
   const flushPendingApprovals = () => {
     userPromptStore.flush();
   };
-
-  const switchActiveModel = (model: LLMModel) => {
-    activeModelRef.current = model;
-    setCurrentModel(model);
-    window.dispatchEvent(new CustomEvent('agent-model-changed', { detail: model }));
-  };
-
-  // Per-generation orchestration gates, shared across all tool batches of one
-  // generation. Reset at every triggerGeneration.
-  const orchestratorGateRef = useRef<{ modelsListed: boolean }>({ modelsListed: false });
-
-  const createToolContext = (): ToolContext => ({
-    getModel: () => activeModelRef.current || lastUsedModel,
-    setModel: switchActiveModel,
-    requestApproval,
-    gate: orchestratorGateRef.current,
-    // Inline annotations on the assistant reply ride along with ask_user
-    // answers so the model applies them without a separate regeneration.
-    getAnnotations: () => messages.flatMap(m => (m.role === 'assistant' ? m.comments || [] : [])),
-    spawnAgent: (spec) => spawnSubAgent({
-      ...spec,
-      // Nested agent chats hang off the conversation they were spawned from.
-      parentChatId: spec.parentChatId ?? homeChatIdRef.current
-    }, {
-      requestApproval,
-      getModel: () => activeModelRef.current || lastUsedModel,
-      signal: abortControllerRef.current?.signal
-    }),
-    getAgents: getAgentsSnapshot,
-    waitForAgents,
-    signal: abortControllerRef.current?.signal
-  });
 
   const handleScroll = () => {
     if (!scrollContainerRef.current) return;
@@ -933,11 +861,224 @@ const ChatArea = ({ onToggleSettings }: { onToggleSettings?: () => void }) => {
     }
   };
 
+  // ─── Guided delegation pipeline ────────────────────────────────────────────
+  // The app drives the protocol; the LLM only writes prose:
+  //   DRAFT (tools-free) → CLASSIFY → GATE (app card, no auto-proceed)
+  //   → EXTRACT steps → SPAWN/COLLECT agents → SYNTHESIZE
+
+  const messagesRef = useRef<ChatMessage[]>([]);
+  useEffect(() => { messagesRef.current = messages; }, [messages]);
+
+  interface DelegationRow extends PlanStep {
+    status: 'queued' | 'running' | 'retrying' | 'done' | 'error';
+    resultSummary?: string;
+    agentId?: string;
+  }
+  const [delegation, setDelegation] = useState<{ steps: DelegationRow[] } | null>(null);
+
+  const buildFormatted = async (contextMsgs: ChatMessage[]): Promise<any[]> => {
+    const formattedMessages: any[] = [{ role: 'system', content: DEFAULT_SYSTEM_PROMPT }];
+    for (const msg of contextMsgs) {
+      let textContent = msg.content || '';
+      if (msg.role === 'assistant' && msg.thinking) {
+        textContent = `<think>\n${condenseThinking(msg.thinking)}\n</think>\n\n${textContent}`;
+      }
+      if (msg.comments && msg.comments.length > 0) {
+        textContent += `\n\n--- User annotations on this message ---\n`;
+        msg.comments.forEach(c => { textContent += `On text: "${c.quote}"\nAnnotation: "${c.text}"\n`; });
+      }
+      if (msg.attachments && msg.attachments.length > 0) {
+        const content: any[] = [];
+        for (const att of msg.attachments) {
+          if (att.type === 'image' && att.file) {
+            content.push({ type: 'text', text: `[Image Attachment: @${att.display}]` });
+            content.push({ type: 'image_url', image_url: { url: await fileToBase64(att.file) } });
+          } else if (att.file) {
+            try {
+              const parsedDoc = await parseAttachmentDocument(att.file);
+              textContent += `\n\n--- Attachment: @${att.display} ---\n${parsedDoc.text}\n--- End Attachment ---`;
+            } catch (err) { console.error('Could not read file', err); }
+          }
+        }
+        if (textContent) content.unshift({ type: 'text', text: textContent });
+        formattedMessages.push(content.length === 1 ? { role: msg.role, content: textContent } : { role: msg.role, content });
+      } else {
+        formattedMessages.push({ role: msg.role, content: textContent });
+      }
+    }
+    return formattedMessages;
+  };
+
+  // One tools-free assistant turn (draft / synthesis / regeneration). Writes
+  // a normal annotatable message and returns its final text.
+  const streamAssistantTurn = async (
+    contextMsgs: ChatMessage[],
+    targetModel: LLMModel,
+    phase: 'draft' | 'synthesis'
+  ): Promise<string> => {
+    setIsGenerating(true);
+    setBrowserSessionId(id => id + 1);
+    transcriptStore.set('');
+    // NOTE: the turn-level AbortController is owned by runConversationTurn —
+    // it must SURVIVE this function (the Proceed card listens on it after the
+    // draft completes). Never null or replace it here.
+    autoScrollEnabled.current = true;
+    setTimeout(() => bottomRef.current?.scrollIntoView({ behavior: 'smooth' }), 50);
+
+    const msgId = Math.random().toString(36).substring(7);
+    const startedAt = Date.now();
+    // Functional update: messagesRef may still be one render behind right
+    // after the user message was added — appending to prev guarantees the
+    // user's prompt stays in the list.
+    setMessages(prev => [...prev, { id: msgId, role: 'assistant', content: '', isGenerating: true }]);
+
+    try {
+      const model = activeModelRef.current || targetModel;
+      const formatted = await buildFormatted(contextMsgs);
+      const res = await generateChatStreamWithRetry(model, formatted, update => {
+        setMessages(prev => {
+          const idx = prev.findIndex(m => m.id === msgId);
+          if (idx === -1) return prev;
+          const next = [...prev];
+          next[idx] = { ...next[idx], content: update.content, thinking: update.thinking, isGenerating: true };
+          return next;
+        });
+      }, abortControllerRef.current?.signal);
+
+      const clean = stripSimulatedDebris(res.content || '').trim();
+      const thinking = res.thinking || '';
+      setMessages(prev => prev.map(m => (m.id === msgId
+        ? { ...m, content: clean, thinking, isGenerating: false, isCallingTool: false, createdAt: startedAt, completedAt: Date.now() }
+        : m)));
+
+      const finalMsg: ChatMessage = {
+        id: msgId, role: 'assistant', content: clean, thinking,
+        isGenerating: false, createdAt: startedAt, completedAt: Date.now()
+      };
+      try { let stats: any = null; stats = await getModelStats(activeModelRef.current || targetModel); finalMsg.modelStats = stats; } catch {}
+      transcriptStore.set(buildTranscript(finalMsg));
+      if (phase === 'draft') maybeGenerateTitle(contextMsgs, targetModel, clean);
+      return clean;
+    } catch (e: any) {
+      if (e?.name === 'AbortError') {
+        finalizeGeneratingMessages();
+        return '';
+      }
+      console.error(`[ChatArea] ${phase} turn failed`, e);
+      setMessages(prev => prev.map(m => (m.id === msgId
+        ? { ...m, content: `**Error:** ${e?.message || e}`, isGenerating: false }
+        : m)));
+      return '';
+    } finally {
+      setIsGenerating(false);
+    }
+  };
+
+  // App-owned confirmation card. Blocks until the user Proceeds, writes
+  // feedback, or stops. Never auto-proceeds.
+  const askProceedCard = async (): Promise<{ answer: string | null; annotations: { quote: string; text: string }[] }> => {
+    const signal = abortControllerRef.current?.signal;
+    const promise = userPromptStore.enqueue({ kind: 'ask', title: 'Ready to proceed?', options: ['Proceed'] });
+    const aborted = new Promise<null>(resolve => {
+      if (!signal) return resolve(null);
+      if (signal.aborted) return resolve(null);
+      signal.addEventListener('abort', () => resolve(null), { once: true });
+    });
+    const answer = await Promise.race([promise, aborted]);
+    // Snapshot annotations made on the draft while the card was open.
+    const lastAssistant = [...messagesRef.current].reverse().find(m => m.role === 'assistant');
+    const annotations = (lastAssistant?.comments || []).map(c => ({ quote: c.quote, text: c.text }));
+    if (answer === null) { userPromptStore.flush(); return { answer: null, annotations: [] }; }
+    return { answer, annotations };
+  };
+
+  const runConversationTurn = async (initialMsgs: ChatMessage[], targetModel: LLMModel) => {
+    abortControllerRef.current = new AbortController();
+    setDelegation(null);
+    let currentMsgs = initialMsgs;
+
+    // ── DRAFT (+ revision loop — user stays in control, no auto-proceed)
+    let draftText = '';
+    // eslint-disable-next-line no-constant-condition
+    while (true) {
+      draftText = await streamAssistantTurn(currentMsgs, targetModel, 'draft');
+      if (abortControllerRef.current?.signal.aborted || !draftText.trim()) return;
+
+      const lastUserText = [...currentMsgs].reverse().find(m => m.role === 'user')?.content || '';
+      let agentic = await classifyNeedsExecution(activeModelRef.current || targetModel, lastUserText, draftText);
+      if (agentic === null) agentic = heuristicNeedsExecution(lastUserText, draftText);
+      if (agentic === false) return; // conversational — plain chat reply, done
+
+      const { answer, annotations } = await askProceedCard();
+      if (answer === null) return; // stopped
+      if (answer === 'Proceed' && annotations.length === 0) break;
+
+      // Feedback → append it and produce a revised draft.
+      const feedbackParts: string[] = [];
+      if (answer !== 'Proceed') feedbackParts.push(answer);
+      annotations.forEach(a => feedbackParts.push(`On "${a.quote.slice(0, 100)}": ${a.text}`));
+      const fbMsg: ChatMessage = {
+        id: Math.random().toString(36).substring(7),
+        role: 'user',
+        content: `[Feedback on your reply]\n${feedbackParts.join('\n')}`
+      };
+      currentMsgs = [...messagesRef.current, fbMsg];
+      setMessages(currentMsgs);
+    }
+
+    // ── APPROVED → extract steps from the approved draft
+    const model = activeModelRef.current || targetModel;
+    let steps: PlanStep[] = [];
+    try { steps = await extractSteps(model, draftText); } catch { steps = []; }
+    if (steps.length === 0) {
+      await streamAssistantTurn(
+        [...messagesRef.current, { id: Math.random().toString(36).substring(7), role: 'user', content: '[System] No delegable steps were detected in the approved reply. If this task needs web/file work, state the steps explicitly; otherwise the reply above stands as your answer.' }],
+        targetModel,
+        'synthesis'
+      );
+      return;
+    }
+
+    // ── DELEGATE + COLLECT
+    setDelegation({ steps: steps.map(s => ({ ...s, status: 'queued' })) });
+    let results: StepRunResult[] = [];
+    try {
+      results = await runApprovedSteps(steps, {
+        getModel: () => activeModelRef.current || model,
+        requestApproval,
+        signal: abortControllerRef.current?.signal,
+        parentChatId: homeChatIdRef.current,
+        onProgress: u => setDelegation(d => d ? { steps: d.steps.map((s, k) => (k === u.index ? { ...s, status: u.status, resultSummary: u.resultSummary ?? s.resultSummary, agentId: u.agentId ?? s.agentId } : s)) } : d)
+      });
+    } catch (e: any) {
+      console.error('[ChatArea] delegation failed', e);
+      setDelegation(null);
+      await streamAssistantTurn(
+        [...messagesRef.current, { id: Math.random().toString(36).substring(7), role: 'user', content: `[System] Delegation failed to start: ${e?.message || e}` }],
+        targetModel,
+        'synthesis'
+      );
+      return;
+    }
+    if (abortControllerRef.current?.signal.aborted) return;
+
+    // ── SYNTHESIZE
+    setDelegation(d => d ? { steps: d.steps.map(s => ({ ...s, status: results[d.steps.indexOf(s)]?.status ?? s.status })) } : d);
+    const reportsBlock = results.map((r, i) =>
+      `[Agent Report] Step ${i + 1}: ${r.step.title} — ${r.status.toUpperCase()}\n${(r.report || r.error || '(no output)').slice(0, 4000)}`
+    ).join('\n\n');
+    const reportsMsg: ChatMessage = {
+      id: Math.random().toString(36).substring(7),
+      role: 'user',
+      content: `[System] All approved steps finished. Their reports follow — synthesize them into the final answer for the user.\n\n${reportsBlock}`
+    };
+    await streamAssistantTurn([...messagesRef.current, reportsMsg], targetModel, 'synthesis');
+  };
+
   const handleSendMessage = async (text: string, attachments: any[], model: LLMModel) => {
     if (!text.trim() && attachments.length === 0) return;
     setLastUsedModel(model);
 
-    // Build the user message
     const userMsg: ChatMessage = {
       id: Math.random().toString(36).substring(7),
       role: 'user',
@@ -945,478 +1086,13 @@ const ChatArea = ({ onToggleSettings }: { onToggleSettings?: () => void }) => {
       attachments: attachments.length > 0 ? attachments : undefined
     };
 
-    const newMsgs = [...messages, userMsg];
+    const newMsgs = [...messagesRef.current, userMsg];
     setMessages(newMsgs);
 
     // A fresh prompt starts a new delegation cycle — clear the old task tree.
     taskListStore.reset();
-    await triggerGeneration(newMsgs, model);
-  };
-
-  const triggerGeneration = async (contextMsgs: ChatMessage[], targetModel: LLMModel, keepThinking?: string, feedbackComments?: ChatComment[]) => {
-    setIsGenerating(true);
-    // Bump the session id so the Live Browser re-adopts the node. The webview
-    // itself is NOT remounted anymore — agent tabs must survive across turns.
-    setBrowserSessionId(id => id + 1);
-    // Hide the titlebar Transcripts button while a new generation runs —
-    // it only reappears once the response completes.
-    transcriptStore.set('');
-    abortControllerRef.current = new AbortController();
-
-    // Re-enable autoscroll when generation starts
-    autoScrollEnabled.current = true;
-    setTimeout(() => {
-      bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
-    }, 50);
-
-    const assistantMsgId = Math.random().toString(36).substring(7);
-    const genStartedAt = Date.now();
-
-    // Add temporary loading message for assistant
-    setMessages([...contextMsgs, {
-      id: assistantMsgId,
-      role: 'assistant',
-      content: '',
-      thinking: keepThinking || '',
-      isGenerating: true
-    }]);
-
-    try {
-      // Format payload for OpenAI-compatible API
-      const formattedMessages: any[] = [];
-
-      // System prompt for multi-attachment focus weighting
-      formattedMessages.push({
-        role: 'system',
-        content: DEFAULT_SYSTEM_PROMPT
-      });
-
-      for (const msg of contextMsgs) {
-        let textContent = msg.content || '';
-
-        // Previous assistant thinking is retained but condensed to its recent
-        // core — keeps continuity without replaying pages of prose.
-        if (msg.role === 'assistant' && msg.thinking) {
-          const condensed = condenseThinking(msg.thinking);
-          textContent = `<think>\n${condensed}\n</think>\n\n${textContent}`;
-        }
-
-        // Append comments context
-        if (msg.comments && msg.comments.length > 0) {
-          textContent += `\n\n--- User Comments on this message ---\n`;
-          msg.comments.forEach(c => {
-            textContent += `On text: "${c.quote}"\nComment: "${c.text}"\n\n`;
-          });
-          textContent += `--- End User Comments ---`;
-        }
-
-        if (msg.attachments && msg.attachments.length > 0) {
-          const content = [];
-
-          for (const att of msg.attachments) {
-            if (att.type === 'image' && att.file) {
-              const b64 = await fileToBase64(att.file);
-              content.push({ type: 'text', text: `[Image Attachment: @${att.display}]` });
-              content.push({ type: 'image_url', image_url: { url: b64 } });
-            } else if (att.file) {
-              try {
-                // Parse document (Office, PDF, HTML, MHTML, Code, Text) cleanly
-                const parsedDoc = await parseAttachmentDocument(att.file);
-
-                let fileText = parsedDoc.text;
-                // Perform RAG if document has chunks and user provided a query
-                // Note: user query might not be available directly here if not last msg, but we can pass textContent
-                if (parsedDoc.chunks && parsedDoc.chunkEmbeddings && textContent.trim() && (window as any).electronAPI.ragSearch) {
-                  try {
-                    const queryEmbedRes = await (window as any).electronAPI.embedTexts([textContent]);
-                    if (queryEmbedRes.success && queryEmbedRes.embeddings.length > 0) {
-                      const searchRes = await (window as any).electronAPI.ragSearch({
-                        queryEmbedding: queryEmbedRes.embeddings[0],
-                        chunks: parsedDoc.chunks,
-                        chunkEmbeddings: parsedDoc.chunkEmbeddings,
-                        topK: 15
-                      });
-
-                      if (searchRes.success && searchRes.topChunks) {
-                        const topChunks = searchRes.topChunks;
-                        const contextString = topChunks.map((c: any) => {
-                          const meta = [];
-                          if (c.metadata.page !== undefined) meta.push(`Page: ${c.metadata.page}`);
-                          if (c.metadata.slide !== undefined) meta.push(`Slide: ${c.metadata.slide}`);
-                          const metaStr = meta.length > 0 ? ` | ${meta.join(', ')}` : '';
-                          return `[Source: ${c.metadata.source}${metaStr}]\n${c.text}`;
-                        }).join('\n\n');
-
-                        fileText = `[RAG Retrieved Context - Showing most relevant excerpts from @${att.display}]\n\n${contextString}`;
-                        console.log(`[RAG] Retrieved ${topChunks.length} chunks for ${att.display}`);
-                      }
-                    }
-                  } catch (ragError) {
-                    console.error('[RAG Search] Failed:', ragError);
-                  }
-                }
-
-                textContent += `\n\n--- Attachment: @${att.display} ---\n${fileText}\n--- End Attachment ---`;
-              } catch (err) {
-                console.error("Could not read file", err);
-              }
-            }
-          }
-
-          if (textContent) {
-            content.unshift({ type: 'text', text: textContent });
-          }
-
-          if (content.length === 1 && content[0].type === 'text') {
-            formattedMessages.push({ role: msg.role, content: textContent });
-          } else {
-            formattedMessages.push({ role: msg.role, content });
-          }
-        } else {
-          formattedMessages.push({ role: msg.role, content: textContent });
-        }
-      }
-
-      if (feedbackComments && feedbackComments.length > 0) {
-        let feedbackText = "Please regenerate your last response and take into account the following feedback from the user:\n\n";
-        feedbackComments.forEach(c => {
-          feedbackText += `On your previous text: "${c.quote}"\nUser Comment: "${c.text}"\n\n`;
-        });
-        formattedMessages.push({ role: 'user', content: feedbackText });
-      }
-
-      if (keepThinking) {
-        formattedMessages.push({
-          role: 'assistant',
-          content: `<think>\n${condenseThinking(keepThinking)}\n</think>\n\n`
-        });
-      }
-
-      // Multi-round tool execution loop
-      let round = 0;
-      let accumulatedThinking = keepThinking || '';
-      let accumulatedContent = '';
-      const allToolCalls: ToolCall[] = [];
-      // One thinking chunk per model round: closed when tools execute,
-      // reopened when fresh input arrives. Keeps blocks small and chronological.
-      const roundThinkingParts: string[] = [];
-
-      // Auto-recovery for silent stops: small models sometimes end their turn
-      // after reasoning without acting (EOS-after-think), or get cut off by
-      // max_tokens mid-generation. Nudge them to continue instead of ending.
-      const MAX_AUTO_CONTINUES = 2;
-      let autoContinues = 0;
-
-      // Annotatable-first flow: the orchestrator writes its full plan/reply,
-      // confirms via ask_user, and only then gets task_add back.
-      // ask_user itself is locked until a real WRITTEN reply exists —
-      // thinking and tool rounds do not count, so models cannot bypass the
-      // review by firing irrelevant clarification questions first.
-      const allOrchestratorTools = getOrchestratorTools();
-      let taskAddUnlocked = false;
-      orchestratorGateRef.current = { modelsListed: false };
-      const roundToolset = () => {
-        const draftReady = accumulatedContent.trim().length > 0;
-        return allOrchestratorTools.filter(t => {
-          if (t.function.name === 'ask_user') return draftReady;
-          if (t.function.name === 'task_add') return taskAddUnlocked;
-          return true;
-        });
-      };
-
-      while (round < MAX_TOOL_ROUNDS) {
-        round++;
-
-        // User hit stop (ref nulled or aborted) — never start another round.
-        const roundSignal = abortControllerRef.current?.signal;
-        if (!roundSignal || roundSignal.aborted) break;
-
-        // Read the active model fresh each round so switch_model applies mid-conversation
-        const roundModel = activeModelRef.current || targetModel;
-        const streamResult = await generateChatStreamWithRetry(roundModel, formattedMessages, update => {
-          const currentToolCalls: ToolCall[] = (update.toolCalls || []).map((tc, i) => {
-            try {
-              const parsed = JSON.parse(tc);
-              return {
-                id: `${assistantMsgId}-tc-${round}-${i}`,
-                name: parsed.name || parsed.toolName || 'tool',
-                args: parsed.arguments || parsed.args || {},
-                status: 'executing' as const,
-                raw: tc,
-                timestamp: Date.now()
-              };
-            } catch {
-              return {
-                id: `${assistantMsgId}-tc-${round}-${i}`,
-                name: 'tool',
-                args: tc,
-                status: 'executing' as const,
-                raw: tc,
-                timestamp: Date.now()
-              };
-            }
-          });
-
-          const combinedToolCalls = [...allToolCalls, ...currentToolCalls];
-
-          setMessages(prev => {
-            const newMsgs = [...prev];
-            const targetIdx = newMsgs.findIndex(m => m.id === assistantMsgId);
-            if (targetIdx !== -1) {
-              // Live chunk for the in-flight round; completed rounds stay frozen.
-              const liveParts = [...roundThinkingParts];
-              if (update.thinking) liveParts[roundThinkingParts.length] = update.thinking;
-              newMsgs[targetIdx] = {
-                ...newMsgs[targetIdx],
-                content: accumulatedContent ? (update.content ? `${accumulatedContent}\n\n${update.content}` : accumulatedContent) : update.content,
-                thinking: accumulatedThinking ? (update.thinking ? `${accumulatedThinking}\n\n${update.thinking}` : accumulatedThinking) : update.thinking,
-                thinkingParts: liveParts.length > 0 ? liveParts : undefined,
-                isGenerating: true,
-                toolCalls: combinedToolCalls.length > 0 ? combinedToolCalls : undefined,
-                isCallingTool: update.isCallingTool
-              };
-            }
-            return newMsgs;
-          });
-        }, roundSignal, undefined, roundToolset());
-
-        if (streamResult.thinking) {
-          accumulatedThinking = accumulatedThinking ? `${accumulatedThinking}\n\n${streamResult.thinking}` : streamResult.thinking;
-          // Close this round's chunk — the next round (or tool input) opens a new one.
-          roundThinkingParts.push(streamResult.thinking);
-        }
-        if (streamResult.content) {
-          // Strip simulated tool-session debris so it never accumulates into
-          // the visible answer or counts as "substantive" content below.
-          const cleanContent = stripSimulatedDebris(streamResult.content);
-          if (cleanContent) {
-            accumulatedContent = accumulatedContent ? `${accumulatedContent}\n\n${cleanContent}` : cleanContent;
-          }
-        }
-
-        const rawCalls = streamResult.toolCalls || [];
-        if (rawCalls.length === 0) {
-          const truncated = streamResult.finishReason === 'length';
-          // An aborted stream also resolves without tool calls — that's a
-          // manual kill, not a silent stop; never auto-continue it.
-          const aborted = roundSignal.aborted || !abortControllerRef.current;
-          const wentSilent = !aborted && !streamResult.content.trim() && !!streamResult.thinking.trim();
-          // Content that is ONLY simulated-tool debris (no <think> wrapper, no
-          // real calls) must not pass as a final answer — treat as a stall.
-          const debrisOnly = !aborted && !!streamResult.content.trim() && !stripSimulatedDebris(streamResult.content);
-          if ((truncated || wentSilent || debrisOnly) && autoContinues < MAX_AUTO_CONTINUES && round < MAX_TOOL_ROUNDS) {
-            autoContinues++;
-            // Carry the interrupted round's conclusions forward — otherwise the
-            // next attempt re-derives everything from scratch and loops.
-            const digest = condenseThinking(streamResult.thinking)
-              .split('\n').filter(l => !l.startsWith('[Earlier')).join('\n').trim();
-            const strict = autoContinues >= MAX_AUTO_CONTINUES
-              ? ' No further analysis is allowed. Decide from what you have and emit ONE tool call immediately.'
-              : ' Do NOT re-analyze from scratch.';
-            const reason = truncated
-              ? 'Your reply hit the token limit mid-generation.'
-              : debrisOnly
-                ? 'You simulated tool execution instead of calling tools. Fabricated output is discarded.'
-                : 'Your reasoning ended without a tool call or answer.';
-            const note = `[Auto-continued: ${truncated ? 'token cutoff' : debrisOnly ? 'simulated tools' : 'stopped without acting'}]`;
-            accumulatedThinking = accumulatedThinking ? `${accumulatedThinking}\n\n${note}` : note;
-            roundThinkingParts.push(note);
-            formattedMessages.push({
-              role: 'user',
-              content: `[System notice] ${reason} The task is not done.${digest ? `\nConclusions already reached (trust these):\n${digest}` : ''}${strict} Respond with your next REAL tool call as <tool_call> JSON now.`
-            });
-            continue;
-          }
-          break;
-        }
-
-        // Surface every call in this round as executing immediately
-        const roundToolCalls: ToolCall[] = rawCalls.map((raw, i) => {
-          let name = 'tool';
-          let args: any = {};
-          try {
-            const parsed = JSON.parse(raw);
-            name = parsed.name || parsed.toolName || 'tool';
-            args = parsed.arguments || parsed.args || {};
-          } catch {
-            args = raw;
-          }
-          return { id: `${assistantMsgId}-tc-${round}-${i}`, name, args, status: 'executing' as const, raw, timestamp: Date.now() };
-        });
-        setMessages(prev => {
-          const newMsgs = [...prev];
-          const targetIdx = newMsgs.findIndex(m => m.id === assistantMsgId);
-          if (targetIdx !== -1) {
-            newMsgs[targetIdx] = {
-              ...newMsgs[targetIdx],
-              toolCalls: [...allToolCalls, ...roundToolCalls],
-              isGenerating: true
-            };
-          }
-          return newMsgs;
-        });
-
-        // Parallel-safe execution: independent calls run concurrently while
-        // browser/desktop calls serialize through shared locks.
-        const execResults = await executeToolCalls(rawCalls, createToolContext());
-
-        // The user answered the go-ahead question — task creation unlocks.
-        if (!taskAddUnlocked && execResults.some(r => r.toolName === 'ask_user' && !r.error)) {
-          taskAddUnlocked = true;
-        }
-        if (!orchestratorGateRef.current.modelsListed && execResults.some(r => r.toolName === 'list_models' && !r.error)) {
-          orchestratorGateRef.current.modelsListed = true;
-        }
-
-        execResults.forEach((er, i) => {
-          const tcObj = roundToolCalls[i];
-          tcObj.status = er.error ? 'error' : 'completed';
-          tcObj.result = er.result;
-          if (er.imageDataUrl) tcObj.image = er.imageDataUrl;
-        });
-
-        setMessages(prev => {
-          const newMsgs = [...prev];
-          const targetIdx = newMsgs.findIndex(m => m.id === assistantMsgId);
-          if (targetIdx !== -1) {
-            newMsgs[targetIdx] = {
-              ...newMsgs[targetIdx],
-              toolCalls: [...allToolCalls, ...roundToolCalls],
-              isGenerating: true
-            };
-          }
-          return newMsgs;
-        });
-
-        const roundToolParts: any[] = [];
-        for (const er of execResults) {
-          roundToolParts.push({ type: 'text', text: `<tool_response tool="${er.toolName}"${er.error ? ' error="true"' : ''}>\n${truncateForContext(er.result)}\n</tool_response>` });
-          if (er.imageDataUrl) {
-            roundToolParts.push({ type: 'text', text: `[${er.toolName} screenshot attached below]` });
-            roundToolParts.push({ type: 'image_url', image_url: { url: er.imageDataUrl } });
-          }
-        }
-
-        allToolCalls.push(...roundToolCalls);
-
-        // Persist this round's reasoning (condensed) into the next round's
-        // context. Without it, models re-derive their analysis from scratch
-        // every round — running tallies and decisions evaporate between calls.
-        const roundDigest = condenseThinking(streamResult.thinking);
-        formattedMessages.push({
-          role: 'assistant',
-          content: (roundDigest ? `<reasoning_digest>\n${roundDigest}\n</reasoning_digest>\n\n` : '') +
-            rawCalls.map((c: string) => `<tool_call>\n${c}\n</tool_call>`).join('\n\n')
-        });
-
-        const hasImagePart = roundToolParts.some(p => p.type === 'image_url');
-        formattedMessages.push({
-          role: 'user',
-          content: hasImagePart ? roundToolParts : roundToolParts.map(p => p.text).join('\n\n')
-        });
-      }
-
-      // Give the model one final tools-free turn to answer when it would
-      // otherwise end with no/partial text: budget exhausted right after a
-      // tool call, or tool work happened but no answer text was produced.
-      const wrapSignal = abortControllerRef.current?.signal;
-      const needsWrapUp =
-        (round >= MAX_TOOL_ROUNDS || (!accumulatedContent.trim() && allToolCalls.length > 0)) &&
-        !!wrapSignal && !wrapSignal!.aborted;
-      if (needsWrapUp) {
-        formattedMessages.push({
-          role: 'user',
-          content: round >= MAX_TOOL_ROUNDS
-            ? '[System notice] Tool-call budget reached — no further tool calls will execute. Based on everything gathered so far, give your final answer to the task now in clean, complete sentences.'
-            : '[System notice] You stopped without giving an answer. Based on your tool results, give your final answer to the task now in clean, complete sentences.'
-        });
-        try {
-          const wrapModel = activeModelRef.current || targetModel;
-          const wrapResult = await generateChatStreamWithRetry(wrapModel, formattedMessages, update => {
-            setMessages(prev => {
-              const newMsgs = [...prev];
-              const targetIdx = newMsgs.findIndex(m => m.id === assistantMsgId);
-              if (targetIdx !== -1) {
-                newMsgs[targetIdx] = { ...newMsgs[targetIdx], content: update.content, thinking: update.thinking, isGenerating: true };
-              }
-              return newMsgs;
-            });
-          }, wrapSignal, undefined, []);
-          if (wrapResult.thinking) accumulatedThinking = accumulatedThinking ? `${accumulatedThinking}\n\n${wrapResult.thinking}` : wrapResult.thinking;
-          if (wrapResult.content) accumulatedContent = accumulatedContent ? `${accumulatedContent}\n\n${wrapResult.content}` : wrapResult.content;
-        } catch { }
-      }
-
-      const finalModel = activeModelRef.current || targetModel;
-      let modelStats: any = null;
-      try { modelStats = await getModelStats(finalModel); } catch { }
-
-      const finalMsg: ChatMessage = {
-        id: assistantMsgId,
-        role: 'assistant',
-        content: accumulatedContent,
-        thinking: accumulatedThinking,
-        toolCalls: allToolCalls.length > 0 ? allToolCalls : undefined,
-        isGenerating: false,
-        isCallingTool: false,
-        createdAt: genStartedAt,
-        completedAt: Date.now(),
-        internalContext: JSON.parse(JSON.stringify(formattedMessages)),
-        modelStats
-      };
-
-      setMessages(prev => {
-        const newMsgs = [...prev];
-        const targetIdx = newMsgs.findIndex(m => m.id === assistantMsgId);
-        if (targetIdx !== -1) {
-          newMsgs[targetIdx] = finalMsg;
-        }
-        return newMsgs;
-      });
-
-      // Generation over — the titlebar Transcripts button appears now.
-      transcriptStore.set(buildTranscript(finalMsg));
-
-      // First exchange in a fresh chat → auto-title it via a cheap LLM call.
-      maybeGenerateTitle(contextMsgs, targetModel, accumulatedContent);
-
-    } catch (e: any) {
-      if (e.name === 'AbortError') {
-        console.log('Stream aborted manually');
-        finalizeGeneratingMessages();
-        return;
-      }
-      console.error(e);
-      const errMsg = (e.message || '').toLowerCase();
-      let displayError: string;
-
-      if (errMsg.includes('multimodal') || errMsg.includes('does not support')) {
-        displayError = 'Sorry, this model does not support attachments. Please select a vision-capable model (e.g., LLaVA, Gemma 4, Qwen-VL) to use image attachments.';
-      } else if (errMsg.includes('invalid image input')) {
-        displayError = 'Sorry, this model does not support attachments. The selected model rejected the image input. Try a vision-capable model instead.';
-      } else {
-        displayError = `**Error:** ${e.message}`;
-      }
-
-      setMessages(prev => {
-        const newMsgs = [...prev];
-        const lastIdx = newMsgs.length - 1;
-        if (lastIdx >= 0 && newMsgs[lastIdx].role === 'assistant') {
-          const errMsg: ChatMessage = {
-            id: newMsgs[lastIdx].id,
-            role: 'assistant',
-            content: displayError,
-            thinking: newMsgs[lastIdx].thinking || '',
-            isGenerating: false,
-          };
-          newMsgs[lastIdx] = errMsg;
-          transcriptStore.set(buildTranscript(errMsg));
-        }
-        return newMsgs;
-      });
-    } finally {
-      setIsGenerating(false);
-    }
+    setDelegation(null);
+    await runConversationTurn(newMsgs, model);
   };
 
   const handleSaveEdit = (id: string, type: 'user' | 'thinking' | 'response' | 'tools', text: string, attachments: any[]) => {
@@ -1521,6 +1197,7 @@ const ChatArea = ({ onToggleSettings }: { onToggleSettings?: () => void }) => {
     if (!targetModel) return;
     // Regeneration restarts the delegation cycle — clear the old task tree.
     taskListStore.reset();
+    setDelegation(null);
     const msgIdx = messages.findIndex(m => m.id === id);
     if (msgIdx === -1) return;
     const msg = messages[msgIdx];
@@ -1529,26 +1206,24 @@ const ChatArea = ({ onToggleSettings }: { onToggleSettings?: () => void }) => {
       const contextMsgs = messages.slice(0, msgIdx);
       setMessages(contextMsgs);
 
-      // If we are regenerating a user prompt, wait, if type is 'user', the msgIdx points to the user prompt itself!
-      // We need to re-add the user prompt and generate.
+      // Regenerating a user prompt re-runs the full pipeline from that point.
       if (type === 'user') {
         const newMsgs = [...contextMsgs, { ...msg }];
         setMessages(newMsgs);
-        triggerGeneration(newMsgs, targetModel);
+        runConversationTurn(newMsgs as ChatMessage[], targetModel);
       } else {
-        // If type is 'thinking', msgIdx points to the assistant message. We just regenerate it.
-        triggerGeneration(contextMsgs, targetModel);
+        // 'thinking' → the msgIdx points at the assistant message; re-stream it.
+        streamAssistantTurn(contextMsgs, targetModel, 'draft');
       }
     } else if (type === 'response') {
       const contextMsgs = messages.slice(0, msgIdx);
       setMessages(contextMsgs);
-      triggerGeneration(contextMsgs, targetModel, msg.thinking || '', msg.comments);
+      streamAssistantTurn(contextMsgs, targetModel, 'draft');
     } else if (type === 'tools') {
-      // For tools, we keep the context but clear tool calls and regenerate from that point
+      // Legacy block type — treated as a plain response regeneration now.
       const contextMsgs = messages.slice(0, msgIdx);
-      const msgWithoutTools = { ...msg, toolCalls: [] };
-      setMessages([...contextMsgs, msgWithoutTools]);
-      triggerGeneration([...contextMsgs, msgWithoutTools], targetModel, msg.thinking || '', msg.comments);
+      setMessages(contextMsgs);
+      streamAssistantTurn(contextMsgs, targetModel, 'draft');
     }
     setEditingBlock(null);
   };
@@ -1608,6 +1283,16 @@ const ChatArea = ({ onToggleSettings }: { onToggleSettings?: () => void }) => {
 
   // One renderer for every feed block — nested chats pass isNested=true which
   // suppresses the per-block toolbars (edit/regenerate/delete are home-only).
+  const StatusDot = ({ status }: { status: 'queued' | 'running' | 'retrying' | 'done' | 'error' }) => (
+    <span className={`shrink-0 w-2.5 h-2.5 rounded-full ${
+      status === 'done' ? 'bg-green-400/90'
+      : status === 'running' ? 'border-2 border-accent border-t-transparent animate-spin'
+      : status === 'retrying' ? 'bg-yellow-400/90 animate-pulse'
+      : status === 'error' ? 'bg-red-500/80'
+      : 'border-2 border-white/25'
+    }`} />
+  );
+
   const renderActivity = (activity: any, idx: number, isNested: boolean) => {
     if (activity.type === 'user') {
       const msg = activity.data;
@@ -1804,6 +1489,44 @@ const ChatArea = ({ onToggleSettings }: { onToggleSettings?: () => void }) => {
         ) : (
           <div className="chat-measure flex flex-col gap-4 py-6 px-4 sm:px-6 lg:px-8 text-sm xl:text-base">
             {activityFeed.activities.map((activity, idx) => renderActivity(activity, idx, false))}
+
+            {/* Delegation timeline — the app-driven execution of an approved plan */}
+            {delegation && !viewingNested && (
+              <div className="w-full group relative shrink-0" style={{ order: 999998 }}>
+                <div className="w-full rounded-xl border border-white/10 bg-white/[0.03] backdrop-blur-md overflow-hidden">
+                  <div className="px-3 py-2 text-xs text-textSecondary flex items-center justify-between border-b border-white/5">
+                    <div className="flex items-center gap-2">
+                      <Terminal size={14} className="text-gray-400" />
+                      <span className="font-medium">Delegated {delegation.steps.length} agent{delegation.steps.length !== 1 ? 's' : ''}</span>
+                    </div>
+                    <span className="font-mono text-textSecondary/80">
+                      {delegation.steps.filter(s => s.status === 'done').length}/{delegation.steps.length} done
+                    </span>
+                  </div>
+                  <div className="p-2 flex flex-col gap-1 bg-black/20">
+                    {delegation.steps.map((s, i) => (
+                      <button
+                        key={i}
+                        onClick={() => {
+                          if (!s.agentId) return;
+                          const chatId = chatStore.getChatIdForAgent(s.agentId);
+                          if (chatId) openNestedChat(chatId);
+                        }}
+                        disabled={!s.agentId}
+                        className={`w-full flex items-center gap-2 px-2 py-1.5 rounded-lg text-left transition-colors ${s.agentId ? 'hover:bg-white/[0.06]' : ''}`}
+                      >
+                        <StatusDot status={s.status} />
+                        <span className={`text-xs font-medium shrink-0 ${s.status === 'error' ? 'text-red-400' : s.status === 'done' ? 'text-green-400/90 line-through decoration-textSecondary/40' : 'text-gray-100'}`}>
+                          {i + 1}. {s.title}
+                        </span>
+                        <span className="text-[10px] font-mono text-textSecondary/60 uppercase shrink-0">{s.preset}</span>
+                        <span className="text-[11px] text-textSecondary truncate flex-1">{s.resultSummary || (s.status === 'running' ? 'working…' : '')}</span>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            )}
 
             <div ref={bottomRef} className="w-full shrink-0" style={{ order: 999999 }} />
           </div>

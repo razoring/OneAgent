@@ -1,106 +1,13 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { ChevronLeft, ChevronRight, RotateCw, Home, Shield, X, Plus, Bot } from 'lucide-react';
-import { agentBrowserStore, syncLegacyGlobals, BrowserTab } from '../utils/agentBrowserStore';
+import { agentBrowserStore, BrowserTab } from '../utils/agentBrowserStore';
 
-// Live embedded browser driven by the agent's browser_* tools — now a
-// multi-tab Chrome-style shell. Every actor (user + each sub-agent) gets its
-// own <webview> tab so agents browse concurrently without stealing pages.
-//
-// Constraints honored here:
-//  - The whole layer mounts ONCE (App.tsx) and is teleported over tool slots;
-//    individual webviews are never reparented, only shown/hidden in place.
-//  - Webview elements register into window.__oneagentTabs; browserTools
-//    resolves the acting agent's tab through it.
+// DEPRECATED: Use LiveEmbeddedContainer (embedded headless + live-in-container).
+// Kept for reference — not mounted in App.tsx. LiveEmbeddedContainer is the
+// single embedded browser (headless offscreen HIDDEN_BOUNDS, moved to slot bounds on expand).
 
 const HOME_URL = 'https://html.duckduckgo.com/';
-
-// One <webview> per tab — mounted for the tab's whole lifetime.
-const TabWebview: React.FC<{ tab: BrowserTab; visible: boolean }> = ({ tab, visible }) => {
-  const ref = useRef<any>(null);
-  // Frozen at mount: ALL later navigation is imperative (loadURL). Letting
-  // React write the src attribute after mount triggers a second navigation
-  // that supersedes the in-flight one (ERR_ABORTED) — the page visually sticks.
-  const [frozenSrc] = useState(() => tab.url);
-
-  useEffect(() => {
-    const wv = ref.current;
-    if (!wv) return;
-    const registry: Map<string, { wv: any; ready: boolean }> = (window as any).__oneagentTabs ||= new Map();
-    // Always (re)set — StrictMode replays this effect (setup→cleanup→setup)
-    // on the SAME element, and skipping re-registration left the tab orphaned
-    // from the registry ("No active webview available" forever).
-    registry.set(tab.id, { wv, ready: false });
-
-    const markLoading = () => agentBrowserStore.patchTab(tab.id, { loading: true });
-    const markStopped = () => agentBrowserStore.patchTab(tab.id, { loading: false });
-    const handleDomReady = () => {
-      const entry = registry.get(tab.id);
-      if (entry && entry.wv === wv) entry.ready = true;
-      markStopped();
-      try {
-        (window as any).electronAPI.browserEmulateDevice(wv.getWebContentsId(), {
-          screenPosition: 'desktop',
-          screenSize: { width: 1280, height: 800 },
-          viewPosition: { x: 0, y: 0 },
-          viewSize: { width: 1280, height: 800 },
-          scale: 1
-        });
-      } catch {}
-    };
-    const handleNavigate = () => {
-      try { agentBrowserStore.patchTab(tab.id, { url: wv.getURL() }); } catch {}
-    };
-    const handleTitle = () => {
-      try { agentBrowserStore.patchTab(tab.id, { title: wv.getTitle() || tab.title }); } catch {}
-    };
-    const handleFail = (e: any) => {
-      if (e?.errorCode === -3 || e?.isMainFrame === false) return;
-      markStopped();
-    };
-
-    wv.addEventListener('dom-ready', handleDomReady);
-    wv.addEventListener('did-start-loading', markLoading);
-    wv.addEventListener('did-stop-loading', markStopped);
-    wv.addEventListener('did-navigate', handleNavigate);
-    wv.addEventListener('did-navigate-in-page', handleNavigate);
-    wv.addEventListener('page-title-updated', handleTitle);
-    wv.addEventListener('did-fail-load', handleFail);
-
-    return () => {
-      // Only remove OUR entry — a StrictMode replay may have replaced it with
-      // a newer registration for the same tab id.
-      const entry = registry.get(tab.id);
-      if (entry && entry.wv === wv) registry.delete(tab.id);
-      try { wv.stop(); } catch {}
-      wv.removeEventListener('dom-ready', handleDomReady);
-      wv.removeEventListener('did-start-loading', markLoading);
-      wv.removeEventListener('did-stop-loading', markStopped);
-      wv.removeEventListener('did-navigate', handleNavigate);
-      wv.removeEventListener('did-navigate-in-page', handleNavigate);
-      wv.removeEventListener('page-title-updated', handleTitle);
-      wv.removeEventListener('did-fail-load', handleFail);
-    };
-  }, [tab.id]);
-
-  // Frozen src: navigation is imperative (loadURL) — rewriting src mid-flight
-  // causes ERR_ABORTED.
-  return (
-    <div
-      className="w-full h-full bg-white"
-      style={visible ? undefined : { position: 'absolute', left: -20000, top: 0 }}
-    >
-      {/* @ts-ignore - webview is a custom element in Electron */}
-      <webview
-        ref={ref}
-        src={frozenSrc}
-        className="w-full h-full"
-        partition="persist:oneagent_browser"
-        webpreferences="contextIsolation=yes,javascript=yes"
-        allowpopups={"true" as any}
-      />
-    </div>
-  );
-};
+const CHROME_HEIGHT = 72; // tab strip (36) + toolbar (36)
 
 const normalizeUrl = (raw: string): string => {
   const target = raw.trim();
@@ -110,16 +17,33 @@ const normalizeUrl = (raw: string): string => {
   return 'https://html.duckduckgo.com/html/?q=' + encodeURIComponent(target);
 };
 
+let mountInitialized = false;
+
 const AgentBrowser: React.FC = () => {
   const [tabs, setTabs] = useState<BrowserTab[]>(() => agentBrowserStore.getTabs());
   const [activeId, setActiveId] = useState<string | null>(() => agentBrowserStore.getActiveId());
   const [inputUrl, setInputUrl] = useState('');
-  const [webviewEpoch, setWebviewEpoch] = useState(0);
+  const rootRef = useRef<HTMLDivElement>(null);
 
-  // Ensure a user tab always exists.
+  // Bootstrap: create the main-process window for the home tab exactly once per
+  // app session (StrictMode double-mounts must not spawn duplicate windows).
   useEffect(() => {
-    agentBrowserStore.ensureHomeTab();
-    setActiveId(agentBrowserStore.getActiveId());
+    if (mountInitialized) return;
+    mountInitialized = true;
+    void (async () => {
+      try {
+        const id: string | undefined = await (window as any).electronAPI.tabCreate(HOME_URL);
+        if (!id) return;
+        if (agentBrowserStore.getTabs().length === 0) {
+          agentBrowserStore.addTab({ id, title: 'New Tab', url: HOME_URL, agentId: null });
+        } else {
+          agentBrowserStore.rekeyTab(agentBrowserStore.getTabs()[0].id, id);
+        }
+        setActiveId(agentBrowserStore.getActiveId());
+      } catch (e) {
+        console.error('[AgentBrowser] bootstrap failed', e);
+      }
+    })();
   }, []);
 
   useEffect(() => {
@@ -129,77 +53,102 @@ const AgentBrowser: React.FC = () => {
       const tab = id ? agentBrowserStore.getTab(id) : undefined;
       if (tab) setInputUrl(tab.url);
     });
-    // Link targets (target=_blank, window.open) open as real new tabs.
     const offNewTab = (window as any).electronAPI?.onBrowserNewTab?.((url: string) => {
-      agentBrowserStore.openUrlInNewTab(url);
+      void (async () => {
+        const id: string | undefined = await (window as any).electronAPI.tabCreate(url);
+        if (id) agentBrowserStore.addTab({ id, title: 'New Tab', url, agentId: null, loading: true });
+      })();
     });
     return () => { u1(); u2(); offNewTab?.(); };
   }, []);
 
-  // Full session recreate (user trash / remount): drop every webview element
-  // and rebuild a fresh home tab. Bumping the epoch remounts all TabWebviews.
+  // Full reset (user trash button): destroy every main-process window and
+  // bootstrap one fresh home tab.
   useEffect(() => {
     const recreate = () => {
-      const registry: Map<string, { wv: any }> = (window as any).__oneagentTabs ||= new Map();
-      for (const [, entry] of registry) { try { entry.wv.stop(); } catch {} }
-      registry.clear();
-      tabs.forEach(t => agentBrowserStore.closeTab(t.id));
-      agentBrowserStore.ensureHomeTab();
-      setWebviewEpoch(e => e + 1);
+      void (async () => {
+        for (const t of agentBrowserStore.getTabs()) {
+          try { await (window as any).electronAPI.tabClose(t.id); } catch {}
+        }
+        agentBrowserStore.reset();
+        const id: string | undefined = await (window as any).electronAPI.tabCreate(HOME_URL);
+        if (id) agentBrowserStore.addTab({ id, title: 'New Tab', url: HOME_URL, agentId: null });
+      })();
     };
     window.addEventListener('oneagent-browser-recreate', recreate);
     return () => window.removeEventListener('oneagent-browser-recreate', recreate);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tabs]);
+  }, []);
 
   const activeTab = tabs.find(t => t.id === activeId);
-  const activeRegistry = (): Map<string, { wv: any; ready: boolean }> => (window as any).__oneagentTabs ||= new Map();
 
-  // Keep the legacy global pointer on the VISIBLE webview for stray consumers.
+  // Geometry sync: single RAF pushes the ACTIVE tab's content area to the
+  // main process as viewport-relative bounds (WebContentsView-relative, 1:1).
   useEffect(() => {
-    const registry: Map<string, { wv: any; ready: boolean }> = (window as any).__oneagentTabs ||= new Map();
-    const entry = activeId ? registry.get(activeId) : undefined;
-    syncLegacyGlobals(entry?.wv ?? null, !!entry?.ready);
-  }, [activeId, tabs]);
+    let raf = 0;
+    let last = '';
+    const sync = () => {
+      raf = requestAnimationFrame(sync);
+      const root = rootRef.current;
+      if (!root || !activeId) return;
+      const r = root.getBoundingClientRect();
+      // Layer parked off-screen when slot is collapsed/hidden — detach instead of positioning off-screen.
+      if (r.left < -5000 || r.width <= 0 || r.height <= CHROME_HEIGHT) return;
+      const bounds = {
+        x: Math.round(r.left),
+        y: Math.round(r.top + CHROME_HEIGHT),
+        width: Math.round(r.width),
+        height: Math.max(0, Math.round(r.height - CHROME_HEIGHT)),
+      };
+      const key = `${bounds.x},${bounds.y},${bounds.width},${bounds.height}`;
+      if (key === last) return;
+      last = key;
+      void (window as any).electronAPI.tabBounds(activeId, bounds);
+    };
+    raf = requestAnimationFrame(sync);
+    return () => cancelAnimationFrame(raf);
+  }, [activeId]);
+
+  // Attach active tab on switch, detach previous. Single source for visibility.
+  const prevActiveRef = useRef<string | null>(null);
+  useEffect(() => {
+    const prev = prevActiveRef.current;
+    prevActiveRef.current = activeId;
+    if (prev && prev !== activeId) void (window as any).electronAPI.tabHide(prev);
+    if (activeId) {
+      const root = rootRef.current;
+      const r = root?.getBoundingClientRect();
+      const bounds = r && r.width > 0 ? { x: Math.round(r.left), y: Math.round(r.top + CHROME_HEIGHT), width: Math.round(r.width), height: Math.max(0, Math.round(r.height - CHROME_HEIGHT)) } : undefined;
+      void (window as any).electronAPI.tabActivate(activeId, bounds);
+    }
+  }, [activeId]);
 
   const navigateActive = async (raw: string) => {
     if (!activeId) return;
     const url = normalizeUrl(raw);
-    const registry = activeRegistry();
-    const entry = activeId ? registry.get(activeId) : undefined;
     agentBrowserStore.patchTab(activeId, { url, loading: true });
     setInputUrl(url);
-    if (!entry?.wv) return;
-    // Freshly created tabs have no attached guest yet — wait for dom-ready
-    // instead of throwing "not attached" and silently staying on the old page.
-    const start = Date.now();
-    while (!entry.ready && entry.wv.isConnected && Date.now() - start < 10000) {
-      await new Promise(r => setTimeout(r, 80));
-    }
-    try { Promise.resolve(entry.wv.loadURL(url)).catch(() => {}); } catch {}
+    try { await (window as any).electronAPI.tabCall(activeId, 'loadURL', url); } catch {}
   };
 
-  const withActiveWebview = (fn: (wv: any) => void) => {
-    const entry = activeId ? activeRegistry().get(activeId) : undefined;
-    if (entry?.wv) { try { fn(entry.wv); } catch {} }
+  const withActiveTab = (method: string) => {
+    if (!activeId) return;
+    void (window as any).electronAPI.tabCall(activeId, method).catch?.(() => {});
   };
 
   const closeTab = (id: string) => {
-    const registry = activeRegistry();
-    const entry = registry.get(id);
-    if (entry) { try { entry.wv.stop(); } catch {} registry.delete(id); }
+    void (window as any).electronAPI.tabClose(id);
     agentBrowserStore.closeTab(id);
   };
 
   const openNewTab = () => {
-    const tab = agentBrowserStore.createUserTab();
-    agentBrowserStore.activateTab(tab.id);
+    void (async () => {
+      const id: string | undefined = await (window as any).electronAPI.tabCreate({ url: HOME_URL });
+      if (id) agentBrowserStore.addTab({ id, title: 'New Tab', url: HOME_URL, agentId: null });
+    })();
   };
 
-  const inputRef = useRef<HTMLInputElement>(null);
-
   return (
-    <div id="oneagent-browser-root" className="flex flex-col w-full h-full bg-surface overflow-hidden">
+    <div ref={rootRef} id="oneagent-browser-root" className="flex flex-col w-full h-full bg-surface overflow-hidden">
       {/* Tab strip — chrome-like */}
       <div className="h-9 shrink-0 bg-black/40 flex items-end px-1.5 pt-1 gap-0.5 overflow-x-auto no-scrollbar">
         {tabs.map(tab => {
@@ -245,19 +194,18 @@ const AgentBrowser: React.FC = () => {
 
       {/* Toolbar */}
       <div className="h-9 shrink-0 bg-surface flex items-center px-2 gap-1 border-b border-white/10">
-        <button onClick={() => withActiveWebview(wv => wv.goBack())} className="p-1 text-textSecondary hover:text-white hover:bg-white/10 rounded transition-colors" title="Back">
+        <button onClick={() => withActiveTab('goBack')} className="p-1 text-textSecondary hover:text-white hover:bg-white/10 rounded transition-colors" title="Back">
           <ChevronLeft size={14} />
         </button>
-        <button onClick={() => withActiveWebview(wv => wv.goForward())} className="p-1 text-textSecondary hover:text-white hover:bg-white/10 rounded transition-colors" title="Forward">
+        <button onClick={() => withActiveTab('goForward')} className="p-1 text-textSecondary hover:text-white hover:bg-white/10 rounded transition-colors" title="Forward">
           <ChevronRight size={14} />
         </button>
-        <button onClick={() => withActiveWebview(wv => wv.reload())} className="p-1 text-textSecondary hover:text-white hover:bg-white/10 rounded transition-colors" title="Reload">
+        <button onClick={() => withActiveTab('reload')} className="p-1 text-textSecondary hover:text-white hover:bg-white/10 rounded transition-colors" title="Reload">
           <RotateCw size={12} />
         </button>
-        <form onSubmit={(e) => { e.preventDefault(); navigateActive(inputUrl); }} className="flex-1 flex items-center gap-1.5 bg-black/40 border border-white/5 focus-within:border-accent/50 rounded-md px-2 py-1 min-w-0 mx-1">
+        <form onSubmit={(e) => { e.preventDefault(); void navigateActive(inputUrl); }} className="flex-1 flex items-center gap-1.5 bg-black/40 border border-white/5 focus-within:border-accent/50 rounded-md px-2 py-1 min-w-0 mx-1">
           <Shield size={10} className="text-accentBright shrink-0" />
           <input
-            ref={inputRef}
             type="text"
             value={inputUrl || activeTab?.url || ''}
             onChange={e => setInputUrl(e.target.value)}
@@ -266,17 +214,14 @@ const AgentBrowser: React.FC = () => {
             className="flex-1 bg-transparent outline-none text-[11px] font-mono text-gray-300 min-w-0 select-text"
           />
         </form>
-        <button onClick={() => navigateActive(HOME_URL)} className="p-1 text-textSecondary hover:text-white hover:bg-white/10 rounded transition-colors" title="Home">
+        <button onClick={() => void navigateActive(HOME_URL)} className="p-1 text-textSecondary hover:text-white hover:bg-white/10 rounded transition-colors" title="Home">
           <Home size={13} />
         </button>
       </div>
 
-      {/* Stacked live pages — inactive tabs stay mounted (offscreen), never unmounted */}
-      <div className="relative flex-1 w-full overflow-hidden bg-white">
-        {tabs.map(tab => (
-          <TabWebview key={`${tab.id}-${webviewEpoch}`} tab={tab} visible={tab.id === activeId} />
-        ))}
-      </div>
+      {/* Page surface is composited by the main process behind this spacer —
+          it occupies everything below the chrome. */}
+      <div className="flex-1 w-full bg-white" />
     </div>
   );
 };

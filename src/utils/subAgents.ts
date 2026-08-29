@@ -1,4 +1,4 @@
-import { generateChatStreamWithRetry, getModelSettings, condenseThinking, stripSimulatedDebris, LLMModel, ModelSettings, fetchModels, getVramReport, estimateModelVram } from './llm';
+import { generateChatStream, getModelSettings, condenseThinking, stripSimulatedDebris, LLMModel, ModelSettings, fetchModels, getVramReport, estimateModelVram } from './llm';
 import { executeToolCalls, ToolContext } from './toolExecutor';
 import { getSystemTools } from './tools';
 import { buildSubAgentPrompt } from './prompts';
@@ -16,10 +16,6 @@ export interface SubAgentSpec {
   params?: Partial<ModelSettings>;
   // Bind this agent to a formal task (status/timing mirror into the tasklist).
   taskId?: string;
-  // Allow spawning further sub-agents + task tools (delegation.md prompt).
-  canDelegate?: boolean;
-  // Nesting depth: orchestrator-spawned = 1, their children = 2 (max).
-  depth?: number;
   // Parent chat for the agent's persisted nested chat (the orchestrator's
   // chat, or the spawner agent's own nested chat for depth-2 agents).
   parentChatId?: string | null;
@@ -47,14 +43,14 @@ export interface SubAgentState {
   startedAt?: number;
   endedAt?: number;
   taskId?: string;
-  canDelegate?: boolean;
-  depth: number;
   // Only this agent's own turns — never its children's internals.
   transcript: TranscriptEntry[];
   // Persisted nested chat backing this agent's transcript.
   chatId?: string;
   // True once the worker checked off its own task via complete_task.
   selfCompleted?: boolean;
+  // Provider rejected images for this worker — screenshots are stripped.
+  visionBroken?: boolean;
 }
 
 // Host-provided capabilities routed from the orchestrator's ChatArea.
@@ -68,7 +64,6 @@ export interface SubAgentHost {
 
 export const MAX_CONCURRENT_AGENTS = 3;
 const MAX_AGENT_ROUNDS = 8;
-export const MAX_DELEGATION_DEPTH = 2;
 
 // Whitelists — sub-agents NEVER receive desktop control, shell commands,
 // deletion or self-modification regardless of requested preset.
@@ -105,10 +100,23 @@ const TOOL_PRESETS: Record<string, Set<string>> = {
 };
 
 // Extra tools granted only to delegating agents.
-const DELEGATION_TOOLS = new Set(['spawn_agent', 'check_agents', 'task_add', 'task_update', 'task_list']);
 
 const truncateForContext = (s: string, max = 6000) =>
   s.length > max ? s.slice(0, max) + `\n...[truncated ${s.length - max} chars]` : s;
+
+// Stream call with one automatic retry for transient failures (connection
+// resets, provider hiccups). Abort errors are never retried.
+const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
+const generateChatStreamWithRetry = async (...args: Parameters<typeof generateChatStream>): Promise<ReturnType<typeof generateChatStream>> => {
+  try {
+    return await generateChatStream(...args);
+  } catch (e: any) {
+    if (e?.name === 'AbortError') throw e;
+    console.warn('[subAgents] stream failed once, retrying:', e?.message || e);
+    await sleep(700);
+    return generateChatStream(...args);
+  }
+};
 
 // ─── Registry & scheduler ────────────────────────────────────────────────────
 
@@ -149,8 +157,6 @@ export const spawnSubAgent = (spec: SubAgentSpec, host: SubAgentHost): string =>
     params: spec.params,
     steps: 0,
     taskId: spec.taskId,
-    canDelegate: !!spec.canDelegate && spec.depth !== undefined && spec.depth < MAX_DELEGATION_DEPTH,
-    depth: spec.depth ?? 1,
     transcript: [{ role: 'user', content: spec.context ? `${spec.task}\n\nContext:\n${spec.context}` : spec.task }]
   };
   registry.set(id, state);
@@ -260,14 +266,12 @@ const runSubAgent = async (agent: SubAgentState, host: SubAgentHost): Promise<vo
     const mergedSettings: ModelSettings = { ...getModelSettings(), ...(agent.params || {}) };
 
     const allowedTools = new Set(TOOL_PRESETS[agent.tools]);
-    if (agent.canDelegate) DELEGATION_TOOLS.forEach(t => allowedTools.add(t));
     // A bound worker may check off ONLY its own task via complete_task.
     if (agent.taskId) allowedTools.add('complete_task');
     const toolDefs = getSystemTools().filter(t => allowedTools.has(t.function.name));
 
     const messages: any[] = [
-      { role: 'system', content: buildSubAgentPrompt(!!agent.canDelegate) },
-      ...(agent.depth > 1 ? [{ role: 'system', content: `Delegation depth: ${agent.depth}. You cannot spawn further agents.` }] : []),
+      { role: 'system', content: buildSubAgentPrompt() },
       { role: 'user', content: agent.context ? `${agent.task}\n\nContext:\n${agent.context}` : agent.task }
     ];
 
@@ -278,17 +282,7 @@ const runSubAgent = async (agent: SubAgentState, host: SubAgentHost): Promise<vo
     };
 
     const ctx: ToolContext = {
-      getModel: () => model,
-      setModel: () => { /* sub-agents cannot switch models */ },
       requestApproval: host.requestApproval,
-      spawnAgent: agent.canDelegate
-        ? (spec) => spawnSubAgent(
-            { ...spec, depth: agent.depth + 1, taskId: spec.taskId, parentChatId: agent.chatId ?? null },
-            host
-          )
-        : () => '',
-      getAgents: agent.canDelegate ? getAgentsSnapshot : () => [],
-      waitForAgents: agent.canDelegate ? waitForAgents : async () => [],
       promptTaskId: agent.taskId,
       ownTaskId: agent.taskId,
       agentId: agent.id,
@@ -302,11 +296,47 @@ const runSubAgent = async (agent: SubAgentState, host: SubAgentHost): Promise<vo
     // One dedicated nudge when an agent ends naturally without checking its
     // task off — claims of "task complete" in prose are NOT check-offs.
     let completeNudged = false;
+    // Flips on after a provider rejects multimodal input for this worker —
+    // screenshots stop being injected and poisoned history is scrubbed.
+    let visionBroken = false;
+
+    const stripImageParts = () => {
+      let removed = 0;
+      for (const m of messages) {
+        if (Array.isArray(m.content)) {
+          const kept = m.content.filter((p: any) => p?.type !== 'image_url');
+          removed += m.content.length - kept.length;
+          if (kept.length !== m.content.length) {
+            // Replace with an explicit note so rounds still make sense.
+            kept.push({ type: 'text', text: '[screenshot omitted — this model cannot process images]' });
+            m.content = kept;
+          }
+        }
+      }
+      return removed;
+    };
+
     let round = 0;
     for (; round < MAX_AGENT_ROUNDS; round++) {
       if (controller.signal.aborted) throw new Error('Aborted by user');
 
-      const res = await generateChatStreamWithRetry(model, messages, () => {}, controller.signal, mergedSettings, toolDefs);
+      let res;
+      try {
+        res = await generateChatStreamWithRetry(model, messages, () => {}, controller.signal, mergedSettings, toolDefs);
+      } catch (e: any) {
+        const msg = String(e?.message || e);
+        if (!visionBroken && /multimodal|image|audio/i.test(msg) && /400|invalid|failed to load/i.test(msg)) {
+          // Provider rejected image parts (text-only worker). Scrub every
+          // image from the history and retry the round without them.
+          agent.visionBroken = true;
+          visionBroken = true;
+          console.warn(`[subAgents] "${agent.label}" model ${model.id} rejected images — stripping screenshots and retrying`);
+          stripImageParts();
+          round--; // this attempt doesn't consume budget
+          continue;
+        }
+        throw e;
+      }
       finalContent = stripSimulatedDebris(res.content) || finalContent;
 
       const rawCalls = res.toolCalls || [];
@@ -365,10 +395,12 @@ const runSubAgent = async (agent: SubAgentState, host: SubAgentHost): Promise<vo
       let hasImage = false;
       for (const r of results) {
         parts.push({ type: 'text', text: `<tool_response tool="${r.toolName}"${r.error ? ' error="true"' : ''}>\n${truncateForContext(r.result)}\n</tool_response>` });
-        if (r.imageDataUrl) {
+        if (r.imageDataUrl && !visionBroken) {
           parts.push({ type: 'text', text: `[${r.toolName} screenshot attached below]` });
           parts.push({ type: 'image_url', image_url: { url: r.imageDataUrl } });
           hasImage = true;
+        } else if (r.imageDataUrl && visionBroken) {
+          parts.push({ type: 'text', text: `[${r.toolName} captured a screenshot — not shown to you because this model cannot process images. Rely on the DOM text above.]` });
         }
       }
       const responseText = hasImage ? JSON.stringify(parts) : parts.map(pt => pt.text).join('\n\n');
@@ -437,3 +469,152 @@ const agentParamsOf = (agent: SubAgentState): SubAgentSpec => ({
   model: agent.model,
   params: agent.params
 });
+
+// ─── Approved-plan runner ─────────────────────────────────────────────────────
+// The app (not the LLM) drives execution: one task + one agent per approved
+// step, spawned in parallel, collected with a global deadline, one automatic
+// retry per failure. Progress flows back through taskListStore (the sidebar)
+// and the onProgress callback (the chat's delegation timeline).
+
+import { PlanStep, pickWorkerModel } from './delegation';
+
+export interface StepRunUpdate {
+  index: number;
+  status: 'queued' | 'running' | 'retrying' | 'done' | 'error';
+  resultSummary?: string;
+  agentId?: string;
+  durationMs?: number;
+}
+
+export interface StepRunResult extends StepRunUpdate {
+  step: PlanStep;
+  taskId?: string;
+  agentId?: string;
+  ok: boolean;
+  report: string;
+  error?: string;
+  durationMs?: number;
+  resultSummary?: string;
+}
+
+export interface RunStepsHost {
+  getModel: () => LLMModel | null;
+  requestApproval: (toolName: string, summary: string) => Promise<{ approved: boolean; message?: string }>;
+  signal?: AbortSignal;
+  parentChatId?: string | null;
+  onProgress?: (u: StepRunUpdate) => void;
+}
+
+const STEP_DEADLINE_MS = 6 * 60 * 1000;
+
+const composeStepTask = (step: PlanStep): string =>
+  [
+    step.title,
+    step.detail ? `\n${step.detail}` : '',
+    '\n\nReport your findings concisely as your final message.'
+  ].join('');
+
+export const runApprovedSteps = async (
+  steps: PlanStep[],
+  host: RunStepsHost
+): Promise<StepRunResult[]> => {
+  const orchestrator = host.getModel();
+  if (!orchestrator) throw new Error('No orchestrator model available for delegation');
+
+  const results: StepRunResult[] = steps.map((step, index) => ({
+    step, index, status: 'queued', ok: false, report: ''
+  }));
+
+  const spawnFor = async (index: number, isRetry: boolean): Promise<string> => {
+    const step = steps[index];
+    // Retry always escalates to the orchestrator's model — it is already
+    // resident (no swap cost) and typically the most capable option.
+    const worker = isRetry ? orchestrator : await pickWorkerModel(step.menial, orchestrator);
+    const existingTask = results[index].taskId
+      ? taskListStore.find(results[index].taskId!)
+      : undefined;
+    const taskId =
+      existingTask?.id ??
+      taskListStore.add([{ title: step.title, detail: step.detail }])[0].id;
+
+    if (isRetry) {
+      taskListStore.update(taskId, { status: 'running', endedAt: undefined, resultSummary: undefined });
+      host.onProgress?.({ index, status: 'retrying', agentId: undefined });
+    }
+
+    const agentId = spawnSubAgent({
+      task: composeStepTask(step),
+      tools: step.preset,
+      label: step.title,
+      parentChatId: host.parentChatId ?? null,
+      taskId,
+      ...(worker.id !== orchestrator.id ? { model: { id: worker.id, provider: worker.provider } } : {})
+    }, {
+      getModel: () => worker,
+      requestApproval: host.requestApproval,
+      signal: host.signal
+    });
+
+    results[index].taskId = taskId;
+    results[index].agentId = agentId;
+    return agentId;
+  };
+
+  // Initial parallel spawn — spawnSubAgent queues internally beyond the
+  // concurrency cap.
+  for (let i = 0; i < steps.length; i++) {
+    host.onProgress?.({ index: i, status: 'queued' });
+    await spawnFor(i, false);
+  }
+
+  // Collect with a global deadline.
+  const deadline = Date.now() + STEP_DEADLINE_MS;
+  await waitForAgents(results.map(r => r.agentId).filter((x): x is string => !!x), STEP_DEADLINE_MS);
+  void deadline;
+
+  // Read outcomes; retry each failure exactly once.
+  for (let i = 0; i < results.length; i++) {
+    const r = results[i];
+    const state = r.agentId ? getAgentsSnapshot([r.agentId])[0] : undefined;
+    const failed = !state || state.status === 'error';
+    if (!failed) {
+      r.status = 'done';
+      r.ok = true;
+      r.report = state?.result || '';
+      r.resultSummary = (state?.result || '').split('\n')[0].slice(0, 140);
+      r.durationMs = state && state.startedAt && state.endedAt ? state.endedAt - state.startedAt : undefined;
+      host.onProgress?.({ index: i, status: 'done', resultSummary: r.resultSummary, durationMs: r.durationMs, agentId: r.agentId });
+    }
+  }
+
+  for (let i = 0; i < results.length; i++) {
+    const r = results[i];
+    if (r.status === 'done') continue;
+    if (host.signal?.aborted) break;
+    const errText = (() => {
+      const s = r.agentId ? getAgentsSnapshot([r.agentId])[0] : undefined;
+      return s?.error || 'agent ended without a result';
+    })();
+    console.warn(`[delegation] step ${i + 1} "${r.step.title}" failed (${errText}) — retrying once`);
+    host.onProgress?.({ index: i, status: 'retrying' });
+    await spawnFor(i, true);
+    const retryId = results[i].agentId;
+    if (!retryId) continue;
+    await waitForAgents([retryId], STEP_DEADLINE_MS);
+    const state = getAgentsSnapshot([retryId])[0];
+    if (state && state.status === 'done') {
+      r.status = 'done';
+      r.ok = true;
+      r.report = state.result || '';
+      r.resultSummary = (state.result || '').split('\n')[0].slice(0, 140);
+      r.durationMs = state.startedAt && state.endedAt ? state.endedAt - state.startedAt : undefined;
+      host.onProgress?.({ index: i, status: 'done', resultSummary: r.resultSummary, durationMs: r.durationMs, agentId: r.agentId });
+    } else {
+      r.status = 'error';
+      r.error = state?.error || errText;
+      host.onProgress?.({ index: i, status: 'error', resultSummary: r.error });
+    }
+  }
+
+  return results;
+};

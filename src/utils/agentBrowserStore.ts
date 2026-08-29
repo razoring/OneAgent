@@ -1,9 +1,9 @@
 // Multi-tab embedded browser shared by the user and all agents.
-// Each actor (user / agent id) gets its own tab with its own <webview>,
-// so agents can browse concurrently without stealing each other's pages.
+// Each actor (user / agent id) gets its own tab running in a hidden BrowserWindow
+// in the main process, so agents can browse concurrently without stealing
+// each other's pages. This enables true parallel headless operation.
 //
-// The webview ELEMENTS live in a module-level registry (window.__oneagentTabs)
-// owned by AgentBrowser; this store holds metadata + routing + follow mode.
+// Tab metadata is stored here; actual BrowserWindow instances live in the main process.
 
 export interface BrowserTab {
   id: string;
@@ -30,6 +30,9 @@ let activeTabId: string | null = null;
 let userKilledBrowser = false;
 let terminatedSnapshot: string | null = null;
 const snapshotListeners = new Set<(img: string | null) => void>();
+
+// Tabs are created BY THE MAIN PROCESS (BrowserWindow manager owns ids),
+// so the renderer registers them here after creation.
 
 const tabsListeners = new Set<TabsListener>();
 const activeListeners = new Set<ActiveListener>();
@@ -82,6 +85,35 @@ export const agentBrowserStore = {
     emitTabs();
     emitActive();
     return tab;
+  },
+
+  // Register a MAIN-created tab under its real id.
+  addTab: (tab: BrowserTab): BrowserTab => {
+    if (tabs.some(t => t.id === tab.id)) return tab;
+    tabs.push(tab);
+    activeTabId = tab.id;
+    emitTabs();
+    emitActive();
+    return tab;
+  },
+
+  // Re-point an already-registered tab onto the main-process id that was
+  // created for it (creation is async; ids come from main).
+  rekeyTab: (oldId: string, newId: string) => {
+    const t = tabs.find(x => x.id === oldId);
+    if (!t || oldId === newId) return;
+    t.id = newId;
+    if (activeTabId === oldId) activeTabId = newId;
+    emitTabs();
+    emitActive();
+  },
+
+  // Wipe every tab (full session reset). The caller re-creates a home tab.
+  reset: () => {
+    tabs = [];
+    activeTabId = null;
+    emitTabs();
+    emitActive();
   },
 
   // A link opened via target=_blank / window.open lands here as its own tab.
@@ -182,8 +214,4 @@ export const setBrowserActor = (agentId: string | null | undefined) => {
 
 export const getCurrentActor = (): string | null => currentActor;
 
-// Legacy single-webview fields kept in sync for any stray consumers.
-export const syncLegacyGlobals = (visibleWv: any, ready: boolean) => {
-  (window as any).activeWebview = visibleWv;
-  (window as any).activeWebviewReady = ready;
-};
+

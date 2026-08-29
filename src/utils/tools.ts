@@ -30,26 +30,26 @@ const bool = (description: string) => ({ type: 'boolean', description });
 
 export const SYSTEM_TOOLS = [
   // ── Files & system ────────────────────────────────────────────────────────
-  fn('view_file', 'Read a file from disk. Read-only, instant.',
-    { path: str('Absolute path to the file.') }, ['path']),
-  fn('list_dir', 'List directory contents (names, types, sizes). Read-only, instant.',
-    { path: str('Absolute or relative directory path. Defaults to current directory.') }),
+  fn('view_file', 'Read a file from disk. Read-only, instant. Paths are resolved inside your workspace folder — use relative paths.',
+    { path: str('Path to the file (relative to your workspace).') }, ['path']),
+  fn('list_dir', 'List directory contents of your workspace. Read-only, instant.',
+    { path: str('Relative directory path inside your workspace. Empty = workspace root.') }),
   fn('search_files', 'Search file contents across a directory tree (recursive grep). Returns matching lines with file paths and line numbers. Read-only, instant. Skips node_modules/.git/build dirs.',
     {
       query: str('Text to find, or a regular expression when is_regex is true.'),
-      path: str('Directory to search. Defaults to current directory.'),
+      path: str('Directory to search, relative to your workspace. Empty = whole workspace.'),
       is_regex: bool('Treat query as a JavaScript regex (default false — plain substring match, case-insensitive).'),
       max_results: num('Stop after this many matches (default 200).')
     }, ['query']),
   fn('write_to_file', 'Create or fully overwrite a file with content. Parent directories are created automatically.',
     {
-      path: str('Absolute target file path.'),
+      path: str('Target file path (relative to your workspace).'),
       content: str('Full content to write.'),
       overwrite: bool('Overwrite if the file exists (default true).')
     }, ['path', 'content']),
   fn('replace_file_content', 'Replace the FIRST exact occurrence of text in a file. Fails honestly if the target text is not found — then view_file first and retry with exact content.',
     {
-      path: str('Absolute target file path.'),
+      path: str('Target file path (relative to your workspace).'),
       find: str('Exact existing text to replace.'),
       replace: str('Replacement text.')
     }, ['path', 'find', 'replace']),
@@ -203,72 +203,8 @@ export const SYSTEM_TOOLS = [
   fn('desktop_hotkey', 'Press a system-wide key combination (e.g. control+shift+t) on the host OS. Requires user approval.',
     { keys: { type: 'array', items: { type: 'string' }, description: "Modifier/key names, e.g. ['control','shift','t']." } }, ['keys']),
 
-  // ── Self-modification (requires approval) ─────────────────────────────────
-  fn('list_models', 'List every model available across enabled providers — including live VRAM data for local providers: which models are loaded and each model\'s estimated VRAM cost vs the remaining headroom. Read-only, instant. Call before switch_model or spawn_agent.',
-    {}),
-  fn('get_settings', 'Read your current generation settings (temperature, top_p, thinking level, token limits, context window). Read-only, instant.',
-    {}),
-  fn('get_model_stats', 'Self-diagnostics: session token usage per model, which models are loaded in local provider memory (VRAM), and your active settings. Use to decide when to switch models or tune parameters. Read-only, instant.',
-    {}),
-  fn('switch_model', 'Switch YOUR OWN model mid-conversation. Applies from the next reasoning step. Requires user approval.',
-    {
-      model: str('Model ID exactly as returned by list_models.'),
-      provider: str('Provider id to disambiguate identical model ids (optional).')
-    }, ['model']),
-  fn('update_settings', 'Adjust your own sampling/thinking parameters. Only provided keys change; values are clamped to valid ranges. Requires user approval.',
-    {
-      temperature: num('0–2 (default 0.7). Lower = more deterministic.'),
-      top_p: num('0.01–1 (default 0.95).'),
-      thinking_level: { type: 'string', enum: ['off', 'low', 'medium', 'high'], description: 'Reasoning effort. Use off for trivial tasks to respond faster.' },
-      thinking_timeout: num('Seconds before thinking is cut short (0 = unlimited).'),
-      max_output_length: num('Max tokens per response (256–200000).'),
-      context_window: num('Context window size hint in tokens (1024+).')
-    }),
+  // ── User interaction (sub-agent workers only) ────────────────────────────
 
-  // ── Sub-agents (instant to spawn; sub-agents inherit the approval gate) ───
-  fn('spawn_agent', 'Spawn an autonomous sub-agent that works on ONE focused task with its own context window and tool subset, while you keep orchestrating. It reports back a concise final answer. IMPORTANT: independent subtasks get one agent EACH, all spawned in the SAME turn — up to 5 run in parallel (e.g. five stock quotes = five browser agents, one per ticker). Sub-agents never receive desktop tools.',
-    {
-      task: str('REQUIRED — the full self-contained instructions for the sub-agent (it cannot see this conversation). Put the actual work order here, NOT in context.'),
-      tools: { type: 'string', enum: ['general', 'browser', 'files', 'web', 'observe'], description: 'Tool preset (default general: safe reads everywhere). browser = full virtual browser kit; files = file read/write/search; web = search + browse; observe = read-only page inspection.' },
-      context: str('Optional extra DATA only (URLs, prior findings) — never the work order itself.'),
-      model: str('Model id for the sub-agent (see list_models) — a real model id, never a tool-preset name. MUST fit within the VRAM headroom shown by list_models, or it evicts loaded models mid-run. Safest: omit to inherit YOUR model.'),
-      provider: str('Provider id for the model (optional disambiguation).'),
-      params: { type: 'object', properties: {
-        temperature: num('Override temperature for this run.'),
-        top_p: num('Override top_p for this run.'),
-        thinking_level: { type: 'string', enum: ['off', 'low', 'medium', 'high'], description: 'off makes cheap/fast workers.' },
-        max_output_length: num('Override max response tokens.'),
-        context_window: num('Override context window.')
-      }, description: 'Parameter overrides applied to this sub-agent only.' },
-      label: str('Short human-readable label shown in the UI (e.g. "SoM reader A").'),
-      task_id: str('Bind this agent to a formal task from task_list — its status/timing then track in the UI automatically.'),
-      can_delegate: bool('Grant this agent spawn_agent/check_agents/task_* tools so IT can delegate further (depth-limited).'),
-      wait_ms: num('If set, block up to this many ms for completion before returning (poll-friendly); otherwise spawn-and-continue.')
-    }, ['task']),
-  fn('check_agents', 'Check status/results of spawned sub-agents. Optionally block until they finish or time out.',
-    {
-      agent_ids: { type: 'array', items: { type: 'string' }, description: 'Specific ids; omit for ALL.' },
-      wait_ms: num('Block up to this many ms until done (default 0 = snapshot only).')
-    }),
-
-  // ── Formal task tree ──────────────────────────────────────────────────────
-  fn('task_add', 'Create formal tasks (shown live in the UI). Use after plan approval: one node per delegable step, children under a parent via parent_id.',
-    {
-      items: { type: 'array', items: { type: 'object', properties: { title: { type: 'string' }, detail: { type: 'string', description: 'Optional acceptance criteria / notes.' } }, required: ['title'] }, description: 'Tasks to create.' },
-      parent_id: str('Nest these tasks under an existing task id.'),
-      title: str('Single-task shorthand (use instead of items).'),
-      detail: str('Detail for the single-task shorthand.')
-    }),
-  fn('task_update', 'Update a formal task: set status (queued/running/done/error) or attach a short result summary.',
-    {
-      task_id: str('Task id from task_list.'),
-      status: { type: 'string', enum: ['queued', 'running', 'done', 'error'] },
-      summary: str('Short outcome summary (first line shown in the UI).')
-    }, ['task_id']),
-  fn('task_list', 'List all formal tasks with ids, statuses, nesting and overall leaf progress.',
-    {}),
-
-  // ── User interaction ─────────────────────────────────────────────────────
   fn('complete_task', 'Mark YOUR OWN assigned task as COMPLETED. Call it exactly once, ONLY when your work genuinely satisfies the task and you can state the final result. Finishing your turn without this call leaves the task flagged "needs check-off" for the orchestrator to verify. Requires no arguments except a summary.',
     {
       summary: str('One-line final result of the task (what was accomplished / found).')
@@ -286,16 +222,3 @@ export const SYSTEM_TOOLS = [
 // the embedded browser tools to search.
 export const getSystemTools = () =>
   isWebSearchConfigured() ? SYSTEM_TOOLS : SYSTEM_TOOLS.filter(t => t.function.name !== 'search_web');
-
-// The orchestrator supervises instead of executing: no file/shell/browser/
-// desktop/switch tools. It plans, delegates via sub-agents, tracks tasks,
-// introspects models/settings, and talks to the user. Enforcement lives here
-// rather than only in prompts — the model cannot call tools it was never given.
-const ORCHESTRATOR_TOOL_NAMES = new Set([
-  'spawn_agent', 'check_agents', 'task_add', 'task_update', 'task_list',
-  'list_models', 'get_model_stats', 'get_settings',
-  'ask_user'
-]);
-
-export const getOrchestratorTools = () =>
-  SYSTEM_TOOLS.filter(t => ORCHESTRATOR_TOOL_NAMES.has(t.function.name));

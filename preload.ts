@@ -49,8 +49,8 @@ const { ipcRenderer, webUtils } = require('electron');
   
   browserSendInputEvent: (options: any) => ipcRenderer.invoke('browser-send-input-event', options),
   browserInsertText: (options: any) => ipcRenderer.invoke('browser-insert-text', options),
-  browserCapture: (webContentsId: number) => ipcRenderer.invoke('browser-capture', webContentsId),
-  browserEmulateDevice: (webContentsId: number, options: any) => ipcRenderer.invoke('browser-emulate-device', webContentsId, options),
+  browserCapture: (webContentsId: number | string) => ipcRenderer.invoke('browser-capture', webContentsId),
+  browserEmulateDevice: (webContentsId: number | string, options: any) => ipcRenderer.invoke('browser-emulate-device', webContentsId, options),
   browserCookies: (options: any) => ipcRenderer.invoke('browser-cookies', options),
   browserHistory: (options: any) => ipcRenderer.invoke('browser-history', options),
   findInPage: (options: any) => ipcRenderer.invoke('find-in-page', options),
@@ -78,5 +78,28 @@ const { ipcRenderer, webUtils } = require('electron');
     const handler = (_e: any, url: string) => callback(url);
     ipcRenderer.on('oneagent-browser-new-tab', handler);
     return () => ipcRenderer.removeListener('oneagent-browser-new-tab', handler);
+  },
+
+  // WebContentsView tab substrate (embedded headless + live-in-container)
+  tabCreate: (options?: string | { url?: string; bounds?: any; agentId?: string }) =>
+    ipcRenderer.invoke('browser-tab-create', options),
+  tabClose: (tabId: string) => ipcRenderer.invoke('browser-tab-close', tabId),
+  tabActivate: (id: string, bounds?: any) => ipcRenderer.invoke('browser-tab-activate', { id, bounds }),
+  tabHide: (tabId: string) => ipcRenderer.invoke('browser-tab-hide', tabId),
+  tabHideAll: () => ipcRenderer.invoke('browser-tab-hide-all'),
+  tabBounds: (id: string, bounds: any) => ipcRenderer.invoke('browser-tab-bounds', { id, bounds }),
+  tabShowInContainer: (id: string, bounds: any) => ipcRenderer.invoke('browser-tab-show-in-container', { id, bounds }),
+  tabHideInContainer: (id: string) => ipcRenderer.invoke('browser-tab-hide-in-container', { id }),
+  tabCall: (id: string, method: string, arg?: any) => ipcRenderer.invoke('browser-tab-call', { id, method, arg }),
+  tabState: (id: string) => ipcRenderer.invoke('browser-tab-state', id),
+  tabExec: (id: string, code: string) => ipcRenderer.invoke('browser-tab-exec', { id, code }),
+  tabGetByAgent: (agentId: string) => ipcRenderer.invoke('browser-tab-get-by-agent', agentId),
+  tabList: () => ipcRenderer.invoke('browser-tab-list'),
+  tabShow: (tabId: string) => ipcRenderer.invoke('browser-tab-show', tabId),
+  tabHideWindow: (tabId: string) => ipcRenderer.invoke('browser-tab-hide-window', tabId),
+  onTabEvent: (callback: (ev: { tabId: string } & Record<string, any>) => void) => {
+    const handler = (_e: any, ev: any) => callback(ev);
+    ipcRenderer.on('browser-tab-event', handler);
+    return () => ipcRenderer.removeListener('browser-tab-event', handler);
   },
 };

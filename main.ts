@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, nativeImage, shell, desktopCapturer, screen, webContents, dialog, protocol, net } from 'electron';
+import { app, BrowserWindow, ipcMain, nativeImage, shell, desktopCapturer, screen, webContents, dialog, protocol, net, WebContentsView } from 'electron';
 import * as path from 'path';
 import * as fs from 'fs';
 import * as crypto from 'crypto';
@@ -12,6 +12,9 @@ protocol.registerSchemesAsPrivileged([
   { scheme: 'chat-asset', privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true } }
 ]);
 
+
+let mainWindowRef: BrowserWindow | null = null;
+const getMainWindow = (): BrowserWindow | null => mainWindowRef ?? BrowserWindow.getAllWindows()[0] ?? null;
 
 const createWindow = () => {
   // Native-drawn window chrome per platform: macOS keeps its traffic lights
@@ -37,11 +40,23 @@ const createWindow = () => {
       preload: path.join(import.meta.dirname, 'preload.js'),
       nodeIntegration: true,
       contextIsolation: false,
-      webviewTag: true,
+      webviewTag: false,
     },
   });
 
+  mainWindowRef = mainWindow;
+  mainWindow.on('closed', () => { if (mainWindowRef === mainWindow) mainWindowRef = null; });
   mainWindow.setMenu(null);
+  try { (mainWindow.webContents as any).setBackgroundThrottling?.(false); } catch {}
+  // Re-attach any existing tabs (e.g. macOS activate after close) to the new
+  // window offscreen — they were orphaned when the old window was destroyed.
+  try {
+    for (const [, tab] of managedTabs) {
+      try { (mainWindow.contentView as any).addChildView(tab.view); } catch {}
+      try { tab.view.setBounds(OFFSCREEN_BOUNDS as any); } catch {}
+      try { (tab.view.webContents as any).setBackgroundThrottling?.(false); } catch {}
+    }
+  } catch {}
 
   // Log renderer console messages to the terminal (with origin file:line so
   // things like React's "Maximum update depth exceeded" are traceable).
@@ -603,17 +618,29 @@ ipcMain.handle('desktop-type', async (event, { text }) => {
     return { success: false, error: err.message };
   }
 });
-ipcMain.handle('view-file', async (event, filePath) => {
+// ─── Agent workspace sandbox ─────────────────────────────────────────────────
+// Sub-agent file tools resolve relative paths against a dedicated workspace
+// folder — NOT the app's process CWD (which is the OneAgent source tree in
+// dev, and leaked the whole repo to curious workers).
+const workspaceRoot = () => {
+  const dir = path.join(app.getPath('userData'), 'workspace');
+  try { fs.mkdirSync(dir, { recursive: true }); } catch {}
+  return dir;
+};
+const resolveWorkspacePath = (p: string): string =>
+  path.isAbsolute(p) ? p : path.join(workspaceRoot(), p);
+ipcMain.handle('view-file', async (event, filePathIn) => {
   try {
-    const content = fs.readFileSync(filePath, 'utf-8');
+    const content = fs.readFileSync(resolveWorkspacePath(filePathIn), 'utf-8');
     return { success: true, content };
   } catch (err: any) {
     return { success: false, error: err.message };
   }
 });
 
-ipcMain.handle('list-dir', async (event, dirPath) => {
+ipcMain.handle('list-dir', async (event, dirPathIn) => {
   try {
+    const dirPath = resolveWorkspacePath(dirPathIn);
     const items = fs.readdirSync(dirPath, { withFileTypes: true });
     const result = items.map(item => ({
       name: item.name,
@@ -628,7 +655,8 @@ ipcMain.handle('list-dir', async (event, dirPath) => {
 
 ipcMain.handle('write-to-file', async (event, options) => {
   try {
-    const { targetFile, codeContent, overwrite } = options;
+    const { codeContent, overwrite } = options;
+    const targetFile = resolveWorkspacePath(options.targetFile);
     if (fs.existsSync(targetFile) && !overwrite) {
       return { success: false, error: 'File already exists and overwrite is false' };
     }
@@ -642,7 +670,8 @@ ipcMain.handle('write-to-file', async (event, options) => {
 
 ipcMain.handle('replace-file-content', async (event, options) => {
   try {
-    const { targetFile, targetContent, replacementContent } = options;
+    const { targetContent, replacementContent } = options;
+    const targetFile = resolveWorkspacePath(options.targetFile);
     let content = fs.readFileSync(targetFile, 'utf-8');
     if (!content.includes(targetContent)) {
       return { success: false, error: 'Target content not found in file' };
@@ -655,18 +684,18 @@ ipcMain.handle('replace-file-content', async (event, options) => {
   }
 });
 
-ipcMain.handle('delete-file', async (event, filePath) => {
+ipcMain.handle('delete-file', async (event, filePathIn) => {
   try {
-    fs.unlinkSync(filePath);
+    fs.unlinkSync(resolveWorkspacePath(filePathIn));
     return { success: true };
   } catch (err: any) {
     return { success: false, error: err.message };
   }
 });
 
-ipcMain.handle('browser-send-input-event', async (event, { webContentsId, type, x, y, button, clickCount, modifiers, keyCode }) => {
+ipcMain.handle('browser-send-input-event', async (event, { webContentsId: idIn, type, x, y, button, clickCount, modifiers, keyCode }) => {
   try {
-    const wc = webContents.fromId(webContentsId);
+    const wc = resolveTargetContents(idIn);
     if (!wc) return { success: false, error: 'WebContents not found' };
     wc.sendInputEvent({ type, x, y, button, clickCount, modifiers, keyCode });
     return { success: true };
@@ -675,9 +704,9 @@ ipcMain.handle('browser-send-input-event', async (event, { webContentsId, type, 
   }
 });
 
-ipcMain.handle('browser-insert-text', async (event, { webContentsId, text }) => {
+ipcMain.handle('browser-insert-text', async (event, { webContentsId: idIn, text }) => {
   try {
-    const wc = webContents.fromId(webContentsId);
+    const wc = resolveTargetContents(idIn);
     if (!wc) return { success: false, error: 'WebContents not found' };
     wc.insertText(text);
     return { success: true };
@@ -686,41 +715,135 @@ ipcMain.handle('browser-insert-text', async (event, { webContentsId, text }) => 
   }
 });
 
-// Captures only the agent browser webview page (used by browser_screenshot).
+// Captures a tab's viewport — works for background/headless tabs simultaneously.
+// All tabs stay attached to mainWindow.contentView. Background tabs are parked
+// hidden at 0,0 with setVisible(false) (not offscreen-clipped at x=6000 which
+// Chromium culls). For capture we temporarily promote parked tabs to visible
+// at 0,0, capture, then re-hide — this gives true background rendering.
+const captureLocks = new Map<string, Promise<void>>();
 ipcMain.handle('browser-capture', async (event, webContentsId) => {
+  let releaseLock: (() => void) | undefined;
   try {
-    const wc = webContents.fromId(webContentsId);
+    const wc = resolveTargetContents(webContentsId);
     if (!wc) return { success: false, error: 'WebContents not found' };
-    let image;
+    let tab: ManagedTab | undefined;
+    if (typeof webContentsId === 'string') tab = managedTabs.get(webContentsId);
+    // Per-tab serialization for capture promotion — two simultaneous captures of
+    // different parked tabs both promoting to 0,0 would otherwise flicker.
+    const lockKey = typeof webContentsId === 'string' ? webContentsId : '__wc__'+String(webContentsId);
+    const prevLock = captureLocks.get(lockKey) ?? Promise.resolve();
+    let _release!: () => void;
+    const curLock = new Promise<void>(r => { _release = r; });
+    releaseLock = _release;
+    captureLocks.set(lockKey, prevLock.then(() => curLock));
+    await prevLock;
+
+    let didPromote = false;
+    let origBounds: any = null;
     try {
-      image = await wc.capturePage();
-    } catch (captureErr: any) {
-      // UnknownVizError occurs when the page is blank, not yet rendered, or GPU
-      // cache is broken.  Retry once after a short delay; if that also fails,
-      // return a 1×1 transparent placeholder so the agent can continue.
-      if (captureErr?.message?.includes('UnknownVizError') || captureErr?.name === 'UnknownVizError') {
-        await new Promise(r => setTimeout(r, 200));
+    if (tab) {
+      try {
+        ensureViewAttachedToMain(tab);
+        (tab.view.webContents as any).setBackgroundThrottling?.(false);
+        const b: any = tab.view.getBounds?.();
+        // Detect parked state: setVisible(false) at 0,0 hidden — bounds valid but not visible
+        // OFFSCREEN x>=5000 also counts as parked (legacy)
+        const isParked = (b && b.x >= 5000) || (tab as any).isParked === true || ((): boolean => {
+          try { return (tab!.view as any).getVisible ? !(tab!.view as any).getVisible() : false; } catch { return false; }
+        })();
+        // Also treat as parked if view is hidden via our flag or bounds don't match expected visible slot
+        // For safety, if capture is for a tab that is not the currently visible one, promote.
+        const shouldPromote = isParked || (b && b.width === 1280 && b.height === 800 && b.x === 0 && b.y === 0 && !(tab!.view as any).isVisible?.());
+        // Simpler: if tab is not visible (parked), promote to 0,0 visible for capture
+        let needsPromote = false;
         try {
-          image = await wc.capturePage();
-        } catch {
-          // nativeImage is imported at module scope — main.ts is ESM and has
-          // no `require` (a bare require here threw ReferenceError and killed
-          // every first observation of a freshly created agent tab).
-          image = nativeImage.createEmpty();
+          // WebContentsView.getVisible not always exists — fall back to isParked flag
+          if (typeof (tab.view as any).getVisible === 'function') needsPromote = !(tab.view as any).getVisible();
+          else needsPromote = !!(tab as any).isParked || (b && b.x === 0 && b.y === 0 && tab.bounds && (tab.bounds.x !== 0 || tab.bounds.y !== 0));
+        } catch { needsPromote = !!(tab as any).isParked; }
+        // Fallback: if we can't determine, promote if bounds looks like parked (0,0 with 1280x800 and tab is not the active visible one)
+        if (!needsPromote && b && b.x === 0 && b.y === 0 && b.width === 1280 && b.height === 800) {
+          // Check if there's a visible tab at slot — if this tab's logical bounds differ, it's parked
+          if (tab.bounds && (tab.bounds.x !== 0 || tab.bounds.y !== 0)) needsPromote = true;
+          else if ((tab as any).isParked) needsPromote = true;
         }
-      } else {
-        throw captureErr;
+        if (needsPromote) {
+          origBounds = b;
+          didPromote = true;
+          try { (tab.view as any).setVisible?.(true); } catch {}
+          try { tab.view.setBounds({ x: 0, y: 0, width: VISIBLE_VIEWPORT.width, height: VISIBLE_VIEWPORT.height } as any); } catch {}
+          try { (tab.view.webContents as any).setBackgroundThrottling?.(false); } catch {}
+          // Give compositor a frame to paint at new visible rect
+          await new Promise(r => setTimeout(r, 180));
+        } else if (!b || b.width === 0 || b.height === 0) {
+          const fallback = tab.bounds ?? VISIBLE_VIEWPORT;
+          tab.view.setBounds({ x: 0, y: 0, width: fallback.width, height: fallback.height } as any);
+          await new Promise(r => setTimeout(r, 120));
+        }
+      } catch {}
+      // Wait briefly for navigation to settle if newly created
+      const deadline = Date.now() + 3500;
+      while (Date.now() < deadline) {
+        try {
+          if (!tab.view.webContents.isLoading() && tab.ready) break;
+        } catch {}
+        await new Promise(r => setTimeout(r, 120));
       }
     }
-    return { success: true, image: image.toDataURL() };
+
+    let image: Electron.NativeImage | undefined;
+    // Retry loop: UnknownVizError / blank can occur if compositor hasn't painted yet
+    for (let attempt = 0; attempt < 4; attempt++) {
+      try {
+        image = await wc.capturePage();
+      } catch (captureErr: any) {
+        if (captureErr?.message?.includes('UnknownVizError') || captureErr?.name === 'UnknownVizError') {
+          await new Promise(r => setTimeout(r, 250 + attempt * 150));
+          continue;
+        }
+        throw captureErr;
+      }
+      if (image && !image.isEmpty()) {
+        const sz = image.getSize();
+        if (sz.width > 0 && sz.height > 0) break;
+      }
+      // Blank frame — give compositor another tick
+      await new Promise(r => setTimeout(r, 250));
+    }
+    if (!image || image.isEmpty()) image = nativeImage.createEmpty();
+    const dataUrl = image.toDataURL();
+    const sz = image.getSize();
+    const pngBytes = sz.width * sz.height;
+    if (!dataUrl || dataUrl === 'data:image/png;base64,' || dataUrl.length < 200 || pngBytes === 0) {
+      // Final fallback: try to capture via offscreen rect explicitly
+      try {
+        const rect = tab ? (tab.view.getBounds?.() as any) : undefined;
+        if (rect && rect.width > 0) {
+          const alt = await wc.capturePage(rect as any).catch(() => null as any);
+          if (alt && !alt.isEmpty() && alt.getSize().width > 0) return { success: true, image: alt.toDataURL() };
+        }
+      } catch {}
+      return { success: false, error: 'Blank capture — the tab has not rendered anything yet' };
+    }
+    return { success: true, image: dataUrl };
+    } finally {
+      // Restore parked state and release per-tab capture lock
+      if (didPromote && tab) {
+        try { (tab.view as any).setVisible?.(false); } catch {}
+        try { tab.view.setBounds(origBounds ?? ({ x: 0, y: 0, width: VISIBLE_VIEWPORT.width, height: VISIBLE_VIEWPORT.height } as any)); } catch {}
+        try { (tab as any).isParked = true; } catch {}
+      }
+      try { releaseLock?.(); } catch {}
+    }
   } catch (err: any) {
+    try { releaseLock?.(); } catch {}
     return { success: false, error: err.message };
   }
 });
 
-ipcMain.handle('browser-emulate-device', async (event, webContentsId, options) => {
+ipcMain.handle('browser-emulate-device', async (event, idIn, options) => {
   try {
-    const wc = webContents.fromId(webContentsId);
+    const wc = resolveTargetContents(idIn);
     if (!wc) return { success: false, error: 'WebContents not found' };
     wc.enableDeviceEmulation(options);
     return { success: true };
@@ -729,10 +852,11 @@ ipcMain.handle('browser-emulate-device', async (event, webContentsId, options) =
   }
 });
 
-ipcMain.handle('run-command', async (event, { command, cwd, timeoutMs }) => {
+ipcMain.handle('run-command', async (event, { command, cwd: cwdIn, timeoutMs }) => {
+  const cwd = cwdIn ? resolveWorkspacePath(cwdIn) : workspaceRoot();
   return new Promise((resolve) => {
     exec(command, {
-      cwd: cwd || process.cwd(),
+      cwd,
       timeout: Number(timeoutMs) > 0 ? Number(timeoutMs) : 120000,
       maxBuffer: 10 * 1024 * 1024
     }, (error, stdout, stderr) => {
@@ -770,11 +894,11 @@ ipcMain.handle('search-web', async (event, { endpoint, apiKey, query, limit = 5 
 });
 
 // Recursive content search across a directory tree (the agent's `search_files`).
-ipcMain.handle('grep-search', async (event, { query, path: rootDir, isRegex, maxResults }) => {
+ipcMain.handle('grep-search', async (event, { query, path: rootDirIn, isRegex, maxResults }) => {
+  const rootDir = resolveWorkspacePath(rootDirIn);
   try {
     if (!query || !String(query).trim()) return { success: false, error: 'Empty query' };
-    const root = rootDir && String(rootDir).trim() ? path.resolve(String(rootDir)) : process.cwd();
-    if (!fs.existsSync(root)) return { success: false, error: `Path not found: ${root}` };
+    const root = rootDir;    if (!fs.existsSync(root)) return { success: false, error: `Path not found: ${root}` };
 
     let rx: RegExp | null = null;
     let needle = '';
@@ -828,9 +952,9 @@ ipcMain.handle('grep-search', async (event, { query, path: rootDir, isRegex, max
 });
 
 // Cookie inspection/management for the agent browser session.
-ipcMain.handle('browser-cookies', async (event, { webContentsId, op = 'get', name, value, domain, url, expirationDate }) => {
+ipcMain.handle('browser-cookies', async (event, { webContentsId: idIn, op = 'get', name, value, domain, url, expirationDate }) => {
   try {
-    const wc = webContents.fromId(webContentsId);
+    const wc = resolveTargetContents(idIn);
     if (!wc) return { success: false, error: 'WebContents not found' };
     const cookies = wc.session.cookies;
 
@@ -892,9 +1016,9 @@ ipcMain.handle('browser-cookies', async (event, { webContentsId, op = 'get', nam
 });
 
 // Navigation history of the embedded browser.
-ipcMain.handle('browser-history', async (event, { webContentsId, op = 'list', index }) => {
+ipcMain.handle('browser-history', async (event, { webContentsId: idIn, op = 'list', index }) => {
   try {
-    const wc = webContents.fromId(webContentsId);
+    const wc = resolveTargetContents(idIn);
     if (!wc) return { success: false, error: 'WebContents not found' };
     const nav = (wc as any).navigationHistory;
 
@@ -922,9 +1046,9 @@ ipcMain.handle('browser-history', async (event, { webContentsId, op = 'list', in
 });
 
 // Native find-in-page with match counting and viewport highlight.
-ipcMain.handle('find-in-page', async (event, { webContentsId, text, forward = true }) => {
+ipcMain.handle('find-in-page', async (event, { webContentsId: idIn, text, forward = true }) => {
   try {
-    const wc = webContents.fromId(webContentsId);
+    const wc = resolveTargetContents(idIn);
     if (!wc) return { success: false, error: 'WebContents not found' };
     if (!text) return { success: false, error: "find_in_page requires 'text'" };
     return await new Promise((resolve) => {
@@ -941,9 +1065,9 @@ ipcMain.handle('find-in-page', async (event, { webContentsId, text, forward = tr
 });
 
 // Downloads a URL through the agent browser session, waiting for completion.
-ipcMain.handle('browser-download', async (event, { webContentsId, url, savePath }) => {
+ipcMain.handle('browser-download', async (event, { webContentsId: idIn, url, savePath }) => {
   try {
-    const wc = webContents.fromId(webContentsId);
+    const wc = resolveTargetContents(idIn);
     if (!wc) return { success: false, error: 'WebContents not found' };
     if (!url) return { success: false, error: "browser_download requires 'url'" };
 
@@ -1386,6 +1510,337 @@ const origEmitWarning = process.emitWarning.bind(process);
   return origEmitWarning(warning, ...rest);
 };
 
+// ─── WebContentsView tab manager (unified, embedded) ─────────────────────────
+// Each tab is a WebContentsView attached to mainWindow.contentView. This
+// fixes the white-viewport / z-index bug that existed when tabs were
+// independent BrowserWindows (always behind mainWindow, wrong screen coords).
+// Benefits vs old BrowserWindow approach:
+//   • Correct Z (child view is INSIDE mainWindow, not behind it)
+//   • Correct coords (contentView-relative = viewport-relative, no screen translation)
+//   • True parallelism (each view has isolated session, cookies, storage)
+//   • No taskbar / window leak, lighter than BrowserWindow
+// All tabs stay ATTACHED (offscreen when not visible) so capturePage works
+// for background agent tabs without requiring user to have rendered them.
+// Visible tab is moved to the slot bounds; hidden tabs are parked at
+// OFFSCREEN_BOUNDS but still painted and capturable simultaneously.
+
+interface ManagedTab {
+  id: string;
+  view: WebContentsView;
+  ready: boolean;
+  url: string;
+  title: string;
+  loading: boolean;
+  bounds?: { x: number; y: number; width: number; height: number };
+  agentId?: string | null;
+  isParked?: boolean;
+}
+
+const managedTabs = new Map<string, ManagedTab>();
+let tabSeq = 0;
+const genTabId = () => `btab-${Date.now().toString(36)}-${(tabSeq++).toString(36)}`;
+const BROWSER_PARTITION_PREFIX = 'persist:oneagent_browser_';
+const HOME_URL = 'https://html.duckduckgo.com/';
+const DEFAULT_BOUNDS = { x: 0, y: 0, width: 1280, height: 800 };
+const VISIBLE_VIEWPORT = { width: 1280, height: 800 };
+// All tabs stay attached to mainWindow.contentView. Background tabs are parked
+// hidden at 0,0 with setVisible(false) — not far offscreen (x=6000 is clipped
+// by Chromium and stops painting). setVisible(false) keeps webContents alive
+// with valid 1280x800 bounds but not composited; capturePage temporarily
+// promotes to visible for a frame then re-hides. Never detach, never use a
+// hidden BrowserWindow (show:false is occluded).
+const OFFSCREEN_BOUNDS = { x: 6000, y: 0, width: 1280, height: 800 } as const;
+const partitionForAgent = (agentId?: string | null) => `${BROWSER_PARTITION_PREFIX}${agentId || 'user'}`;
+
+const forwardTabEvent = (tabId: string, patch: Record<string, unknown>) => {
+  const win = getMainWindow();
+  win?.webContents.send('browser-tab-event', { tabId, ...patch });
+};
+
+const ensureViewAttachedToMain = (tab: ManagedTab): boolean => {
+  const win = getMainWindow();
+  if (!win) return false;
+  const cv: any = win.contentView;
+  if (!cv.children.includes(tab.view)) {
+    try { cv.addChildView(tab.view); } catch {}
+  }
+  try { (tab.view.webContents as any).setBackgroundThrottling?.(false); } catch {}
+  return true;
+};
+
+const attachView = (tab: ManagedTab, bounds?: { x: number; y: number; width: number; height: number }) => {
+  const b = bounds ?? tab.bounds ?? DEFAULT_BOUNDS;
+  const win = getMainWindow();
+  if (!win) {
+    // Main not ready yet — queue attach; keep tab parked offscreen once window exists
+    setTimeout(() => attachView(tab, b), 200);
+    return;
+  }
+  ensureViewAttachedToMain(tab);
+  try { (tab.view as any).setVisible?.(true); } catch {}
+  try { (tab.view.webContents as any).setBackgroundThrottling?.(false); } catch {}
+  if (b && b.width > 0 && b.height > 0) {
+    tab.view.setBounds({ x: Math.round(b.x), y: Math.round(b.y), width: Math.round(b.width), height: Math.round(b.height) } as any);
+    tab.bounds = b;
+  }
+  tab.isParked = false;
+};
+
+const parkView = (tab: ManagedTab) => {
+  // Keep attached to mainWindow but hidden — not offscreen clipped (x=6000 is
+  // clipped by Chromium and stops painting). setVisible(false) keeps the
+  // webContents alive with valid 1280x800 bounds at 0,0 but not composited,
+  // so capturePage can still produce a frame (after temporary promote).
+  const attached = ensureViewAttachedToMain(tab);
+  if (!attached) return;
+  try { (tab.view.webContents as any).setBackgroundThrottling?.(false); } catch {}
+  try { (tab.view as any).setVisible?.(false); } catch {}
+  try { tab.view.setBounds({ x: 0, y: 0, width: VISIBLE_VIEWPORT.width, height: VISIBLE_VIEWPORT.height } as any); } catch {}
+  tab.isParked = true;
+};
+
+function createManagedTab(url: string, bounds?: { x: number; y: number; width: number; height: number }, agentId?: string): string {
+  const id = genTabId();
+  const part = partitionForAgent(agentId);
+  const view = new WebContentsView({
+    webPreferences: {
+      partition: part,
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+      backgroundThrottling: false,
+    },
+  } as any);
+
+  // All tabs start parked offscreen in mainWindow — capturable immediately
+  // even when no container is visible. Never use a hidden window host (occluded).
+  view.setBounds({ x: 0, y: 0, width: VISIBLE_VIEWPORT.width, height: VISIBLE_VIEWPORT.height } as any);
+  try { (view as any).setVisible?.(false); } catch {}
+  const tab: ManagedTab = { id, view, ready: false, url, title: 'New Tab', loading: true, bounds: bounds ?? DEFAULT_BOUNDS, agentId, isParked: true };
+  managedTabs.set(id, tab);
+
+  const wc = view.webContents as any;
+  try { wc.setBackgroundThrottling(false); } catch {}
+  // Attach immediately to mainWindow hidden for true headless operation
+  const tryAttachMain = () => {
+    const win = getMainWindow();
+    if (win) {
+      try { (win.contentView as any).addChildView(view); } catch {}
+      try { view.setBounds({ x: 0, y: 0, width: VISIBLE_VIEWPORT.width, height: VISIBLE_VIEWPORT.height } as any); } catch {}
+      try { (view as any).setVisible?.(false); } catch {}
+      try { (view.webContents as any).setBackgroundThrottling?.(false); } catch {}
+    } else {
+      setTimeout(tryAttachMain, 200);
+    }
+  };
+  tryAttachMain();
+
+  wc.on('dom-ready', () => { tab.ready = true; tab.loading = false; forwardTabEvent(id, { ready: true, loading: false }); });
+  wc.on('did-start-loading', () => { tab.loading = true; forwardTabEvent(id, { loading: true }); });
+  wc.on('did-stop-loading', () => { tab.loading = false; forwardTabEvent(id, { loading: false }); });
+  wc.on('did-navigate', (_e: any, navUrl: string) => { tab.url = navUrl; forwardTabEvent(id, { url: navUrl }); });
+  wc.on('did-navigate-in-page', (_e: any, navUrl: string) => { tab.url = navUrl; forwardTabEvent(id, { url: navUrl }); });
+  wc.on('page-title-updated', (_e: any, t: string) => { tab.title = t; forwardTabEvent(id, { title: t }); });
+  wc.on('did-fail-load', (_e: any, code: number, desc: string, failedUrl: string, isMainFrame: boolean) => {
+    if (!isMainFrame || code === -3) return;
+    console.warn(`[Tabs] load failed (${code} ${desc}): ${failedUrl}`);
+  });
+
+  wc.setWindowOpenHandler((details: any) => {
+    const openUrl: string = details?.url;
+    if (openUrl && /^https?:/i.test(openUrl)) {
+      const win = getMainWindow();
+      win?.webContents.send('oneagent-browser-new-tab', openUrl);
+    }
+    return { action: 'deny' };
+  });
+
+  wc.loadURL(url).catch(() => {});
+  return id;
+}
+
+const tabById = (id: string): ManagedTab | undefined => managedTabs.get(id);
+
+const tabByAgentId = (agentId: string): ManagedTab | undefined => {
+  for (const [, tab] of managedTabs) if (tab.agentId === agentId) return tab;
+  return undefined;
+};
+
+ipcMain.handle('browser-tab-create', async (_e, options?: string | { url?: string; bounds?: any; agentId?: string }) => {
+  if (typeof options === 'string' || options === undefined) return createManagedTab(options || HOME_URL);
+  return createManagedTab(options.url || HOME_URL, options.bounds, options.agentId);
+});
+
+ipcMain.handle('browser-tab-close', async (_e, tabId: string) => {
+  const t = tabById(tabId);
+  if (!t) return { success: false };
+  try { const win = getMainWindow(); if (win) try { (win.contentView as any).removeChildView(t.view); } catch {} } catch {}
+  try { (t.view.webContents as any).close?.(); } catch {}
+  try { (t.view.webContents as any).destroy?.(); } catch {}
+  managedTabs.delete(tabId);
+  return { success: true };
+});
+
+ipcMain.handle('browser-tab-activate', async (_e, payload: { id: string; bounds?: any }) => {
+  const { id, bounds } = payload || ({} as any);
+  const t = tabById(id);
+  if (!t) return { success: false };
+  if (bounds && bounds.width > 0 && bounds.height > 0) t.bounds = bounds;
+  // Park all other tabs (hidden but still attached with valid size for capture)
+  for (const [, other] of managedTabs) if (other.id !== id) parkView(other);
+  attachView(t, bounds ?? t.bounds);
+  // Ensure z-order: re-add active to bring to front
+  try {
+    const win = getMainWindow();
+    if (win) {
+      const cv: any = win.contentView;
+      if (cv.children.includes(t.view)) {
+        cv.removeChildView(t.view);
+        cv.addChildView(t.view);
+        // Restore visible after reorder
+        if (typeof (t.view as any).setVisible === 'function') (t.view as any).setVisible(true);
+        const b = bounds ?? t.bounds ?? DEFAULT_BOUNDS;
+        t.view.setBounds({ x: Math.round(b.x), y: Math.round(b.y), width: Math.round(b.width), height: Math.round(b.height) } as any);
+      }
+    }
+  } catch {}
+  return { success: true };
+});
+
+ipcMain.handle('browser-tab-hide', async (_e, tabId: string) => {
+  const t = tabById(tabId);
+  if (!t) return { success: false };
+  parkView(t);
+  return { success: true };
+});
+
+ipcMain.handle('browser-tab-hide-all', async () => {
+  for (const [, t] of managedTabs) parkView(t);
+  return { success: true };
+});
+
+ipcMain.handle('browser-tab-bounds', async (_e, payload: { id: string; bounds: any }) => {
+  const t = tabById(payload?.id);
+  if (!t) return { success: false };
+  if (payload.bounds && payload.bounds.width > 0 && payload.bounds.height > 0) {
+    t.bounds = payload.bounds;
+    // Bounds updates come only from the visible (active) tab's RAF — move the
+    // attached view to the slot. Offscreen parking is handled elsewhere via parkView.
+    ensureViewAttachedToMain(t);
+    try { if (typeof (t.view as any).setVisible === 'function') (t.view as any).setVisible(true); } catch {}
+    try { t.view.setBounds({ x: Math.round(payload.bounds.x), y: Math.round(payload.bounds.y), width: Math.round(payload.bounds.width), height: Math.round(payload.bounds.height) } as any); } catch {}
+  }
+  return { success: true };
+});
+
+ipcMain.handle('browser-tab-call', async (_e, payload: { id: string; method: string; arg?: any }) => {
+  const t = tabById(payload?.id);
+  if (!t) return { success: false, error: 'No such tab' };
+  const wc = t.view.webContents;
+  try {
+    switch (payload.method) {
+      case 'loadURL': await wc.loadURL(String(payload.arg)).catch(() => {}); break;
+      case 'goBack': if (wc.canGoBack()) wc.goBack(); break;
+      case 'goForward': if (wc.canGoForward()) wc.goForward(); break;
+      case 'reload': wc.reload(); break;
+      case 'stop': wc.stop(); break;
+      default: return { success: false, error: `Unsupported method ${payload.method}` };
+    }
+    return { success: true };
+  } catch (err: any) {
+    return { success: false, error: String(err?.message || err) };
+  }
+});
+
+ipcMain.handle('browser-tab-state', async (_e, tabId: string) => {
+  const t = tabById(tabId);
+  if (!t) return null;
+  let loading = t.loading;
+  try { loading = t.view.webContents.isLoading(); } catch {}
+  return { id: t.id, url: t.url, title: t.title, ready: t.ready, loading };
+});
+
+ipcMain.handle('browser-tab-exec', async (_e, payload: { id: string; code: string }) => {
+  const t = tabById(payload?.id);
+  if (!t) throw new Error('No such tab');
+  // Allow exec even before dom-ready for utility probes; dom-ready gate was too strict
+  return await t.view.webContents.executeJavaScript(payload.code, false);
+});
+
+ipcMain.handle('browser-tab-get-by-agent', async (_e, agentId: string) => {
+  const t = tabByAgentId(agentId);
+  if (!t) return null;
+  let loading = t.loading;
+  try { loading = t.view.webContents.isLoading(); } catch {}
+  return { id: t.id, url: t.url, title: t.title, ready: t.ready, loading };
+});
+
+ipcMain.handle('browser-tab-list', async () => {
+  const tabs: any[] = [];
+  for (const [id, t] of managedTabs) {
+    let loading = t.loading;
+    try { loading = t.view.webContents.isLoading(); } catch {}
+    tabs.push({ id, url: t.url, title: t.title, ready: t.ready, loading, agentId: t.agentId });
+  }
+  return { success: true, tabs };
+});
+
+ipcMain.handle('browser-tab-show', async (_e, tabId: string) => {
+  const t = tabById(tabId);
+  if (!t) return { success: false };
+  attachView(t);
+  return { success: true };
+});
+
+ipcMain.handle('browser-tab-hide-window', async (_e, tabId: string) => {
+  const t = tabById(tabId);
+  if (!t) return { success: false };
+  parkView(t);
+  return { success: true };
+});
+
+// Explicit live-in-container handlers (headless + live)
+ipcMain.handle('browser-tab-show-in-container', async (_e, payload: { id: string; bounds: any }) => {
+  const t = tabById(payload?.id);
+  if (!t) return { success: false, error: 'No such tab' };
+  if (payload.bounds && payload.bounds.width > 0 && payload.bounds.height > 0) t.bounds = payload.bounds;
+  for (const [, other] of managedTabs) if (other.id !== payload.id) parkView(other);
+  attachView(t, payload.bounds ?? t.bounds);
+  // bring to front
+  try {
+    const win = getMainWindow();
+    if (win) {
+      const cv: any = win.contentView;
+      if (cv.children.includes(t.view)) {
+        cv.removeChildView(t.view);
+        cv.addChildView(t.view);
+        if (typeof (t.view as any).setVisible === 'function') (t.view as any).setVisible(true);
+        const b = payload.bounds ?? t.bounds ?? DEFAULT_BOUNDS;
+        t.view.setBounds({ x: Math.round(b.x), y: Math.round(b.y), width: Math.round(b.width), height: Math.round(b.height) } as any);
+      }
+    }
+  } catch {}
+  return { success: true };
+});
+
+ipcMain.handle('browser-tab-hide-in-container', async (_e, payload: { id: string }) => {
+  const t = tabById(payload?.id);
+  if (!t) return { success: false };
+  parkView(t);
+  return { success: true };
+});
+
+// Unified resolver for browser_* IPC that previously accepted numeric webContentsId
+const resolveTargetContents = (id: number | string | undefined): Electron.WebContents | undefined => {
+  if (typeof id === 'number') return webContents.fromId(id);
+  if (typeof id === 'string') {
+    const t = managedTabs.get(id);
+    if (t) return t.view.webContents;
+    const n = Number(id);
+    if (!isNaN(n)) return webContents.fromId(n);
+  }
+  return undefined;
+};
 app.on('web-contents-created', (event, contents) => {
   if (contents.getType() === 'webview') {
     // New windows / target=_blank links become NEW TABS in the app's shared

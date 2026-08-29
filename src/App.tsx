@@ -2,7 +2,6 @@ import { useState } from 'react';
 import TitleBar from './components/TitleBar';
 import Sidebar from './components/Sidebar';
 import ChatArea from './components/ChatArea';
-import AgentBrowser from './components/AgentBrowser';
 import RightSidebar from './components/RightSidebar';
 
 function App() {
@@ -25,16 +24,8 @@ function App() {
         <RightSidebar open={rightSidebarOpen} />
       </div>
 
-      {/* Persistent browser session. Mounted ONCE and never moved in the DOM
-          (Electron webview guests tear down on reparenting). The Live Browser
-          panel positions this layer over its slot via fixed coordinates; when
-          hidden it parks off-screen at full size so tools keep working. */}
-      <div
-        id="oneagent-browser-layer"
-        style={{ position: 'fixed', left: -20000, top: 0, width: 1280, height: 800, zIndex: 30 }}
-      >
-        <AgentBrowser />
-      </div>
+      {/* Browser lives inside its tool-call container (LiveEmbeddedContainer) — no global fixed layer.
+          Each tab is a WebContentsView at HIDDEN_BOUNDS headless until its container expands, then moved to slot bounds. */}
     </div>
   );
 }

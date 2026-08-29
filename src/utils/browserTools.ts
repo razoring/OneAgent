@@ -1,70 +1,126 @@
 import { agentBrowserStore, getCurrentActor } from './agentBrowserStore';
 
-// Per-tab webview registry owned by AgentBrowser: tabId -> { wv, ready }.
-const tabRegistry = (): Map<string, { wv: any; ready: boolean }> | undefined =>
-  (window as any).__oneagentTabs;
+// ─── Tab substrate (main-process WebContentsView) ──────────────────────────
+// Tabs live in MAIN as WebContentsViews attached to mainWindow.contentView.
+// Renderer talks via IPC; this module provides a webview-shaped proxy so
+// existing tools keep their shape. Per-tab state mirrored from main events.
 
-export const getActiveWebview = () => (window as any).activeWebview;
+const api = (): any => (window as any).electronAPI;
+
+interface TabRuntime { url: string; title: string; loading: boolean; ready: boolean }
+const runtimeById = new Map<string, TabRuntime>();
+let eventsInstalled = false;
+
+const ensureTabEvents = () => {
+  if (eventsInstalled || !api()?.onTabEvent) return;
+  eventsInstalled = true;
+  api().onTabEvent((ev: any) => {
+    const cur = runtimeById.get(ev.tabId) ?? { url: '', title: '', loading: false, ready: false };
+    runtimeById.set(ev.tabId, { ...cur, ...ev });
+    agentBrowserStore.patchTab(ev.tabId, {
+      ...(ev.url !== undefined ? { url: ev.url } : {}),
+      ...(ev.title !== undefined ? { title: ev.title } : {}),
+      ...(ev.loading !== undefined ? { loading: ev.loading } : {})
+    });
+  });
+};
+
+const fetchTabState = async (tabId: string): Promise<TabRuntime | null> => {
+  try {
+    const st = await api().tabState(tabId);
+    if (!st) return null;
+    const merged: TabRuntime = {
+      url: st.url ?? '', title: st.title ?? '',
+      loading: !!st.loading, ready: !!st.ready
+    };
+    runtimeById.set(tabId, merged);
+    return merged;
+  } catch { return null; }
+};
+
+export const getActiveWebview = () => null;
 
 // Actor-aware target resolution: a sub-agent's browser_* calls hit ITS OWN
-// tab; the user / orchestrator hit the currently visible one. An actor whose
-// webview is not registered YET resolves to null — waitForActiveWebview keeps
-// polling instead of crossing into another tab's page.
-const resolveTargetWebview = (): any => {
-  const registry = tabRegistry();
-  if (!registry || registry.size === 0) return getActiveWebview();
-  const actor = getCurrentActor();
+// tab; the user / orchestrator hit the currently visible one. Returns a tab
+// id, or null while a freshly created tab is still initializing. Creating an
+// actor's tab goes through the main process (it owns tab ids). Offscreen tabs
+// are created immediately with valid bounds so capture works without user paint.
+// Accepts explicit actor to avoid global race when two agents run concurrently.
+const resolveTargetTabId = async (actorOverride?: string | null): Promise<string | null> => {
+  ensureTabEvents();
+  const actor = actorOverride !== undefined ? actorOverride : getCurrentActor();
   let tabId: string | null | undefined;
   if (actor) {
-    // Actor has no tab yet — lazily create one so tools never cross wires.
-    tabId = agentBrowserStore.getTabIdForAgent(actor) ?? agentBrowserStore.ensureAgentTab(actor).id;
-    return registry.get(tabId)?.wv ?? null;
+    tabId = agentBrowserStore.getTabIdForAgent(actor);
+    if (!tabId) {
+      // Pass agentId to main so managedTabs can be looked up by agent as well
+      const created: string | undefined = await api().tabCreate({ url: agentBrowserStore.HOME_URL, agentId: actor } as any);
+      // Fallback to legacy string form if main rejects object form
+      let cid = created;
+      if (!cid) cid = await api().tabCreate(agentBrowserStore.HOME_URL) as any;
+      if (!cid) return null;
+      const meta = agentBrowserStore.ensureAgentTab(actor);
+      // Main already created with correct id when object form succeeds — rekey only if ids differ
+      if (meta.id !== cid) agentBrowserStore.rekeyTab(meta.id, cid);
+      runtimeById.set(cid, { url: agentBrowserStore.HOME_URL, title: 'New Tab', loading: false, ready: false });
+      tabId = cid;
+    }
+  } else {
+    tabId = agentBrowserStore.getActiveId();
   }
-  tabId = agentBrowserStore.getActiveId();
-  return tabId ? (registry.get(tabId)?.wv ?? getActiveWebview()) : getActiveWebview();
+  return tabId ?? null;
 };
 
-const isTargetReady = (wv: any): boolean => {
-  if (!wv) return false;
-  const registry = tabRegistry();
-  for (const entry of registry?.values() ?? []) {
-    if (entry.wv === wv) return entry.ready && wv.isConnected;
-  }
-  return !!(window as any).activeWebviewReady && wv.isConnected;
+// Webview-shaped proxy over one main-process view.
+const makeProxy = (tabId: string) => {
+  const rt = () => runtimeById.get(tabId) ?? { url: '', title: '', loading: false, ready: false };
+  return {
+    __tabId: tabId,
+    getURL: () => rt().url,
+    getTitle: () => rt().title,
+    isLoading: () => rt().loading,
+    getWebContentsId: () => tabId,
+    executeJavaScript: (code: string) => api().tabExec(tabId, code),
+    loadURL: (url: string) => api().tabCall(tabId, 'loadURL', url),
+    goBack: () => api().tabCall(tabId, 'goBack'),
+    goForward: () => api().tabCall(tabId, 'goForward'),
+    reload: () => api().tabCall(tabId, 'reload'),
+    stop: () => api().tabCall(tabId, 'stop')
+  };
 };
 
-// Device-emulation scale applied to the agent webview (set by AgentBrowser on
-// dom-ready, currently 0.5). Input events are injected in widget space while
-// DOM coordinates from getBoundingClientRect() live in emulated page space —
-// every positional event must be multiplied by this factor before sending.
-const getEmulationScale = (): number => (window as any).__oneagentBrowserScale || 1;
-
-// Scale-aware wrapper around electronAPI.browserSendInputEvent. Pass-through
-// for events without coordinates (keyboard events).
-const sendInputEvent = async (opts: any) => {
-  const s = getEmulationScale();
-  const { x, y, ...rest } = opts;
-  const scaled: any = { ...rest };
-  if (x != null) scaled.x = Math.round(x * s);
-  if (y != null) scaled.y = Math.round(y * s);
-  return (window as any).electronAPI.browserSendInputEvent(scaled);
-};
-
-// The live webview mounts inside the latest browser tool call block, which can
-// land a beat after the agent's first browser_* call arrives — poll briefly.
-// Also waits for dom-ready: webview methods throw "must be attached to the DOM"
-// before the guest view is ready, even though the element already exists.
-export const waitForActiveWebview = async (timeoutMs = 15000): Promise<any> => {
+// Polls for the actor's tab to exist and be ready. For background agent tabs
+// we wait for dom-ready up to 3.5s; capturePage in main will also wait, but
+// returning before ready caused blank captures (Chrome culls not-ready views).
+// executeJavaScript no longer gates on ready but capture does.
+// Captures the actor at entry to avoid global race when two agents run
+// concurrently (per-tab locks allow parallel, but global currentActor would race).
+export const waitForActiveWebview = async (timeoutMs = 15000, actorOverride?: string | null): Promise<any> => {
+  ensureTabEvents();
+  const capturedActor = actorOverride !== undefined ? actorOverride : getCurrentActor();
   const start = Date.now();
+  let lastTabId: string | null = null;
   while (Date.now() - start < timeoutMs) {
-    const wv = resolveTargetWebview();
-    // isConnected matters: the ready flag can outlive the element (recreate /
-    // reparent races) and calling methods on a detached webview throws.
-    if (wv && isTargetReady(wv)) return wv;
+    const tabId = await resolveTargetTabId(capturedActor);
+    if (!tabId) { await new Promise(r => setTimeout(r, 100)); continue; }
+    lastTabId = tabId;
+    const st = await fetchTabState(tabId);
+    if (st) {
+      if (st.ready) return makeProxy(tabId);
+      // If loading finished but dom-ready hasn't fired yet (e.g. about:blank), return after short grace
+      if (!st.loading && Date.now() - start > 900) return makeProxy(tabId);
+      // Absolute deadline so simultaneous agent tabs don't deadlock forever
+      if (Date.now() - start > 3500) return makeProxy(tabId);
+    }
     await new Promise(r => setTimeout(r, 100));
   }
-  throw new Error("No active webview available");
+  if (lastTabId) return makeProxy(lastTabId);
+  throw new Error('No active webview available');
 };
+
+// No display scaling — WebContentsView bounds are 1:1 with viewport CSS pixels.
+const sendInputEvent = async (opts: any) =>
+  (window as any).electronAPI.browserSendInputEvent(opts);
 
 // Injects the Set-of-Mark overlay into the webview and returns the annotated DOM mapping.
 export const injectSetOfMark = async (): Promise<any> => {
@@ -515,46 +571,34 @@ const clickElementCenter = async (wv: any, id: number, highlight: boolean): Prom
   return await wv.executeJavaScript(code);
 };
 
-// Quick viewport-center lookup for a Set-of-Mark element (no cursor animation).
-// Hit-test aware: badges/inserted UI (e.g. Google's "You visit often" chip)
-// can pad an anchor's bounding box so its geometric center lands on empty
-// space — fall back to the largest text-bearing descendant that actually
-// receives the click, then to a grid scan of the rect.
-export const getElementCenter = async (wv: any, id: number): Promise<{ x: number, y: number } | null> =>
-  wv.executeJavaScript(`(function(){
+// Shared hit-test-aware center lookup. Single source for viewport coords — used by
+// click animation, scroll targeting and generic point resolution.
+const centerJs = (id: number) => `(function(){
     var el = window.__oneagentElements && window.__oneagentElements[${id}];
     if (!el) return null;
     el.scrollIntoView({ block: 'center', inline: 'center' });
     var r = el.getBoundingClientRect();
-    function hits(x, y) {
-      var t = document.elementFromPoint(x, y);
-      return !!t && (t === el || el.contains(t));
-    }
-    var cx = Math.round(r.left + r.width / 2);
-    var cy = Math.round(r.top + r.height / 2);
-    if (!hits(cx, cy)) {
-      var best = null, bestScore = 0;
-      el.querySelectorAll('*').forEach(function(d) {
-        var dr = d.getBoundingClientRect();
-        if (dr.width < 4 || dr.height < 4) return;
-        var dx = Math.round(dr.left + dr.width / 2);
-        var dy = Math.round(dr.top + dr.height / 2);
-        if (!hits(dx, dy)) return;
-        var score = dr.width * dr.height * (((d.textContent || '').trim().length > 0) ? 2 : 1);
-        if (score > bestScore) { bestScore = score; best = { x: dx, y: dy }; }
+    function hits(x, y){ var t=document.elementFromPoint(x,y); return !!t && (t===el || el.contains(t)); }
+    var cx=Math.round(r.left+r.width/2), cy=Math.round(r.top+r.height/2);
+    if(!hits(cx,cy)){
+      var best=null, bestScore=0;
+      el.querySelectorAll('*').forEach(function(d){
+        var dr=d.getBoundingClientRect(); if(dr.width<4||dr.height<4) return;
+        var dx=Math.round(dr.left+dr.width/2), dy=Math.round(dr.top+dr.height/2);
+        if(!hits(dx,dy)) return;
+        var score=dr.width*dr.height*(((d.textContent||'').trim().length>0)?2:1);
+        if(score>bestScore){ bestScore=score; best={x:dx,y:dy}; }
       });
-      if (best) { cx = best.x; cy = best.y; }
-      else {
-        scan: for (var gy = 0.2; gy <= 0.8; gy += 0.2) {
-          for (var gx = 0.2; gx <= 0.8; gx += 0.2) {
-            var tx = Math.round(r.left + r.width * gx), ty = Math.round(r.top + r.height * gy);
-            if (hits(tx, ty)) { cx = tx; cy = ty; break scan; }
-          }
-        }
-      }
+      if(best){ cx=best.x; cy=best.y; }
+      else { scan: for(var gy=0.2; gy<=0.8; gy+=0.2){ for(var gx=0.2; gx<=0.8; gx+=0.2){ var tx=Math.round(r.left+r.width*gx), ty=Math.round(r.top+r.height*gy); if(hits(tx,ty)){ cx=tx; cy=ty; break scan; }}}}
     }
-    return { x: cx, y: cy };
-  })()`);
+    return { x: cx, y: cy, rect:{ left:r.left, top:r.top, width:r.width, height:r.height } };
+  })()`;
+
+export const getElementCenter = async (wv: any, id: number): Promise<{ x: number, y: number } | null> => {
+  const r: any = await wv.executeJavaScript(centerJs(id));
+  return r ? { x: r.x, y: r.y } : null;
+};
 
 export const browserKeystrokes = async (args: any): Promise<string> => {
   const wv = await waitForActiveWebview();
@@ -895,21 +939,15 @@ export const executeBrowserNavigation = async (action: string, url?: string): Pr
   return "OK";
 };
 
-// Maps a webview element back to its tab and records the new URL.
+// Maps a proxied tab back to its id and records the new URL.
 const patchTabUrlForWebview = (wv: any) => {
-  const registry = tabRegistry();
-  if (!registry) return;
-  for (const [tabId, entry] of registry) {
-    if (entry.wv === wv) {
-      try { agentBrowserStore.patchTab(tabId, { url: wv.getURL(), loading: false }); } catch {}
-      return;
-    }
-  }
+  if (!wv?.__tabId) return;
+  try { agentBrowserStore.patchTab(wv.__tabId, { url: wv.getURL(), loading: false }); } catch {}
 };
 
-// Destroys the current <webview> element and mounts a fresh one at the
-// store's current URL. AgentBrowser listens for this event; the new instance
-// re-registers window.activeWebview once its guest attaches (dom-ready).
+// Full reset (user trash button): AgentBrowser recreates its home view on the
+// recreate event. Kept as an event so the chrome stays the single owner of
+// tab lifecycle.
 export const remountWebview = (): void => {
   window.dispatchEvent(new Event('oneagent-browser-recreate'));
 };
@@ -920,22 +958,23 @@ export const terminateBrowserSession = async (): Promise<void> => {
   const actor = getCurrentActor();
   if (actor) {
     const tabId = agentBrowserStore.getTabIdForAgent(actor);
-    if (tabId) agentBrowserStore.closeTab(tabId);
+    if (tabId) {
+      void (window as any).electronAPI.tabClose(tabId);
+      agentBrowserStore.closeTab(tabId);
+    }
     return;
   }
   const wv = getActiveWebview();
-  if (wv) {
-    // Capture the final frame first — the Live Browser panel shows it as a
-    // grayscale overlay until the next browser_* call resumes the session.
-    try {
-      const res = await (window as any).electronAPI?.browserCapture?.(wv.getWebContentsId());
+  void wv;
+  // Capture the final frame of the active session for the grayscale overlay.
+  try {
+    const activeId = agentBrowserStore.getActiveId();
+    const st = activeId ? await api().tabState(activeId) : null;
+    if (st) {
+      const res = await (window as any).electronAPI?.browserCapture?.(activeId);
       if (res?.success && res.image) agentBrowserStore.setTerminatedSnapshot(res.image);
-    } catch {}
-    // Stop any in-flight navigation. Deliberately do NOT loadURL('about:blank'):
-    // guest-view navigation during teardown rejects with ERR_FAILED (-2) in the
-    // main-process GUEST_VIEW_MANAGER_CALL handler.
-    try { wv.stop(); } catch {}
-  }
+    }
+  } catch {}
   remountWebview();
 };
 

@@ -1,6 +1,9 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { ChevronLeft, ChevronRight, RotateCw, Home, Shield } from 'lucide-react';
 
+// DEPRECATED: <webview>-based shell replaced by AgentBrowser + WebContentsView.
+// Kept for reference only — not mounted anywhere. Use AgentBrowser for the
+// unified tab substrate (correct Z, viewport-relative bounds, parallel agents).
 const BrowserShell = () => {
   const [url, setUrl] = useState('https://html.duckduckgo.com/');
   const [inputUrl, setInputUrl] = useState(url);
