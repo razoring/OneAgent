@@ -1,6 +1,10 @@
 import React, { useState, useEffect, useRef } from 'react';
+import { Trash2 } from 'lucide-react';
 import { ModelSettings, getModelSettings, saveModelSettings } from '../utils/llm';
 import { modelParamsStore } from '../utils/modelParamsStore';
+import { taskStore } from '../utils/taskStore';
+import { chatStore } from '../utils/chatStore';
+import { TaskNode } from '../types/task';
 
 // Task title: truncates normally; running tasks whose text overflows get a
 // slow edge-faded marquee driven by rAF (exact end-to-end travel, no overshoot).
@@ -63,6 +67,149 @@ const TaskTitle = ({ text, running, className }: { text: string, running?: boole
   return (
     <div ref={clipRef} className={`${scrolling ? 'task-title-scroll' : 'truncate'} ${className || ''}`}>
       <span ref={spanRef} style={{ display: scrolling ? 'inline-block' : undefined }}>{text}</span>
+    </div>
+  );
+};
+
+// ─── Tasks helpers (read-only, LLM-owned) ────────────────────────────────────
+
+const fmtDuration = (ms: number) => {
+  const s = Math.round(ms / 1000);
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60); const rs = s % 60;
+  return `${m}m ${rs}s`;
+};
+
+const StatusRing = ({ status, size }: { status: TaskNode['status']; size: number }) => {
+  const cls = `shrink-0 rounded-full flex items-center justify-center ${
+    status === 'done' ? 'bg-accent/80'
+      : status === 'running' ? 'border-2 border-accent border-t-transparent animate-spin'
+      : status === 'error' ? 'bg-red-500/80'
+      : 'border-2 border-white/25'
+  }`;
+  const dim = `${size}px`;
+  return (
+    <span className={cls} style={{ width: dim, height: dim }}>
+      {status === 'done' && <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><path d="M20 6 9 17l-5-5" /></svg>}
+      {status === 'error' && <span className="text-white text-[8px] font-bold">×</span>}
+    </span>
+  );
+};
+
+const TaskRow = ({ node }: { node: TaskNode }) => {
+  const [expanded, setExpanded] = useState(false);
+  const running = node.status === 'running';
+  const done = node.status === 'done';
+  const elapsed = node.completedAt ? fmtDuration(node.completedAt - node.createdAt) : node.status === 'running' ? fmtDuration(Date.now() - node.createdAt) : null;
+  const meta = [node.toolHint, elapsed].filter(Boolean).join(' · ');
+  return (
+    <div className={`rounded-xl border ${done ? 'border-white/5 bg-black/20 opacity-70' : running ? 'border-accent/30 bg-white/[0.03]' : 'border-white/5 bg-black/20'} p-2.5 flex flex-col gap-1.5`}>
+      <div className="flex items-center gap-2.5">
+        <StatusRing status={node.status} size={done ? 14 : 16} />
+        <div className="min-w-0 flex-1">
+          <TaskTitle running={running} text={node.title} className={`text-sm ${done ? 'line-through text-textSecondary' : running ? 'text-white' : 'text-textSecondary'}`} />
+          {(meta || node.resultSummary) && (
+            <div className="text-[11px] text-textSecondary/70 font-mono truncate">
+              {node.resultSummary ? node.resultSummary : meta}
+              {node.resultSummary && meta ? ` · ${meta}` : ''}
+            </div>
+          )}
+        </div>
+        {(node.context || node.acceptanceCriteria?.length > 0) && (
+          <button
+            onClick={() => setExpanded(v => !v)}
+            className="shrink-0 p-1 rounded hover:bg-white/10 text-textSecondary hover:text-white transition-colors"
+            title={expanded ? 'Collapse details' : 'Expand details'}
+          >
+            <span className={`block transition-transform ${expanded ? 'rotate-90' : ''} text-xs`}>›</span>
+          </button>
+        )}
+      </div>
+      <div className="text-xs text-textSecondary/80 leading-relaxed line-clamp-2">{node.description}</div>
+      {expanded && (
+        <div className="mt-1 flex flex-col gap-1.5 pt-2 border-t border-white/5">
+          {node.goal && <div className="text-xs text-textSecondary"><span className="font-medium text-white/80">Goal:</span> {node.goal}</div>}
+          {node.context && <div className="text-[11px] font-mono bg-black/30 rounded-lg p-2 border border-white/5 whitespace-pre-wrap break-all">{node.context}</div>}
+          {node.acceptanceCriteria?.length > 0 && (
+            <div className="text-xs">
+              <div className="font-medium text-white/80 mb-1">Acceptance</div>
+              <ul className="space-y-0.5">
+                {node.acceptanceCriteria.map((c, i) => (
+                  <li key={i} className="flex gap-1.5 text-textSecondary/80">
+                    <span className={`mt-0.5 shrink-0 w-3 h-3 rounded border flex items-center justify-center ${done ? 'bg-accent/80 border-accent/80' : 'border-white/20'}`}>
+                      {done && <svg width="7" height="7" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="3"><path d="M20 6 9 17l-5-5" /></svg>}
+                    </span>
+                    <span className={done ? 'line-through' : ''}>{c}</span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+          {node.assumptions?.length > 0 && <div className="text-[11px] text-textSecondary/60">Assumptions: {node.assumptions.join(' · ')}</div>}
+        </div>
+      )}
+    </div>
+  );
+};
+
+const TasksSection = ({ open }: { open: boolean }) => {
+  const [activeChatId, setActiveChatId] = useState<string | null>(() => chatStore.getActiveId());
+  const [tasks, setTasks] = useState<TaskNode[]>(() => (activeChatId ? taskStore.listAllForChat(activeChatId) : []));
+
+  useEffect(() => {
+    const unsubActive = chatStore.subscribeActive((id) => {
+      setActiveChatId(id);
+      if (id) {
+        setTasks(taskStore.listAllForChat(id));
+      } else {
+        setTasks([]);
+      }
+    });
+    return () => unsubActive();
+  }, []);
+
+  useEffect(() => {
+    if (!activeChatId) return;
+    const unsub = taskStore.subscribe(activeChatId, setTasks);
+    // Hydrate if store empty but disk has tasks (chatStore hydrate happens on chat load; ensure we pick up)
+    if (tasks.length === 0) setTasks(taskStore.listAllForChat(activeChatId));
+    return () => unsub();
+  }, [activeChatId]);
+
+  // Keep token estimation active etc. not needed here.
+  useEffect(() => {
+    if (!open) return;
+    // No-op: ensures RightSidebar open prop doesn't affect task persistence.
+  }, [open]);
+
+  const done = tasks.filter(t => t.status === 'done').length;
+  const total = tasks.length;
+
+  return (
+    <div className="flex flex-col gap-2 mt-6 pt-5">
+      <div className="flex items-center justify-between">
+        <span className="menu-header">Tasks</span>
+        <div className="flex items-center gap-2">
+          <span className="text-[11px] font-mono text-textSecondary">{total === 0 ? '—' : `${done}/${total}`}</span>
+          <button
+            onClick={() => activeChatId && taskStore.clear(activeChatId)}
+            disabled={total === 0}
+            className="p-1 rounded text-textSecondary/70 hover:text-white hover:bg-white/10 transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
+            title="Clear all tasks for this chat (user-only, not fed to LLM)"
+          >
+            <Trash2 size={11} />
+          </button>
+        </div>
+      </div>
+      {total === 0 ? (
+        <div className="rounded-xl border border-white/5 bg-black/20 p-3 text-xs text-textSecondary/70 leading-relaxed">
+          No tasks yet — LLM will populate after plan Proceed. Tasks are persistent per chat but only active (queued/running) are visible to the LLM via <span className="font-mono">task_list</span>.
+        </div>
+      ) : (
+        <div className="flex flex-col gap-1.5">
+          {tasks.map(n => <TaskRow key={n.id} node={n} />)}
+        </div>
+      )}
     </div>
   );
 };
@@ -248,59 +395,8 @@ const RightSidebar = ({ open }: { open: boolean }) => {
           />
         </div>
 
-        {/* Tasks — flat list, no nesting */}
-        <div className="flex flex-col gap-2 mt-6 pt-5">
-          <div className="flex items-center justify-between">
-            <span className="menu-header">Tasks</span>
-            <span className="text-[11px] font-mono text-textSecondary">1/4</span>
-          </div>
-
-          <button className="w-full rounded-xl border border-white/5 bg-black/20 p-2.5 flex items-center gap-2.5 text-left hover:bg-white/[0.04] transition-colors group">
-            <span className="w-4 h-4 shrink-0 rounded-full border-2 border-accent border-t-transparent animate-spin" />
-            <div className="min-w-0 flex-1">
-              <TaskTitle running text="Collect 10 contractor contacts from Toronto-area listing websites" className="text-sm text-white" />
-              <div className="text-[11px] text-textSecondary/70 font-mono">gemma4:12b · running</div>
-            </div>
-          </button>
-
-          <button className="w-full rounded-xl border border-white/5 bg-black/20 p-2.5 flex items-center gap-2.5 text-left hover:bg-white/[0.04] transition-colors group opacity-70">
-            <span className="w-3.5 h-3.5 shrink-0 rounded-full bg-accent/80 flex items-center justify-center">
-              <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><path d="M20 6 9 17l-5-5"/></svg>
-            </span>
-            <div className="min-w-0 flex-1">
-              <div className="text-sm text-textSecondary line-through truncate">Search Toronto contractors</div>
-              <div className="text-[11px] text-textSecondary/70 font-mono">gemma3:4b · 14.2s</div>
-            </div>
-          </button>
-
-          <button className="w-full rounded-xl border border-white/5 bg-black/20 p-2.5 flex items-center gap-2.5 text-left hover:bg-white/[0.04] transition-colors group">
-            <span className="w-4 h-4 shrink-0 rounded-full border-2 border-accent border-t-transparent animate-spin" />
-            <div className="min-w-0 flex-1">
-              <TaskTitle running text="Extract contact emails and phone numbers from the top-ranked contractor sites" className="text-sm text-white" />
-              <div className="text-[11px] text-textSecondary/70 font-mono">gemma3:4b · running</div>
-            </div>
-          </button>
-
-          <button className="w-full rounded-xl border border-white/5 bg-black/20 p-2.5 flex items-center gap-2.5 text-left hover:bg-white/[0.04] transition-colors group opacity-70">
-            <span className="w-4 h-4 shrink-0 rounded-full border-2 border-white/25" />
-            <div className="min-w-0 flex-1">
-              <div className="text-sm text-textSecondary truncate">Visit kijiji.ca listings</div>
-              <div className="text-[11px] text-textSecondary/70 font-mono">gemma3:4b · queued</div>
-            </div>
-          </button>
-
-          <button className="w-full rounded-xl border border-white/5 bg-black/20 p-2.5 flex items-center gap-2.5 text-left hover:bg-white/[0.04] transition-colors group opacity-70">
-            <span className="w-4 h-4 shrink-0 rounded-full border-2 border-white/25" />
-            <div className="min-w-0 flex-1">
-              <div className="text-sm text-textSecondary truncate">Summarize findings</div>
-              <div className="text-[11px] text-textSecondary/70 font-mono">gemma3:4b · queued</div>
-            </div>
-          </button>
-
-          <button className="menu-item !py-1.5 justify-center text-xs text-textSecondary hover:text-white">
-            View all tasks
-          </button>
-        </div>
+        {/* Tasks — persistent per-chat, LLM-owned (clear-before-add), user Clear-all only */}
+        <TasksSection open={open} />
       </div>
     </div>
   );

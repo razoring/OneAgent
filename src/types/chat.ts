@@ -52,9 +52,13 @@ export interface ChatMeta {
   agentId?: string;
 }
 
-// messages.json envelope.
+// messages.json envelope — tasks are persisted per-chat alongside messages
+// (LLM only sees active tasks via task_list; history not injected into context).
+import type { TaskNode } from './task';
+
 export interface ChatFile {
   version: 1;
   meta: ChatMeta;
   messages: ChatMessage[];
+  tasks?: TaskNode[];
 }

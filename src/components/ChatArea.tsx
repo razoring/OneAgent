@@ -401,13 +401,14 @@ const ChatArea = ({ onToggleSettings }: { onToggleSettings?: () => void }) => {
   const loadedChatIdRef = useRef<string | null>(null);
   useEffect(() => { homeChatIdRef.current = homeChatId; }, [homeChatId]);
 
-  // Subscribe to active chat switches (Sidebar) — load its messages.
+  // Subscribe to active chat switches (Sidebar) — load its messages + tasks.
   useEffect(() => {
     const unsub = chatStore.subscribeActive((id) => {
       setHomeChatId(id);
       if (!id) { setMessages([]); loadedChatIdRef.current = null; return; }
-      // Flush any pending saves for the previous chat before switching.
+      // Flush any pending saves for the previous chat before switching (messages + tasks).
       chatStore.flushSaves();
+      void import('../utils/taskStore').then(m => m.taskStore.flushSaves());
       loadedChatIdRef.current = id;
       void chatStore.loadMessages(id).then((msgs) => {
         // Guard against race if active switched again while loading
@@ -445,7 +446,10 @@ const ChatArea = ({ onToggleSettings }: { onToggleSettings?: () => void }) => {
 
   // Flush pending saves on window close / refresh.
   useEffect(() => {
-    const h = () => chatStore.flushSaves();
+    const h = () => {
+      chatStore.flushSaves();
+      try { import('../utils/taskStore').then(m => m.taskStore.flushSaves()); } catch {}
+    };
     window.addEventListener('beforeunload', h);
     return () => window.removeEventListener('beforeunload', h);
   }, []);
@@ -531,6 +535,7 @@ const ChatArea = ({ onToggleSettings }: { onToggleSettings?: () => void }) => {
     getModel: () => activeModelRef.current || lastUsedModel,
     setModel: switchActiveModel,
     requestApproval,
+    chatId: homeChatIdRef.current,
     getAnnotations: () => messages.flatMap(m => (m.role === 'assistant' ? (m.comments || []) : [])),
     spawnAgent: (spec) => spawnSubAgent(spec, {
       requestApproval,
@@ -1034,12 +1039,14 @@ const ChatArea = ({ onToggleSettings }: { onToggleSettings?: () => void }) => {
       const MAX_AUTO_CONTINUES = 2;
       let autoContinues = 0;
 
-      // Plan-first gate: ask_user locked until a substantive written reply exists.
-      // Mirrors 1535081 orchestrator.md without task_add/spawn gating.
-      let planDraftReady = accumulatedContent.trim().length > 0;
+      // Hardened plan-first gate: Goal-first headings + Proceed + clear-before-add.
+      const hasPlanHeadings = (s: string) => /## Goal/.test(s) && /## Assumptions/.test(s) && /## Open Questions/.test(s) && /## Steps/.test(s);
+      let planDraftReady = hasPlanHeadings(accumulatedContent);
+      let proceedGranted = false;
       const roundToolset = () => {
         const all = getSystemTools();
-        if (!planDraftReady) return all.filter((t: any) => t.function.name !== 'ask_user');
+        if (!planDraftReady) return all.filter((t: any) => !['ask_user','task_add','task_update'].includes(t.function.name));
+        if (!proceedGranted) return all.filter((t: any) => t.function.name !== 'task_add');
         return all;
       };
 
@@ -1107,8 +1114,8 @@ const ChatArea = ({ onToggleSettings }: { onToggleSettings?: () => void }) => {
         if (streamResult.content) {
           accumulatedContent = accumulatedContent ? `${accumulatedContent}\n\n${streamResult.content}` : streamResult.content;
         }
-        // Unlock ask_user once a substantive draft exists (plan-first gating).
-        if (accumulatedContent.trim().length > 0) planDraftReady = true;
+        // Unlock ask_user only when Goal-first headings present; unlock task_add only after Proceed.
+        if (hasPlanHeadings(accumulatedContent)) planDraftReady = true;
 
         const rawCalls = streamResult.toolCalls || [];
         if (rawCalls.length === 0) {
@@ -1170,6 +1177,13 @@ const ChatArea = ({ onToggleSettings }: { onToggleSettings?: () => void }) => {
         // Parallel-safe execution: independent calls run concurrently while
         // browser/desktop calls serialize through shared locks.
         const execResults = await executeToolCalls(rawCalls, createToolContext());
+
+        // Proceed grants task_add (clear-before-add). Detect successful ask_user.
+        if (!proceedGranted && execResults.some(r => r.toolName === 'ask_user' && !r.error)) {
+          proceedGranted = true;
+          // Mark plan as resolved — future saves will persist isPlan flag via message content.
+          // We treat the accumulatedContent as the plan; no extra isPlan handling needed here beyond gating.
+        }
 
         execResults.forEach((er, i) => {
           const tcObj = roundToolCalls[i];

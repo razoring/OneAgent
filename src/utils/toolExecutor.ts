@@ -54,6 +54,8 @@ export interface ToolContext {
   spawnAgent: (spec: any) => string;
   getAgents: (ids?: string[]) => any[];
   waitForAgents: (ids: string[] | undefined, ms: number) => Promise<any[]>;
+  // Active chat for per-chat task isolation.
+  chatId?: string | null;
   // Inline annotations on the assistant reply — delivered with ask_user answers.
   getAnnotations?: () => { quote: string; text: string }[];
   signal?: AbortSignal;
@@ -416,6 +418,67 @@ const HANDLERS: Record<string, Handler> = {
       ? await ctx.waitForAgents(normIds, waitMs)
       : ctx.getAgents(normIds);
     return ok(j({ agents: states }));
+  },
+
+  // ── Persistent per-chat tasks (LLM-owned, not injected into history) ──
+  // task_add REPLACES all tasks for this chat (clear-before-add), no hard limit.
+  // task_list returns only active (queued/running) by default to avoid context bleed.
+  task_add: async (args, ctx) => {
+    const raw = p(args, 'tasks', 'Tasks', 'items', 'Items');
+    if (!Array.isArray(raw) || raw.length === 0) throw new Error("task_add requires 'tasks' array with at least one verbose task");
+    const chatId = ctx.chatId;
+    if (!chatId) throw new Error('task_add requires an active chat (no chatId in context)');
+    const { taskStore } = await import('./taskStore');
+    // Verbose validation — prevents LLM overthinking by forcing copy-paste context.
+    for (let i = 0; i < raw.length; i++) {
+      const t: any = raw[i];
+      const title = String(t.title || '').trim();
+      const desc = String(t.description || t.detail || '').trim();
+      const ctxStr = String(t.context || '').trim();
+      const acc = t.acceptanceCriteria || t.acceptance || [];
+      if (!title) throw new Error(`task_add: tasks[${i}].title is required (imperative ≤15 words)`);
+      if (desc.length < 120) throw new Error(`task_add: tasks[${i}].description must be verbose ≥120 chars (why+how), got ${desc.length}. Rewrite more verbosely.`);
+      if (ctxStr.length < 80) throw new Error(`task_add: tasks[${i}].context must be ≥80 chars verbatim (paths/commands/URLs), got ${ctxStr.length}. Include copy-paste ready context.`);
+      if (!Array.isArray(acc) || acc.length < 2) throw new Error(`task_add: tasks[${i}].acceptanceCriteria requires ≥2 observable checkboxes, got ${Array.isArray(acc)?acc.length:0}`);
+    }
+    const items = raw.map((t: any) => ({
+      title: String(t.title).trim(),
+      description: String(t.description || t.detail || '').trim(),
+      goal: String(t.goal || '').trim(),
+      assumptions: Array.isArray(t.assumptions) ? t.assumptions.map((s:any)=>String(s)) : [],
+      acceptanceCriteria: (t.acceptanceCriteria || t.acceptance || []).map((s:any)=>String(s)),
+      toolHint: String(t.toolHint || t.tool || 'mixed') as any,
+      context: String(t.context || '').trim(),
+      dependsOn: Array.isArray(t.dependsOn) ? t.dependsOn.map((s:any)=>String(s)) : [],
+    }));
+    const created = taskStore.replaceAll(chatId, items);
+    return ok(j({ success: true, clearedPrevious: true, created: created.map(c=>({id:c.id, title:c.title, status:c.status})), note: 'Replaced all tasks for this chat (previous cleared). Update each via task_update when acceptance met.' }));
+  },
+
+  task_update: async (args, ctx) => {
+    const taskId = String(p(args, 'taskId', 'task_id', 'id') || '').trim();
+    const status = String(p(args, 'status') || '').trim() as any;
+    const resultSummary = p(args, 'resultSummary', 'result_summary', 'summary');
+    if (!taskId) throw new Error("task_update requires 'taskId'");
+    if (!['queued','running','done','error'].includes(status)) throw new Error(`task_update: status must be 'queued'|'running'|'done'|'error', got '${status}'`);
+    const chatId = ctx.chatId;
+    if (!chatId) throw new Error('task_update requires an active chat');
+    const { taskStore } = await import('./taskStore');
+    const updated = taskStore.update(chatId, taskId, { status, ...(resultSummary!==undefined?{resultSummary:String(resultSummary).slice(0,400)}:{}) });
+    if (!updated) throw new Error(`task_update: task '${taskId}' not found in chat '${chatId}' (did you call task_list? tasks are per-chat and cleared on task_add)`);
+    if (status==='done' || status==='error') {
+      if (!resultSummary || String(resultSummary).trim().length===0) throw new Error('task_update to done/error requires resultSummary (≤160c summary of what was accomplished)');
+    }
+    return ok(j({ success: true, task: { id: updated.id, title: updated.title, status: updated.status } }));
+  },
+
+  task_list: async (args, ctx) => {
+    const chatId = ctx.chatId;
+    if (!chatId) throw new Error('task_list requires an active chat');
+    const { taskStore } = await import('./taskStore');
+    const includeDone = !!p(args, 'includeDone', 'include_done');
+    const list = includeDone ? taskStore.listAllForChat(chatId) : taskStore.listActive(chatId);
+    return ok(j({ chatId, count: list.length, tasks: list.map(t=>({ id:t.id, title:t.title, description:t.description, goal:t.goal, assumptions:t.assumptions, acceptanceCriteria:t.acceptanceCriteria, toolHint:t.toolHint, context:t.context, dependsOn:t.dependsOn, status:t.status, updatedAt:t.updatedAt })) }));
   },
 
   // Legacy alias for old conversation replays

@@ -249,6 +249,34 @@ export const SYSTEM_TOOLS = [
       wait_ms: num('Block up to this many ms until done (default 0 = snapshot only).')
     }),
 
+  // ── Task system (persistent per chat, LLM-owned) ────────────────────────
+  // LLM creates verbose tasks via task_add (clear-before-add), updates via task_update, reads via task_list.
+  // Tasks are NOT injected into history; LLM only sees active (queued/running) via task_list.
+  // User may Clear-all via sidebar; LLM must NOT expose single-delete to user.
+  fn('task_add', 'Create verbose tasks for THIS chat. REPLACES all existing tasks for this chat (clear-before-add). Each task must be verbose: description (3-5 sentences), goal, assumptions, acceptanceCriteria (≥2), context (verbatim paths/commands, ≥80 chars). No hard limit on count. Call once after Proceed with all Steps. LLM-owned.',
+    {
+      tasks: { type: 'array', items: { type: 'object', properties: {
+        title: str('Imperative ≤15 words, unique per chat'),
+        description: str('Verbose 3-5 sentences: why + approach + non-obvious details (≥120 chars)'),
+        goal: str('Slice of plan Goal this task fulfills'),
+        assumptions: { type: 'array', items: { type: 'string' }, description: 'A-refs from plan, e.g. ["A1","A2"]' },
+        acceptanceCriteria: { type: 'array', items: { type: 'string' }, description: '≥2 observable checkboxes, e.g. "file X exists && tests pass"' },
+        toolHint: { type: 'string', enum: ['files','browser','shell','mixed','none'], description: 'Primary tool family' },
+        context: str('Verbatim copy-paste ready: file paths, URLs, command snippets, example I/O (≥80 chars)'),
+        dependsOn: { type: 'array', items: { type: 'string' }, description: 'Titles or ids of predecessor tasks' }
+      }, required: ['title','description','goal','acceptanceCriteria','context'] } }
+    }, ['tasks']),
+  fn('task_update', 'LLM-only: advance YOUR task status. Mark done ONLY when acceptanceCriteria met. Requires resultSummary on done/error.',
+    {
+      taskId: str('Task id from task_add/task_list'),
+      status: { type: 'string', enum: ['queued','running','done','error'], description: 'Running when starting, done/error when finished' },
+      resultSummary: str('≤160 chars: what was accomplished/found, on done/error')
+    }, ['taskId','status']),
+  fn('task_list', 'List tasks for this chat. Returns ONLY active (queued/running) by default to avoid context bleed from old done tasks; use includeDone to see all. Read-only.',
+    {
+      includeDone: bool('If true, includes done/error tasks (rarely needed). Default false.')
+    }),
+
   // ── User interaction ─────────────────────────────────────────────────────
   fn('ask_user', 'Ask the user a question or request permission. BLOCKS until the user responds — you cannot act until then. The user sees your question with your options as multiple-choice buttons plus a free-text "custom response" field (always available, not listed in options). Use for: permission to continue, choices between approaches, checkpoints where the user must do something first (e.g. solve a captcha — offer an option like "I\'m done"). Multi-step forms: batch SEVERAL ask_user calls in ONE turn (they queue up as 1-of-N with prev/next navigation); use separate sequential calls instead when later questions depend on earlier answers.',
     {

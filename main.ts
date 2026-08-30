@@ -1148,7 +1148,7 @@ ipcMain.handle('chats-load', async (_e, chatId: string) => {
   }
 });
 
-ipcMain.handle('chats-save', async (_e, chatId: string, payload: { meta?: any; messages?: any[] }) => {
+ipcMain.handle('chats-save', async (_e, chatId: string, payload: { meta?: any; messages?: any[]; tasks?: any[] }) => {
   try {
     return {
       success: true,
@@ -1164,8 +1164,12 @@ ipcMain.handle('chats-save', async (_e, chatId: string, payload: { meta?: any; m
           id: chatId,
           updatedAt: now
         };
-        const messages = await extractAssets(payload.messages ?? existing?.messages ?? [], chatId);
-        const file = { version: 1 as const, meta, messages };
+        const messages = payload.messages !== undefined
+          ? await extractAssets(payload.messages, chatId)
+          : (existing?.messages ?? []);
+        // Tasks are persisted per-chat alongside messages; not injected into LLM context.
+        const tasks = payload.tasks !== undefined ? payload.tasks : (existing?.tasks ?? []);
+        const file = { version: 1 as const, meta, messages, tasks };
         await writeJsonAtomic(messagesFileOf(chatId), file);
         const idx = await loadIndex();
         const i = idx.findIndex((m: any) => m.id === chatId);
@@ -1193,7 +1197,7 @@ ipcMain.handle('chats-create', async (_e, spec: { parentId?: string | null; titl
         createdAt: now,
         updatedAt: now
       };
-      await writeJsonAtomic(messagesFileOf(id), { version: 1, meta: m, messages: [] });
+      await writeJsonAtomic(messagesFileOf(id), { version: 1, meta: m, messages: [], tasks: [] });
       const idx = await loadIndex();
       idx.push(m);
       await saveIndex(idx);

@@ -63,10 +63,10 @@ const { ipcRenderer, webUtils } = require('electron');
   desktopType: (text: string) => ipcRenderer.invoke('desktop-type', { text }),
   desktopHotkey: (opts: { keys: string[] }) => ipcRenderer.invoke('desktop-hotkey', opts),
 
-  // Chat history (flat, no sub-agent nesting)
+  // Chat history (flat, no sub-agent nesting) — tasks are persisted alongside messages per chat
   chatsList: () => ipcRenderer.invoke('chats-list'),
   chatsLoad: (chatId: string) => ipcRenderer.invoke('chats-load', chatId),
-  chatsSave: (chatId: string, payload: { meta?: any; messages?: any[] }) => ipcRenderer.invoke('chats-save', chatId, payload),
+  chatsSave: (chatId: string, payload: { meta?: any; messages?: any[]; tasks?: any[] }) => ipcRenderer.invoke('chats-save', chatId, payload),
   chatsCreate: (spec: { parentId?: string | null; title?: string }) => ipcRenderer.invoke('chats-create', spec),
   chatsRename: (chatId: string, title: string) => ipcRenderer.invoke('chats-rename', chatId, title),
   chatsDelete: (chatId: string) => ipcRenderer.invoke('chats-delete', chatId),

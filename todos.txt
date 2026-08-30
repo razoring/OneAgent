@@ -1,11 +1,11 @@
-hotmodel swapping with tab
-auto load model when swapped with estimated TTFT label
-chat history
+hotmodel swapping with tab (parked)
+auto load model when swapped with estimated TTFT label (parked)
 mcp servers
-make the chat history a hidden overlay; move the model parameters to the right side with an inset. Below the model details, have an artifacts panel / todo list.
-Make orchestrator agent spawn sub-agents to do the todo lists; seems like the smaller models overthink less than Gemma4:12b
-Responsive website with mobile support (look at AI Studio for inspo)
-update settings menu (be provider-agnostic but create quick-action chips to quickly add the user's preferred provider)
+Make orchestrator agent spawn sub-agents to do the todo lists; seems like the smaller models overthink less than Gemma4:12b (parked)
+Responsive website with mobile support (look at AI Studio for inspo) (parked)
+update settings menu (be provider-agnostic but create quick-action chips to quickly add the user's preferred provider) (parked)
 allow attachments to flow through into the browser (images, documents)
 agent tool (copy/paste)
 autonomous import from chrome profile.
+browser system -- use opencode sessions related to browser to spawn a chrome browser with remote debugging / no debug banner, no mcp
+version control

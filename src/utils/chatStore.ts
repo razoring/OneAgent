@@ -192,6 +192,10 @@ export const chatStore = {
     const res = await api().chatsDelete(chatId);
     if (!res?.success) throw new Error(res?.error || 'Delete failed');
     pending.delete(chatId);
+    try {
+      const { taskStore } = await import('./taskStore');
+      taskStore.forget(chatId);
+    } catch {}
     chats = chats.filter(c => c.id !== chatId);
     notifyChats();
     if (activeId === chatId) {
@@ -212,6 +216,11 @@ export const chatStore = {
     const res = await api().chatsLoad(chatId);
     if (!res?.success) return [];
     const file = res.file as ChatFile;
+    // Hydrate per-chat tasks (persistent, UI-only, not LLM context) alongside messages.
+    try {
+      const { taskStore } = await import('./taskStore');
+      taskStore.hydrate(chatId, (file as any).tasks || []);
+    } catch {}
     return (file.messages || []) as ChatMessage[];
   },
 
