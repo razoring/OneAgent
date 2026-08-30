@@ -252,40 +252,24 @@ const BlockToolbar = ({ onEdit, onRegenerate, onDelete }: { onEdit?: () => void,
 const UnifiedToolsBlock = ({ activity, isGenerating, msgIsGenerating, activityFeed, isBrowserExpanded, setIsBrowserExpanded, handleUserKillBrowser, terminatedSnapshot, onEdit, onRegenerate, onDelete }: any) => {
   const { toolCalls } = activity.data;
   const [expanded, setExpanded] = useState(true);
-  const browserSlotRef = useRef<HTMLDivElement | null>(null);
+  const [cdpListening, setCdpListening] = useState<boolean | null>(null);
   const isLatestBrowserBlock = activityFeed.lastBrowserToolsMessageId === activity.messageId;
 
-  // Adopt the persistent (off-screen) browser session node into this panel.
-  // appendChild MOVES the node — the webview, its session and listeners all
-  // survive; only its on-screen position changes. When hidden/terminated it
-  // returns to the off-screen host where tools keep working in the background.
   useEffect(() => {
-    const root = document.getElementById('oneagent-browser-root');
-    const slot = browserSlotRef.current;
-    if (!root) return;
-    if (isLatestBrowserBlock && isBrowserExpanded && !terminatedSnapshot && slot) {
-      if (root.parentElement !== slot) {
-        slot.appendChild(root);
-        window.dispatchEvent(new Event('oneagent-browser-slot-change'));
-      }
-    } else {
-      const hidden = document.getElementById('oneagent-browser-hidden');
-      if (hidden && root.parentElement !== hidden) {
-        hidden.appendChild(root);
-        window.dispatchEvent(new Event('oneagent-browser-slot-change'));
-      }
-    }
-    return () => {
-      // This tools block unmounting (newer browser block took over, message
-      // deleted…) — never orphan the session node inside removed DOM.
-      const r = document.getElementById('oneagent-browser-root');
-      const hidden = document.getElementById('oneagent-browser-hidden');
-      if (r && hidden && slot && r.parentElement === slot) {
-        hidden.appendChild(r);
-        window.dispatchEvent(new Event('oneagent-browser-slot-change'));
-      }
+    if (!isLatestBrowserBlock || !isBrowserExpanded) return;
+    let cancelled = false;
+    const check = async () => {
+      try {
+        const api: any = (window as any).electronAPI;
+        if (!api?.chromeStatus) return;
+        const s = await api.chromeStatus();
+        if (!cancelled) setCdpListening(!!s?.listening);
+      } catch { if (!cancelled) setCdpListening(false); }
     };
-  }, [isLatestBrowserBlock, isBrowserExpanded, terminatedSnapshot]);
+    check();
+    const id = setInterval(check, 2500);
+    return () => { cancelled = true; clearInterval(id); };
+  }, [isLatestBrowserBlock, isBrowserExpanded]);
 
   return (
     <div className="w-full group relative">
@@ -368,17 +352,30 @@ const UnifiedToolsBlock = ({ activity, isGenerating, msgIsGenerating, activityFe
                 </div>
 
                 {isBrowserExpanded && (
-                  <div className="border-t border-white/5 transition-all duration-300 ease-in-out origin-top overflow-hidden opacity-100 scale-y-100 bg-black/40 relative">
-                    {/* The persistent webview node is adopted into this slot
-                        (see effect above). Terminated session: node stays
-                        hidden off-screen; only the grayscale snapshot shows. */}
-                    <div ref={browserSlotRef} className="w-full h-[340px]" />
-                    {terminatedSnapshot && (
+                  <div className="border-t border-white/5 bg-black/40 relative p-3">
+                    {terminatedSnapshot ? (
                       <img
                         src={terminatedSnapshot}
                         alt="Terminated browser session"
-                        className="absolute inset-0 w-full h-full object-cover grayscale"
+                        className="w-full h-[220px] object-cover grayscale rounded-lg"
                       />
+                    ) : (
+                      <div className="w-full rounded-lg border border-white/10 bg-black/30 p-4 flex flex-col gap-2">
+                        <div className="flex items-center gap-2 text-xs">
+                          <span className={`w-2 h-2 rounded-full ${cdpListening ? 'bg-green-500 animate-pulse' : cdpListening===false ? 'bg-red-500' : 'bg-yellow-500 animate-pulse'}`} />
+                          <span className="text-white font-medium">{cdpListening ? 'External Chromium — CDP live profile connected' : cdpListening===false ? 'External Chromium — not running (click Browser in sidebar)' : 'Checking external browser…'}</span>
+                        </div>
+                        <p className="text-[11px] leading-relaxed text-textSecondary">
+                          {cdpListening
+                            ? 'Agent is driving parallel CDP Targets in your live profile (cookies shared, no banner). Use Browser button in the left sidebar to launch any Chromium with --remote-debugging-port. Each sub-agent gets its own Target — multitask is now truly parallel.'
+                            : 'Launch via the Browser button above Models (auto-detects Chrome/Edge/Brave on first click) or set the path in Settings → Browser. Tool calls (cursor move, screenshot via Page.captureScreenshot, typing via Input.insertText) are then sent over ws://127.0.0.1:PORT/json → CDP (Page/Input/Runtime/Storage domains).'}
+                        </p>
+                        {!cdpListening && (
+                          <div className="text-[11px] text-textSecondary/70 font-mono">
+                            ws://127.0.0.1:{(() => { try { return (window as any).__lastCdpPort || 9222; } catch { return 9222; } })()}/json
+                          </div>
+                        )}
+                      </div>
                     )}
                   </div>
                 )}

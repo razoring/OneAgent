@@ -1,8 +1,9 @@
 import { useEffect, useState } from 'react';
-import { MessageSquarePlus, Settings, LayoutGrid, Pencil, Check, X, Trash2, Download } from 'lucide-react';
+import { MessageSquarePlus, Settings, LayoutGrid, Pencil, Check, X, Trash2, Download, Globe, Loader2 } from 'lucide-react';
 import SettingsModal from './SettingsModal';
 import { chatStore, DEFAULT_TITLE } from '../utils/chatStore';
 import { ChatMeta } from '../types/chat';
+import { getBrowserSettings } from '../utils/llm';
 
 // ─── Date bucketing ──────────────────────────────────────────────────────────
 
@@ -154,6 +155,97 @@ const ChatRow = ({ meta, activeId, onSelect }: ChatRowProps) => {
   );
 };
 
+// ─── Browser CDP launcher ────────────────────────────────────────────────────
+const BrowserButton: React.FC = () => {
+  const [launching, setLaunching] = useState(false);
+  const [connected, setConnected] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    const probe = async () => {
+      try {
+        const api: any = (window as any).electronAPI;
+        if (!api?.chromeStatus) return;
+        const r = await api.chromeStatus();
+        if (!cancelled) setConnected(!!r?.listening);
+      } catch {}
+    };
+    probe();
+    const id = setInterval(probe, 3000);
+    return () => { cancelled = true; clearInterval(id); };
+  }, []);
+
+  const handleLaunch = async () => {
+    if (launching) return;
+    setLaunching(true);
+    try {
+      const api: any = (window as any).electronAPI;
+      const s = getBrowserSettings();
+      if (!api?.chromeLaunch) return;
+      const doLaunch = async (opts: any) => api.chromeLaunch(opts);
+      let res = await doLaunch({
+        chromiumPath: s.chromiumPath || undefined,
+        cdpPort: s.cdpPort,
+        launchArgs: s.launchArgs || undefined,
+      });
+      if (res?.listening) { setConnected(true); return; }
+      if (res?.success && res?.listening) { setConnected(true); return; }
+      // Singleton lock: Chrome already running without --remote-debugging-port
+      if (res?.needsRestart) {
+        const alt = (res as any).alternative as { path: string; label: string } | undefined;
+        const binName = res.binary ? String(res.binary).split(/[\\/]/).pop() : 'Chromium';
+        const baseMsg = res.error || `Browser launch failed on port ${s.cdpPort}.`;
+        let msg = baseMsg;
+        if (alt) {
+          msg += `\n\nAlternative available: ${alt.label} (${alt.path}) can run in parallel without closing ${binName}.`;
+          msg += `\n\nOK = Force relaunch ${binName} (closes ALL ${binName} windows — live profile preserved, tabs will restore)\nCancel = Launch ${alt.label} instead`;
+        } else {
+          msg += `\n\nChromium singleton lock: the live profile is already in use by a running instance without debugging. Close all Chromium windows and relaunch?`;
+          msg += `\n\nOK = Force relaunch (closes all windows)\nCancel = Abort`;
+        }
+        const force = confirm(msg);
+        if (force) {
+          // Force kill + relaunch same binary
+          if (api.chromeForceRelaunch) {
+            const r2 = await api.chromeForceRelaunch({
+              chromiumPath: s.chromiumPath || undefined,
+              cdpPort: s.cdpPort,
+              launchArgs: s.launchArgs || undefined,
+            });
+            if (r2?.listening) setConnected(true);
+            else alert('Force relaunch failed: ' + (r2?.error || 'unknown') + '\n\nIf it persists, manually close all Chromium windows via Task Manager and click Browser again.');
+          } else {
+            alert('Force relaunch not available in this build. Please manually close all Chromium windows and click Browser again.');
+          }
+        } else if (alt) {
+          const r2 = await doLaunch({ chromiumPath: alt.path, cdpPort: s.cdpPort, launchArgs: s.launchArgs || undefined });
+          if (r2?.listening) setConnected(true);
+          else alert('Alternative launch failed: ' + (r2?.error || 'unknown'));
+        }
+        return;
+      }
+      if (!res?.success) alert('Browser launch failed: ' + (res?.error || 'unknown') + '\n\nTip: If another Chromium is running, close it or use Settings → Browser to pick a different Chromium (e.g., Edge if Chrome is busy) — they can run in parallel.');
+    } catch (e: any) {
+      alert('Browser launch failed: ' + (e?.message || String(e)));
+    } finally {
+      setLaunching(false);
+    }
+  };
+
+  return (
+    <button
+      onClick={handleLaunch}
+      disabled={launching}
+      className="flex items-center gap-3 w-full hover:bg-surfaceElevated transition-colors rounded-2xl p-3 text-left text-textSecondary disabled:opacity-60"
+      title={connected ? 'External Chromium is listening — click to ensure running' : 'Launch external Chromium with --remote-debugging-port (auto-detect first click)'}
+    >
+      {launching ? <Loader2 size={18} className="animate-spin shrink-0" /> : <Globe size={18} className={connected ? 'text-green-400' : ''} />}
+      <span className="flex-1">Browser</span>
+      {connected ? <span className="w-2 h-2 rounded-full bg-green-500 animate-pulse shrink-0" /> : null}
+    </button>
+  );
+};
+
 // ─── Sidebar ─────────────────────────────────────────────────────────────────
 
 const Sidebar = () => {
@@ -230,6 +322,7 @@ const Sidebar = () => {
 
       {/* Bottom Section */}
       <div className="px-4 pb-4 space-y-1.5">
+        <BrowserButton />
         <button className="flex items-center gap-3 w-full hover:bg-surfaceElevated transition-colors rounded-2xl p-3 text-left text-textSecondary">
           <LayoutGrid size={18} />
           Models

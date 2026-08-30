@@ -30,6 +30,8 @@ import {
   getProviders,
   LLMModel
 } from './llm';
+import { cdpBrowserStore } from './cdpBrowserStore';
+import * as cdpTools from './cdpTools';
 import { TOOL_TIERS } from './tools';
 import { userPromptStore } from './userPromptStore';
 
@@ -90,6 +92,23 @@ const j = (v: any): string => {
   }
 };
 
+// CDP live-profile check — cached to avoid IPC storm. Refreshed on demand.
+let _cdpLastCheck = 0;
+let _cdpCached = false;
+const isCdpMode = async (): Promise<boolean> => {
+  const now = Date.now();
+  if (now - _cdpLastCheck < 1500) return _cdpCached;
+  _cdpLastCheck = now;
+  try {
+    const api: any = (window as any).electronAPI;
+    if (!api?.chromeStatus) { _cdpCached = false; return false; }
+    const port = cdpBrowserStore.getPort();
+    const r = await api.chromeStatus(port);
+    _cdpCached = !!r?.listening;
+    return _cdpCached;
+  } catch { _cdpCached = false; return false; }
+};
+
 // Short human-readable description for permission cards.
 export const summarizeArgs = (name: string, args: any): string => {
   try {
@@ -109,9 +128,16 @@ export const summarizeArgs = (name: string, args: any): string => {
   }
 };
 
-// Tools sharing one physical resource serialize through per-class chains:
-// every browser_* tool drives the single embedded webview, desktop_* tools
-// drive the one real mouse/keyboard. Everything else runs fully parallel.
+// CDP live-profile: each agent gets its own Target (page) in the shared
+// Chromium profile, so browser_* can run truly parallel per-agent. Fallback
+// webview is single-view and serializes. Desktop remains global.
+const lockKeyFor = (name: string, ctx: ToolContext): string | null => {
+  if (name.startsWith('browser') || name === 'find_in_page') {
+    return `browser:${(ctx as any).agentId ?? (ctx as any).currentActor ?? '__user__'}`;
+  }
+  if (name.startsWith('desktop')) return 'desktop';
+  return null;
+};
 const lockClassFor = (name: string): string | null =>
   name.startsWith('browser') || name === 'find_in_page' ? 'browser'
     : name.startsWith('desktop') ? 'desktop'
@@ -188,19 +214,68 @@ const HANDLERS: Record<string, Handler> = {
     return ok(j(res));
   },
 
-  // Embedded browser — navigation & observation
-  browser_navigate: async (args) => {
+  // Embedded browser — navigation & observation (CDP live-profile when Browser was launched, else fallback to embedded webview)
+  browser_navigate: async (args, ctx) => {
     let url: string = String(p(args, 'url', 'Url') ?? '').trim() || 'https://html.duckduckgo.com';
     if (!/^https?:\/\//i.test(url)) {
       if (url.includes('.') && !url.includes(' ')) url = 'https://' + url;
       else url = 'https://html.duckduckgo.com/html/?q=' + encodeURIComponent(url);
     }
+    if (await isCdpMode()) {
+      try { return ok(await cdpTools.cdpNavigate(((ctx as any).agentId ?? null), url)); } catch (e: any) { /* fallback */ }
+    }
     return ok(await executeBrowserNavigation('navigate', url));
   },
-  browser_go_back: async () => ok(await executeBrowserNavigation('back')),
-  browser_terminate: async () => ok(await executeBrowserTerminate()),
-  browser_get_dom: async () => ok(await getSemanticDOM()),
-  browser_observe: async () => {
+  browser_go_back: async (_a, ctx) => {
+    if (await isCdpMode()) {
+      try {
+        const t = await cdpBrowserStore.ensureTarget(((ctx as any).agentId ?? null));
+        const api: any = (window as any).electronAPI;
+        const r = await api.cdpCommand({ port: t.port, targetId: t.id, method: 'Page.goBack', params: {} });
+        if (r?.success) return ok('OK');
+      } catch {}
+    }
+    return ok(await executeBrowserNavigation('back'));
+  },
+  browser_terminate: async (_a, ctx) => {
+    if (await isCdpMode()) {
+      try {
+        const t = cdpBrowserStore.getTargetForAgent(((ctx as any).agentId ?? null));
+        if (t) {
+          const api: any = (window as any).electronAPI;
+          await api.cdpCloseTarget({ port: t.port, targetId: t.id }).catch(()=>{});
+          cdpBrowserStore.removeByAgent(((ctx as any).agentId ?? null));
+          return ok('Browser terminated (CDP target closed). Next navigate will create fresh target.');
+        }
+      } catch {}
+    }
+    return ok(await executeBrowserTerminate());
+  },
+  browser_get_dom: async (_a, ctx) => {
+    if (await isCdpMode()) {
+      try { return ok(await cdpTools.cdpGetDom(((ctx as any).agentId ?? null))); } catch {}
+    }
+    return ok(await getSemanticDOM());
+  },
+  browser_observe: async (_a, ctx) => {
+    if (await isCdpMode()) {
+      try {
+        const obs = await cdpTools.cdpObserve(((ctx as any).agentId ?? null));
+        return {
+          result: j({
+            success: true,
+            image: 'Annotated browser screenshot attached to this tool response (CDP live-profile target).',
+            elements: obs.markers.length > 0 ? obs.markers : undefined,
+            dom: obs.dom.length > 0 ? obs.dom : undefined,
+            meta: obs.meta && Object.keys(obs.meta).length > 0 ? obs.meta : undefined,
+            note: obs.markers.length > 0 ? 'CDP Target — numbered badges are SoM IDs — use with browser_click/browser_type etc.' : undefined
+          }),
+          imageDataUrl: await downscaleDataUrl(obs.image, 1280, 0.92)
+        };
+      } catch (e: any) {
+        // fallback to webview
+      }
+    }
     const obs = await browserObservePage();
     return {
       result: j({
@@ -214,7 +289,20 @@ const HANDLERS: Record<string, Handler> = {
       imageDataUrl: await downscaleDataUrl(obs.image, 1280, 0.92)
     };
   },
-  browser_screenshot: async () => {
+  browser_screenshot: async (_a, ctx) => {
+    if (await isCdpMode()) {
+      try {
+        const { image, markers } = await cdpTools.cdpCaptureWithSoM(((ctx as any).agentId ?? null));
+        return {
+          result: j({
+            success: true,
+            image: 'Screenshot of the CDP browser viewport attached to this tool response.',
+            elements: markers.length > 0 ? markers : undefined
+          }),
+          imageDataUrl: await downscaleDataUrl(image, 1280, 0.92)
+        };
+      } catch {}
+    }
     const shot = await captureBrowserScreenshot();
     return {
       result: j({
@@ -226,15 +314,132 @@ const HANDLERS: Record<string, Handler> = {
     };
   },
 
-  // Embedded browser — virtual input primitives
-  browser_click: async (args) => ok(await browserClick(args)),
-  browser_mouse_down: async (args) => ok(await browserHold(args, 'down')),
-  browser_mouse_up: async (args) => ok(await browserHold(args, 'up')),
-  browser_mouse_move: async (args) => ok(await browserMove(args)),
-  browser_drag: async (args) => ok(await browserDragTo(args)),
-  browser_key: async (args) => ok(await browserPressKey(args)),
-  browser_type: async (args) => ok(await browserType(args)),
-  browser_scroll: async (args) => ok(await browserScroll(args)),
+  // Embedded browser — virtual input primitives (CDP live-profile when Browser launched)
+  browser_click: async (args, ctx) => {
+    if (await isCdpMode()) {
+      try {
+        const id = p(args,'id'); const x=p(args,'x'); const y=p(args,'y');
+        const button = p(args,'button')||'left'; const clickCount = Number(p(args,'click_count')||1);
+        const res = await cdpTools.cdpClick(((ctx as any).agentId ?? null), id!=null?Number(id):undefined, x!=null?Number(x):undefined, y!=null?Number(y):undefined, button, clickCount);
+        return ok(res);
+      } catch {}
+    }
+    return ok(await browserClick(args));
+  },
+  browser_mouse_down: async (args, ctx) => {
+    if (await isCdpMode()) {
+      try {
+        const id=p(args,'id'); const x=p(args,'x'); const y=p(args,'y'); const button=p(args,'button')||'left';
+        const act=((ctx as any).agentId ?? null); const {target, port}=await (await import('./cdpBrowserStore')).cdpBrowserStore.ensureTarget(act) as any;
+        let px=x, py=y;
+        if (id!=null) {
+          const js=`(function(){const el=window.__oneagentElements&&window.__oneagentElements[${Number(id)}]; if(!el)return null; el.scrollIntoView({block:'center',inline:'center'}); const r=el.getBoundingClientRect(); return {x:Math.round(r.left+r.width/2),y:Math.round(r.top+r.height/2)};})()`;
+          const api:any=(window as any).electronAPI; const r=await api.cdpCommand({port:target.port,targetId:target.id,method:'Runtime.evaluate',params:{expression:js,returnByValue:true}}); const v=r?.result?.result?.value ?? r?.result?.value ?? r?.result; if(v&&typeof v.x==='number'){px=v.x;py=v.y;} else return ok(`Element ${id} not found — take a browser_observe to re-label`);
+        }
+        const api:any=(window as any).electronAPI; await api.cdpCommand({port:target.port,targetId:target.id,method:'Input.dispatchMouseEvent',params:{type:'mousePressed',x:px,y:py,button,clickCount:1}});
+        return ok(`Mouse down ${id!=null?`element ${id}`:`at (${px},${py})`}`);
+      } catch {}
+    }
+    return ok(await browserHold(args, 'down'));
+  },
+  browser_mouse_up: async (args, ctx) => {
+    if (await isCdpMode()) {
+      try {
+        const id=p(args,'id'); const x=p(args,'x'); const y=p(args,'y'); const button=p(args,'button')||'left';
+        const act=((ctx as any).agentId ?? null); const {target, port}=await (await import('./cdpBrowserStore')).cdpBrowserStore.ensureTarget(act) as any;
+        let px=x, py=y;
+        if (id!=null) {
+          const js=`(function(){const el=window.__oneagentElements&&window.__oneagentElements[${Number(id)}]; if(!el)return null; const r=el.getBoundingClientRect(); return {x:Math.round(r.left+r.width/2),y:Math.round(r.top+r.height/2)};})()`;
+          const api:any=(window as any).electronAPI; const r=await api.cdpCommand({port:target.port,targetId:target.id,method:'Runtime.evaluate',params:{expression:js,returnByValue:true}}); const v=r?.result?.result?.value ?? r?.result?.value ?? r?.result; if(v) {px=v.x;py=v.y;}
+        }
+        if (px==null) px=0; if (py==null) py=0;
+        const api:any=(window as any).electronAPI; await api.cdpCommand({port:target.port,targetId:target.id,method:'Input.dispatchMouseEvent',params:{type:'mouseReleased',x:px,y:py,button,clickCount:1}});
+        return ok(`Mouse up ${id!=null?`element ${id}`:`at (${px},${py})`}`);
+      } catch {}
+    }
+    return ok(await browserHold(args, 'up'));
+  },
+  browser_mouse_move: async (args, ctx) => {
+    if (await isCdpMode()) {
+      try {
+        const id=p(args,'id'); const x=p(args,'x'); const y=p(args,'y');
+        const act=((ctx as any).agentId ?? null); const {target, port}=await (await import('./cdpBrowserStore')).cdpBrowserStore.ensureTarget(act) as any;
+        let px=x, py=y;
+        if (id!=null) {
+          const js=`(function(){const el=window.__oneagentElements&&window.__oneagentElements[${Number(id)}]; if(!el)return null; const r=el.getBoundingClientRect(); return {x:Math.round(r.left+r.width/2),y:Math.round(r.top+r.height/2)};})()`;
+          const api:any=(window as any).electronAPI; const r=await api.cdpCommand({port:target.port,targetId:target.id,method:'Runtime.evaluate',params:{expression:js,returnByValue:true}}); const v=r?.result?.result?.value ?? r?.result?.value ?? r?.result; if(v) {px=v.x;py=v.y;}
+        }
+        if (px==null||py==null) return ok('Target not found — provide id or x/y');
+        const api:any=(window as any).electronAPI; await api.cdpCommand({port:target.port,targetId:target.id,method:'Input.dispatchMouseEvent',params:{type:'mouseMoved',x:px,y:py}});
+        return ok(`Mouse moved to (${px},${py})`);
+      } catch {}
+    }
+    return ok(await browserMove(args));
+  },
+  browser_drag: async (args, ctx) => {
+    if (await isCdpMode()) {
+      try {
+        const fi=p(args,'from_id'); const fx=p(args,'from_x'); const fy=p(args,'from_y');
+        const ti=p(args,'to_id'); const tx=p(args,'to_x'); const ty=p(args,'to_y');
+        const button=p(args,'button')||'left';
+        const act=((ctx as any).agentId ?? null); const {target, port}=await (await import('./cdpBrowserStore')).cdpBrowserStore.ensureTarget(act) as any;
+        const api:any=(window as any).electronAPI;
+        let sx:any=fx, sy:any=fy;
+        if (fi!=null) {
+          const js=`(function(){const el=window.__oneagentElements&&window.__oneagentElements[${Number(fi)}]; if(!el)return null; el.scrollIntoView({block:'center',inline:'center'}); const r=el.getBoundingClientRect(); return {x:Math.round(r.left+r.width/2),y:Math.round(r.top+r.height/2)};})()`;
+          const r=await api.cdpCommand({port:target.port,targetId:target.id,method:'Runtime.evaluate',params:{expression:js,returnByValue:true}}); const v=r?.result?.result?.value ?? r?.result?.value ?? r?.result; if(v){sx=v.x;sy=v.y;}
+        }
+        let ex:any=tx, ey:any=ty;
+        if (ti!=null) {
+          const js=`(function(){const el=window.__oneagentElements&&window.__oneagentElements[${Number(ti)}]; if(!el)return null; const r=el.getBoundingClientRect(); return {x:Math.round(r.left+r.width/2),y:Math.round(r.top+r.height/2)};})()`;
+          const r=await api.cdpCommand({port:target.port,targetId:target.id,method:'Runtime.evaluate',params:{expression:js,returnByValue:true}}); const v=r?.result?.result?.value ?? r?.result?.value ?? r?.result; if(v){ex=v.x;ey=v.y;}
+        }
+        if (sx==null||sy==null||ex==null||ey==null) return ok('Drag requires source and destination');
+        await api.cdpCommand({port:target.port,targetId:target.id,method:'Input.dispatchMouseEvent',params:{type:'mousePressed',x:sx,y:sy,button,clickCount:1}});
+        const steps=8;
+        for(let i=1;i<=steps;i++){ const ix=Math.round(sx+(ex-sx)*i/steps), iy=Math.round(sy+(ey-sy)*i/steps); await api.cdpCommand({port:target.port,targetId:target.id,method:'Input.dispatchMouseEvent',params:{type:'mouseMoved',x:ix,y:iy}}); await new Promise(r=>setTimeout(r,16)); }
+        await api.cdpCommand({port:target.port,targetId:target.id,method:'Input.dispatchMouseEvent',params:{type:'mouseReleased',x:ex,y:ey,button,clickCount:1}});
+        return ok(`Dragged ${fi!=null?`#${fi}`:`(${fx},${fy})`} → ${ti!=null?`#${ti}`:`(${tx},${ty})`}`);
+      } catch {}
+    }
+    return ok(await browserDragTo(args));
+  },
+  browser_key: async (args, ctx) => {
+    if (await isCdpMode()) {
+      try {
+        const key=String(p(args,'key')||''); const mods=p(args,'modifiers')||[]; const state=p(args,'state')||'press';
+        const act=((ctx as any).agentId ?? null); const {target, port}=await (await import('./cdpBrowserStore')).cdpBrowserStore.ensureTarget(act) as any;
+        const api:any=(window as any).electronAPI;
+        const modMap:any={control:2, ctrl:2, alt:1, shift:8, meta:4, command:4};
+        let modBits=0; for(const m of mods) modBits|=modMap[String(m).toLowerCase()]||0;
+        if (state==='down' || state==='press') await api.cdpCommand({port:target.port,targetId:target.id,method:'Input.dispatchKeyEvent',params:{type:'keyDown', key, modifiers:modBits}});
+        if (state==='up' || state==='press') { await new Promise(r=>setTimeout(r,30)); await api.cdpCommand({port:target.port,targetId:target.id,method:'Input.dispatchKeyEvent',params:{type:'keyUp', key, modifiers:modBits}}); }
+        return ok(`Pressed ${key} ${mods.length?`+${mods.join('+')}`:''}`);
+      } catch {}
+    }
+    return ok(await browserPressKey(args));
+  },
+  browser_type: async (args, ctx) => {
+    if (await isCdpMode()) {
+      try {
+        const text=String(p(args,'text')||''); if(!text) throw new Error("browser_type requires 'text'");
+        const id=p(args,'id'); const submit=!!p(args,'submit');
+        const res=await cdpTools.cdpType(((ctx as any).agentId ?? null), text, id!=null?Number(id):undefined, submit);
+        return ok(res);
+      } catch {}
+    }
+    return ok(await browserType(args));
+  },
+  browser_scroll: async (args, ctx) => {
+    if (await isCdpMode()) {
+      try {
+        const dir=String(p(args,'direction')||'down'); const amount=Number(p(args,'amount')||600); const id=p(args,'id');
+        const res=await cdpTools.cdpScroll(((ctx as any).agentId ?? null), dir, amount, id!=null?Number(id):undefined);
+        return ok(res);
+      } catch {}
+    }
+    return ok(await browserScroll(args));
+  },
 
   // Embedded browser — internals
   browser_evaluate: async (args) => ok(await browserEvaluateScript(args)),
@@ -429,7 +634,11 @@ const HANDLERS: Record<string, Handler> = {
     const chatId = ctx.chatId;
     if (!chatId) throw new Error('task_add requires an active chat (no chatId in context)');
     const { taskStore } = await import('./taskStore');
-    // Verbose validation — prevents LLM overthinking by forcing copy-paste context.
+    // Verbose validation — adaptive for small models (gemma:4b etc.) that struggle with verbosity
+    const modelId = String(ctx.getModel?.()?.id || '').toLowerCase();
+    const isSmall = /gemma|4b|2b|1b|mini|small/i.test(modelId) || modelId.includes('e4b');
+    const descMin = isSmall ? 40 : 120;
+    const ctxMin = isSmall ? 20 : 80;
     for (let i = 0; i < raw.length; i++) {
       const t: any = raw[i];
       const title = String(t.title || '').trim();
@@ -437,9 +646,9 @@ const HANDLERS: Record<string, Handler> = {
       const ctxStr = String(t.context || '').trim();
       const acc = t.acceptanceCriteria || t.acceptance || [];
       if (!title) throw new Error(`task_add: tasks[${i}].title is required (imperative ≤15 words)`);
-      if (desc.length < 120) throw new Error(`task_add: tasks[${i}].description must be verbose ≥120 chars (why+how), got ${desc.length}. Rewrite more verbosely.`);
-      if (ctxStr.length < 80) throw new Error(`task_add: tasks[${i}].context must be ≥80 chars verbatim (paths/commands/URLs), got ${ctxStr.length}. Include copy-paste ready context.`);
-      if (!Array.isArray(acc) || acc.length < 2) throw new Error(`task_add: tasks[${i}].acceptanceCriteria requires ≥2 observable checkboxes, got ${Array.isArray(acc)?acc.length:0}`);
+      if (desc.length < descMin) throw new Error(`task_add: tasks[${i}].description must be verbose ≥${descMin} chars (why+how), got ${desc.length}. Rewrite more verbosely.`);
+      if (ctxStr.length < ctxMin) throw new Error(`task_add: tasks[${i}].context must be ≥${ctxMin} chars verbatim (paths/commands/URLs), got ${ctxStr.length}. Include copy-paste ready context.`);
+      if (!Array.isArray(acc) || acc.length < (isSmall ? 1 : 2)) throw new Error(`task_add: tasks[${i}].acceptanceCriteria requires ≥${isSmall?1:2} observable checkboxes, got ${Array.isArray(acc)?acc.length:0}`);
     }
     const items = raw.map((t: any) => ({
       title: String(t.title).trim(),
@@ -567,21 +776,29 @@ const runOne = async (raw: string, ctx: ToolContext): Promise<NamedToolResult> =
   }
 };
 
+// Module-global chains so cross-batch same-target calls stay ordered
+const globalChains = new Map<string, Promise<void>>();
+
 // Executes a batch of tool calls. Independent calls run concurrently;
-// browser/desktop calls are serialized in arrival order through shared locks
-// (also honored across sub-agents, since the lock map is module-global).
+// browser/desktop calls are serialized per-target (CDP) or per-class (webview).
+// Uses lockKeyFor when available to allow parallel CDP Targets.
 export const executeToolCalls = async (rawCalls: string[], ctx: ToolContext): Promise<NamedToolResult[]> => {
   const results: NamedToolResult[] = new Array(rawCalls.length);
-  const chains = new Map<string, Promise<void>>();
+  const localChains = new Map<string, Promise<void>>();
 
   await Promise.all(rawCalls.map((raw, idx) => {
     const { name } = parseToolCall(raw);
-    const cls = lockClassFor(name);
+    const key = (typeof lockKeyFor !== 'undefined' ? lockKeyFor(name, ctx) : lockClassFor(name));
     const job = () => runOne(raw, ctx).then(r => { results[idx] = r; });
-    if (!cls) return job();
-    const prev = chains.get(cls) ?? Promise.resolve();
+    if (!key) return job();
+    const prevLocal = localChains.get(key) ?? Promise.resolve();
+    const prevGlobal = globalChains.get(key) ?? Promise.resolve();
+    const prev = Promise.all([prevLocal, prevGlobal]).then(()=>{});
     const next = prev.then(job, job);
-    chains.set(cls, next);
+    localChains.set(key, next);
+    globalChains.set(key, next);
+    const cleanup = () => { if (globalChains.get(key) === next) globalChains.delete(key); };
+    next.then(cleanup, cleanup);
     return next;
   }));
 

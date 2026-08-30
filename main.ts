@@ -935,6 +935,87 @@ ipcMain.handle('find-in-page', async (event, { webContentsId, text, forward = tr
   }
 });
 
+// ─── Chromium CDP (external browser) ────────────────────────────────────────
+ipcMain.handle('dialog-show-open', async (_e, opts) => {
+  try {
+    const win = BrowserWindow.getFocusedWindow() || BrowserWindow.getAllWindows()[0] || null;
+    const res = await dialog.showOpenDialog(win as any, opts);
+    return res;
+  } catch (e: any) { return { canceled: true, filePaths: [], error: e?.message }; }
+});
+
+ipcMain.handle('chrome-launch', async (_e, opts: { chromiumPath?: string; cdpPort?: number; launchArgs?: string; shortcutPath?: string }) => {
+  try {
+    const mod: any = await import('./browser/launcher.js');
+    const r = await mod.launchChromium(opts || {});
+    return r;
+  } catch (e: any) { return { success:false, error: e?.message || String(e) }; }
+});
+ipcMain.handle('chrome-force-relaunch', async (_e, opts: { chromiumPath?: string; cdpPort?: number; launchArgs?: string }) => {
+  try {
+    const mod: any = await import('./browser/launcher.js');
+    const r = await mod.killAndRelaunch(opts || {});
+    return r;
+  } catch (e: any) { return { success:false, error: e?.message || String(e) }; }
+});
+ipcMain.handle('chrome-status', async (_e, port?: number) => {
+  try {
+    const mod: any = await import('./browser/launcher.js');
+    const p = Number(port) > 0 ? Number(port) : 9222;
+    return await mod.chromeStatus(p);
+  } catch (e: any) { return { listening:false, error:e?.message }; }
+});
+ipcMain.handle('chrome-list-targets', async (_e, port?: number) => {
+  try {
+    const mod: any = await import('./browser/launcher.js');
+    const p = Number(port) > 0 ? Number(port) : 9222;
+    const list = await mod.chromeListTargets(p);
+    return { success:true, targets:list };
+  } catch (e: any) { return { success:false, error:e?.message }; }
+});
+ipcMain.handle('cdp-new-target', async (_e, opts: { port?: number; url?: string }) => {
+  try {
+    const mod: any = await import('./browser/cdp.js');
+    const p = Number(opts?.port) > 0 ? Number(opts.port) : 9222;
+    const t = await mod.cdpNewTarget(p, opts?.url || 'about:blank');
+    return { success:true, target:t };
+  } catch (e: any) { return { success:false, error:e?.message }; }
+});
+ipcMain.handle('cdp-close-target', async (_e, opts: { port?: number; targetId: string }) => {
+  try {
+    const mod: any = await import('./browser/cdp.js');
+    const p = Number(opts?.port) > 0 ? Number(opts.port) : 9222;
+    await mod.cdpCloseTarget(p, opts.targetId);
+    mod.closeSession(opts.targetId);
+    return { success:true };
+  } catch (e: any) { return { success:false, error:e?.message }; }
+});
+ipcMain.handle('cdp-send', async (_e, opts: { port?: number; targetId: string; wsUrl?: string; method: string; params?: any }) => {
+  try {
+    const mod: any = await import('./browser/cdp.js');
+    const p = Number(opts?.port) > 0 ? Number(opts.port) : 9222;
+    let wsUrl = opts.wsUrl;
+    if (!wsUrl) wsUrl = await mod.resolveWsUrl(p, opts.targetId);
+    const result = await mod.genericCdpSend(wsUrl, opts.targetId, opts.method, opts.params);
+    return { success:true, result };
+  } catch (e: any) { return { success:false, error:e?.message }; }
+});
+// Generic CDP command — used by renderer to drive live-profile targets.
+// Each tool call is a CDP Target; Input/Page/Runtime/Storage domains map 1:1
+// to old browser-send-input-event / browser-capture / cookies handlers.
+// Screenshots: Page.captureScreenshot; Cursor: Input.dispatchMouseEvent;
+// Typing: Input.insertText; Navigation: Page.navigate; Evaluate: Runtime.evaluate.
+ipcMain.handle('cdp-command', async (_e, opts: { port?: number; targetId: string; wsUrl?: string; method: string; params?: any }) => {
+  try {
+    const mod: any = await import('./browser/cdp.js');
+    const p = Number(opts?.port) > 0 ? Number(opts.port) : 9222;
+    let wsUrl = (opts as any).wsUrl || opts.wsUrl;
+    if (!wsUrl) wsUrl = await mod.resolveWsUrl(p, opts.targetId);
+    const result = await mod.genericCdpSend(wsUrl, opts.targetId, opts.method, opts.params);
+    return { success:true, result };
+  } catch (e: any) { return { success:false, error:e?.message }; }
+});
+
 // Downloads a URL through the agent browser session, waiting for completion.
 ipcMain.handle('browser-download', async (event, { webContentsId, url, savePath }) => {
   try {

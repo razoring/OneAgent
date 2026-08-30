@@ -158,6 +158,40 @@ export const isWebSearchConfigured = (): boolean => {
   return endpoint.trim().length > 0;
 };
 
+export interface BrowserSettings {
+  chromiumPath: string;
+  cdpPort: number;
+  launchArgs: string;
+}
+
+export const DEFAULT_BROWSER_SETTINGS: BrowserSettings = {
+  chromiumPath: '',
+  cdpPort: 9222,
+  launchArgs: '',
+};
+
+export const getBrowserSettings = (): BrowserSettings => {
+  const stored = localStorage.getItem('browser_settings');
+  if (stored) {
+    try {
+      const parsed = JSON.parse(stored) as Partial<BrowserSettings>;
+      return {
+        chromiumPath: parsed.chromiumPath || '',
+        cdpPort: Number(parsed.cdpPort) > 0 ? Number(parsed.cdpPort) : 9222,
+        launchArgs: parsed.launchArgs || '',
+      };
+    } catch (e) {
+      console.error('Failed to parse browser settings', e);
+    }
+  }
+  return DEFAULT_BROWSER_SETTINGS;
+};
+
+export const saveBrowserSettings = (settings: BrowserSettings) => {
+  localStorage.setItem('browser_settings', JSON.stringify(settings));
+  window.dispatchEvent(new Event('browser-settings-updated'));
+};
+
 // Warm a model into provider memory with a minimal completion to improve TTFT.
 export const primeModel = async (model: LLMModel): Promise<void> => {
   const provider = getProviders().find(p => p.id === model.provider);

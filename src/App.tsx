@@ -2,7 +2,6 @@ import { useState } from 'react';
 import TitleBar from './components/TitleBar';
 import Sidebar from './components/Sidebar';
 import ChatArea from './components/ChatArea';
-import AgentBrowser from './components/AgentBrowser';
 import RightSidebar from './components/RightSidebar';
 
 function App() {
@@ -25,16 +24,7 @@ function App() {
         <RightSidebar open={rightSidebarOpen} />
       </div>
 
-      {/* Persistent browser session. Lives off-screen so agent tools work
-          without any UI; the Live Browser panel moves this node into itself
-          (appendChild — no remount) to make it visible. */}
-      <div
-        id="oneagent-browser-hidden"
-        style={{ position: 'fixed', left: -20000, top: 0, width: 1280, height: 800, pointerEvents: 'none', zIndex: -1 }}
-        aria-hidden
-      >
-        <AgentBrowser />
-      </div>
+      {/* External Chromium via CDP (live profile) — no embedded webview. Browser button in sidebar launches Chrome with --remote-debugging-port. */}
     </div>
   );
 }

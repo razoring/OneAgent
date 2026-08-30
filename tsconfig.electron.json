@@ -8,5 +8,5 @@
     "strict": true,
     "esModuleInterop": true
   },
-  "include": ["main.ts", "preload.ts", "rag.ts"]
+  "include": ["main.ts", "preload.ts", "rag.ts", "browser/**/*"]
 }
