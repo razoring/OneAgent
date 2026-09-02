@@ -12,16 +12,22 @@ const BrowserShell = () => {
     
     (window as any).activeWebview = webview;
 
-    const handleDidFinishLoad = () => {
-      setInputUrl(webview.getURL());
+    const handleUrlSync = () => {
+      try { setInputUrl(webview.getURL()); } catch {}
     };
 
-    webview.addEventListener('did-finish-load', handleDidFinishLoad);
+    webview.addEventListener('did-finish-load', handleUrlSync);
+    webview.addEventListener('did-navigate', handleUrlSync);
+    webview.addEventListener('did-navigate-in-page', handleUrlSync);
+    webview.addEventListener('did-redirect-navigation', handleUrlSync);
     return () => {
       if ((window as any).activeWebview === webview) {
         (window as any).activeWebview = null;
       }
-      webview.removeEventListener('did-finish-load', handleDidFinishLoad);
+      webview.removeEventListener('did-finish-load', handleUrlSync);
+      webview.removeEventListener('did-navigate', handleUrlSync);
+      webview.removeEventListener('did-navigate-in-page', handleUrlSync);
+      webview.removeEventListener('did-redirect-navigation', handleUrlSync);
     };
   }, []);
 

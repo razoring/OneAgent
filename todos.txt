@@ -9,3 +9,6 @@ agent tool (copy/paste)
 autonomous import from chrome profile.
 browser system -- use opencode sessions related to browser to spawn a chrome browser with remote debugging / no debug banner, no mcp
 version control
+fix model saving, vram counter, and parameter saving
+update browser design.
+multi-model design

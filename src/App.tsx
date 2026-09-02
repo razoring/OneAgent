@@ -1,12 +1,36 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import TitleBar from './components/TitleBar';
 import Sidebar from './components/Sidebar';
 import ChatArea from './components/ChatArea';
 import RightSidebar from './components/RightSidebar';
+import BrowserChrome from './components/BrowserChrome';
 
 function App() {
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [rightSidebarOpen, setRightSidebarOpen] = useState(false);
+  const [standaloneMode, setStandaloneMode] = useState(false);
+
+  useEffect(() => {
+    const handleStandalone = () => setStandaloneMode(true);
+    window.addEventListener('enter-standalone-browser', handleStandalone as EventListener);
+    return () => {
+      window.removeEventListener('enter-standalone-browser', handleStandalone as EventListener);
+    };
+  }, []);
+
+  const handleExitStandalone = async () => {
+    const api: any = (window as any).electronAPI;
+    if (api?.standaloneLeave) await api.standaloneLeave().catch(()=>{});
+    setStandaloneMode(false);
+  };
+
+  if (standaloneMode) {
+    return (
+      <div className="flex flex-col h-screen w-screen bg-background text-white font-sans overflow-hidden">
+        <BrowserChrome agentId="__standalone__" onExit={handleExitStandalone} />
+      </div>
+    );
+  }
 
   return (
     <div className="flex flex-col h-screen w-screen bg-background text-white font-sans overflow-hidden">
@@ -27,8 +51,6 @@ function App() {
         
         <RightSidebar open={rightSidebarOpen} />
       </div>
-
-      {/* External Chromium via CDP (live profile) — no embedded webview. Browser button in sidebar launches Chrome with --remote-debugging-port. */}
     </div>
   );
 }

@@ -31,6 +31,7 @@ export default function ScreenshotCarousel({ agentId, chatId }: { agentId: strin
     const api: any = (window as any).electronAPI;
     if (api && api.takeControl) {
       await api.takeControl(agentId);
+      window.dispatchEvent(new CustomEvent('enter-browser-mode', { detail: agentId }));
     }
   };
 

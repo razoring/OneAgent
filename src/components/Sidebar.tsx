@@ -154,26 +154,21 @@ const ChatRow = ({ meta, activeId, onSelect }: ChatRowProps) => {
   );
 };
 
-// ─── Browser CDP launcher ────────────────────────────────────────────────────
-const BrowserButton: React.FC = () => {
-  const handleTakeControl = async () => {
+const StandaloneBrowserButton: React.FC = () => {
+  const handleStandalone = async () => {
     try {
-      const activeChatId = chatStore.getActiveId();
-      if (!activeChatId) return;
       const api: any = (window as any).electronAPI;
-      if (api && api.takeControl) {
-        await api.takeControl(activeChatId);
-      }
+      if (api?.standaloneEnter) await api.standaloneEnter().catch(() => {});
+      window.dispatchEvent(new CustomEvent('enter-standalone-browser'));
     } catch (e: any) {
-      alert('Take control failed: ' + (e?.message || String(e)));
+      alert('Open browser failed: ' + (e?.message || String(e)));
     }
   };
-
   return (
     <button
-      onClick={handleTakeControl}
+      onClick={handleStandalone}
       className="flex items-center gap-3 w-full hover:bg-surfaceElevated transition-colors rounded-2xl p-3 text-left text-textSecondary"
-      title="Take Control of the active chat's integrated browser"
+      title="Open browser — shared with agents (same cookies, agents can access your tabs)"
     >
       <Globe size={18} />
       <span className="flex-1">Browser</span>
@@ -257,7 +252,7 @@ const Sidebar = () => {
 
       {/* Bottom Section */}
       <div className="px-4 pb-4 space-y-1.5">
-        <BrowserButton />
+        <StandaloneBrowserButton />
         <button className="flex items-center gap-3 w-full hover:bg-surfaceElevated transition-colors rounded-2xl p-3 text-left text-textSecondary">
           <LayoutGrid size={18} />
           Models

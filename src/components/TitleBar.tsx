@@ -8,10 +8,10 @@ const isWindows = proc?.platform === 'win32';
 // OS: macOS traffic lights overlay the left edge, Windows titleBarOverlay
 // renders native buttons on the right — so this bar reserves space for them
 // (via env(titlebar-area-*)) and never implements window functions.
-const TitleBar = ({ sidebarOpen, onToggleSidebar }: { sidebarOpen: boolean, onToggleSidebar?: () => void }) => {
+const TitleBar = ({ sidebarOpen, onToggleSidebar, children }: { sidebarOpen?: boolean, onToggleSidebar?: () => void, children?: React.ReactNode }) => {
   return (
     <div
-      className="h-9 shrink-0 drag-region bg-background flex items-center gap-2 z-50 select-none"
+      className="h-9 shrink-0 drag-region bg-background flex items-center gap-2 z-50 select-none relative"
       style={
         isWindows
           ? { paddingLeft: 'env(titlebar-area-x, 0px)', width: 'env(titlebar-area-width, 100%)' }
@@ -27,6 +27,7 @@ const TitleBar = ({ sidebarOpen, onToggleSidebar }: { sidebarOpen: boolean, onTo
           {sidebarOpen ? <PanelLeftClose size={16} /> : <PanelLeftOpen size={16} />}
         </button>
       )}
+      {children}
     </div>
   );
 };

@@ -77,6 +77,10 @@ const AgentBrowser: React.FC = () => {
       if (agentBrowserStore.getTerminatedSnapshot()) return;
       agentBrowserStore.navigate(webview.getURL());
     };
+    const handleUrlChange = () => {
+      if (agentBrowserStore.getTerminatedSnapshot()) return;
+      try { agentBrowserStore.navigate(webview.getURL()); } catch {}
+    };
 
     // -3 = ERR_ABORTED: a navigation was superseded (expected when the agent
     // redirects mid-load). Subframe loads report isMainFrame=false. Ignore both.
@@ -87,6 +91,9 @@ const AgentBrowser: React.FC = () => {
 
     webview.addEventListener('dom-ready', handleDomReady);
     webview.addEventListener('did-finish-load', handleDidFinishLoad);
+    webview.addEventListener('did-navigate', handleUrlChange);
+    webview.addEventListener('did-navigate-in-page', handleUrlChange);
+    webview.addEventListener('did-redirect-navigation', handleUrlChange);
     webview.addEventListener('did-fail-load', handleDidFailLoad);
     // The session root is moved between the hidden off-screen host and the
     // Live Browser panel via appendChild (DOM move, no remount). Re-sync the
@@ -107,6 +114,9 @@ const AgentBrowser: React.FC = () => {
       }
       webview.removeEventListener('dom-ready', handleDomReady);
       webview.removeEventListener('did-finish-load', handleDidFinishLoad);
+      webview.removeEventListener('did-navigate', handleUrlChange);
+      webview.removeEventListener('did-navigate-in-page', handleUrlChange);
+      webview.removeEventListener('did-redirect-navigation', handleUrlChange);
       webview.removeEventListener('did-fail-load', handleDidFailLoad);
       window.removeEventListener('oneagent-browser-slot-change', handleSlotChange);
       resizeObserver.disconnect();
