@@ -3,6 +3,7 @@ import TitleBar from './components/TitleBar';
 import Sidebar from './components/Sidebar';
 import ChatArea from './components/ChatArea';
 import RightSidebar from './components/RightSidebar';
+import ScreenshotCarousel from './components/ScreenshotCarousel';
 
 function App() {
   const [sidebarOpen, setSidebarOpen] = useState(true);
@@ -15,12 +16,19 @@ function App() {
         onToggleSidebar={() => setSidebarOpen(o => !o)}
       />
       <div className="flex flex-1 min-h-0">
-        <div className={`overflow-hidden transition-all duration-300 ease-in-out ${sidebarOpen ? 'w-[280px]' : 'w-0'}`}>
+        <div className={`overflow-hidden transition-all duration-300 ease-in-out flex-shrink-0 ${sidebarOpen ? 'w-[280px]' : 'w-0'}`}>
           <Sidebar />
         </div>
-        <main className="flex-1 flex relative p-2 min-w-0">
-          <ChatArea onToggleSettings={() => setRightSidebarOpen(o => !o)} />
+        
+        <main className="flex-1 flex relative p-2 gap-2 min-w-0">
+          <div className="flex-1 min-w-0 max-w-[50%] flex flex-col border border-white/5 bg-black/10 rounded-xl overflow-hidden shadow-2xl">
+            <ChatArea onToggleSettings={() => setRightSidebarOpen(o => !o)} />
+          </div>
+          <div className="flex-1 min-w-0 flex flex-col border border-white/5 bg-black/40 rounded-xl overflow-hidden shadow-2xl relative">
+            <ScreenshotCarousel />
+          </div>
         </main>
+        
         <RightSidebar open={rightSidebarOpen} />
       </div>
 

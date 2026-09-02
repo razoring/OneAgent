@@ -1,4 +1,5 @@
-import { app, BrowserWindow, ipcMain, nativeImage, shell, desktopCapturer, screen, webContents, dialog, protocol, net } from 'electron';
+import { app, BrowserWindow, BaseWindow, WebContentsView, session, ipcMain, nativeImage, shell, desktopCapturer, screen, webContents, dialog, protocol, net } from 'electron';
+import { ExtensionsManager } from 'electron-chrome-extensions';
 import * as path from 'path';
 import * as fs from 'fs';
 import * as crypto from 'crypto';
@@ -13,15 +14,20 @@ protocol.registerSchemesAsPrivileged([
 ]);
 
 
+let mainWindow: BaseWindow | null = null;
+let reactView: WebContentsView | null = null;
+const agentViews = new Map<string, WebContentsView>();
+let activeAgentViewId: string | null = null;
+let extensionsManager: ExtensionsManager | null = null;
+
 const createWindow = () => {
-  // Native-drawn window chrome per platform: macOS keeps its traffic lights
-  // (titleBarStyle hidden), Windows renders native min/max/close on the right
-  // via titleBarOverlay — colored to match the app background (#171717).
   const isMac = process.platform === 'darwin';
   const isWindows = process.platform === 'win32';
 
-  // Create the browser window.
-  const mainWindow = new BrowserWindow({
+  const extSession = session.fromPartition('persist:oneagent_browser');
+  extensionsManager = new ExtensionsManager({ session: extSession });
+
+  mainWindow = new BaseWindow({
     width: 1200,
     height: 800,
     autoHideMenuBar: true,
@@ -33,29 +39,204 @@ const createWindow = () => {
             titleBarOverlay: { color: '#171717', symbolColor: '#d1d5db', height: 36 }
           }
         : {}),
-    webPreferences: {
-      preload: path.join(import.meta.dirname, 'preload.js'),
-      nodeIntegration: true,
-      contextIsolation: false,
-      webviewTag: true,
-    },
   });
 
   mainWindow.setMenu(null);
 
-  mainWindow.webContents.on('console-message', (event, level, message, line, sourceId) => {
+  reactView = new WebContentsView({
+    webPreferences: {
+      preload: path.join(import.meta.dirname, 'preload.js'),
+      nodeIntegration: true,
+      contextIsolation: false,
+    },
+  });
+
+  mainWindow.contentView.addChildView(reactView);
+  
+  const resizeViews = () => {
+    if (!mainWindow) return;
+    const [width, height] = mainWindow.getContentSize();
+    const bounds = { x: 0, y: 0, width, height };
+    if (reactView) reactView.setBounds(bounds);
+    for (const view of agentViews.values()) {
+      view.setBounds(bounds);
+    }
+  };
+
+  mainWindow.on('resize', resizeViews);
+  mainWindow.once('ready-to-show', resizeViews);
+
+  reactView.webContents.on('console-message', (event, level, message, line, sourceId) => {
     const file = sourceId ? sourceId.split('/').pop() : '?';
     console.log(`[Renderer Console]: ${message} (${file}:${line})`);
   });
 
-  // Load the React app
   if (!app.isPackaged) {
-    mainWindow.loadURL('http://localhost:5173');
-    // mainWindow.webContents.openDevTools();
+    reactView.webContents.loadURL('http://localhost:5173');
   } else {
-    mainWindow.loadFile(path.join(import.meta.dirname, '../dist/index.html'));
+    reactView.webContents.loadFile(path.join(import.meta.dirname, '../dist/index.html'));
   }
 };
+
+ipcMain.handle('create-agent-browser', async (event, { agentId, initialUrl }) => {
+  if (agentViews.has(agentId)) return { success: true, webContentsId: agentViews.get(agentId)!.webContents.id };
+  
+  const extSession = session.fromPartition('persist:oneagent_browser');
+  const view = new WebContentsView({
+    webPreferences: {
+      session: extSession,
+      contextIsolation: true,
+      nodeIntegration: false,
+    }
+  });
+
+  if (mainWindow) {
+    const [width, height] = mainWindow.getContentSize();
+    view.setBounds({ x: 0, y: 0, width, height });
+  }
+
+  agentViews.set(agentId, view);
+
+  // We don't add it to mainWindow.contentView yet (Spectator Mode).
+  // It runs headlessly/hidden.
+  
+  if (initialUrl) {
+    view.webContents.loadURL(initialUrl);
+  }
+
+  return { success: true, webContentsId: view.webContents.id };
+});
+
+ipcMain.handle('destroy-agent-browser', async (event, { agentId }) => {
+  const view = agentViews.get(agentId);
+  if (!view) return { success: true };
+  
+  if (activeAgentViewId === agentId && mainWindow) {
+    mainWindow.contentView.removeChildView(view);
+    if (reactView) mainWindow.contentView.addChildView(reactView);
+    activeAgentViewId = null;
+  }
+  
+  // Close webcontents properly if possible
+  if (!view.webContents.isDestroyed()) {
+    view.webContents.close();
+  }
+  agentViews.delete(agentId);
+  return { success: true };
+});
+
+let activeAgentViewId: string | null = null;
+let returnOverlayView: WebContentsView | null = null;
+
+ipcMain.on('take-control', (event, agentId) => {
+  if (!mainWindow) return;
+  const view = agentViews.get(agentId);
+  if (!view) return;
+
+  // Hide react UI, show agent view
+  if (reactView) mainWindow.contentView.removeChildView(reactView);
+  if (activeAgentViewId && agentViews.has(activeAgentViewId)) {
+    mainWindow.contentView.removeChildView(agentViews.get(activeAgentViewId)!);
+  }
+  if (returnOverlayView) {
+    mainWindow.contentView.removeChildView(returnOverlayView);
+    returnOverlayView = null;
+  }
+  
+  mainWindow.contentView.addChildView(view);
+  activeAgentViewId = agentId;
+
+  // Ensure extensions tab is synced to this view
+  if (extensionsManager) {
+    extensionsManager.selectTab(view.webContents);
+  }
+
+  // Create native floating return button overlay
+  returnOverlayView = new WebContentsView({
+    webPreferences: {
+      preload: path.join(__dirname, 'preload.js'),
+      transparent: true
+    }
+  });
+  
+  const [w, h] = mainWindow.getContentSize();
+  returnOverlayView.setBounds({ x: w / 2 - 100, y: h - 80, width: 200, height: 60 });
+  returnOverlayView.setBackgroundColor('#00000000'); // transparent
+  
+  const html = `
+    <html>
+      <body style="margin:0;overflow:hidden;display:flex;justify-content:center;align-items:center;height:100vh;">
+        <button onclick="window.electronAPI.returnToChat()" style="background:#ff3b30;color:white;border:none;padding:12px 24px;border-radius:30px;font-family:sans-serif;font-weight:bold;font-size:14px;cursor:pointer;box-shadow:0 4px 15px rgba(0,0,0,0.5);transition:transform 0.1s;">
+          Return to Chat
+        </button>
+        <script>
+          const btn = document.querySelector('button');
+          btn.addEventListener('mousedown', () => btn.style.transform = 'scale(0.95)');
+          btn.addEventListener('mouseup', () => btn.style.transform = 'scale(1)');
+          btn.addEventListener('mouseleave', () => btn.style.transform = 'scale(1)');
+        </script>
+      </body>
+    </html>
+  `;
+  returnOverlayView.webContents.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`);
+  mainWindow.contentView.addChildView(returnOverlayView);
+});
+
+ipcMain.on('return-to-chat', () => {
+  if (!mainWindow) return;
+  if (activeAgentViewId && agentViews.has(activeAgentViewId)) {
+    mainWindow.contentView.removeChildView(agentViews.get(activeAgentViewId)!);
+  }
+  activeAgentViewId = null;
+  
+  if (returnOverlayView) {
+    mainWindow.contentView.removeChildView(returnOverlayView);
+    returnOverlayView = null;
+  }
+  
+  if (reactView) mainWindow.contentView.addChildView(reactView);
+});
+
+// Generic internal CDP dispatcher for WebContentsView targets
+ipcMain.handle('cdp-send', async (event, { webContentsId, method, params }) => {
+  const view = Array.from(agentViews.values()).find(v => v.webContents.id === webContentsId);
+  const wc = view ? view.webContents : webContents.fromId(webContentsId);
+  if (!wc) return { success: false, error: 'WebContents not found' };
+
+  try {
+    if (!wc.debugger.isAttached()) {
+      wc.debugger.attach('1.3');
+      
+      // Auto-enable standard domains on attach
+      wc.debugger.sendCommand('Page.enable').catch(() => {});
+      wc.debugger.sendCommand('Runtime.enable').catch(() => {});
+      wc.debugger.sendCommand('Network.enable').catch(() => {});
+      
+      // Setup console message routing to IPC
+      wc.debugger.on('message', (event, method, params) => {
+        if (method === 'Runtime.consoleAPICalled') {
+          // Send to renderer for logging
+          if (reactView) {
+            reactView.webContents.send('agent-console-message', { webContentsId, type: params.type, args: params.args });
+          }
+        } else if (method === 'Network.responseReceived') {
+          const res = params.response;
+          if (res && res.status >= 400 && reactView) {
+            reactView.webContents.send('agent-network-error', { webContentsId, url: res.url, status: res.status });
+          }
+        } else if (method === 'Page.javascriptDialogOpening') {
+          // Auto-handle dialogs
+          wc.debugger.sendCommand('Page.handleJavaScriptDialog', { accept: true }).catch(() => {});
+        }
+      });
+    }
+
+    const result = await wc.debugger.sendCommand(method as any, params);
+    return { success: true, result };
+  } catch (err: any) {
+    return { success: false, error: err.message };
+  }
+});
 
 ipcMain.on('window-minimize', () => {
   BrowserWindow.getFocusedWindow()?.minimize();

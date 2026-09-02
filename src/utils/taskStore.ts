@@ -123,27 +123,62 @@ export const taskStore = {
       updatedAt: now,
     }));
     tasksByChat.set(chatId, next);
+    tasksByChat.set(chatId, next);
     emit(chatId);
     queueSave(chatId);
     return [...next];
   },
 
-  update(chatId: string, taskId: string, patch: Partial<Pick<TaskNode, 'status' | 'resultSummary'>>): TaskNode | null {
-    const list = tasksByChat.get(chatId);
-    if (!list) return null;
-    const idx = list.findIndex(t => t.id === taskId);
-    if (idx === -1) return null;
-    const cur = list[idx];
-    const next: TaskNode = {
-      ...cur,
-      ...patch,
-      updatedAt: Date.now(),
-      ...(patch.status === 'done' || patch.status === 'error' ? { completedAt: Date.now() } : {}),
+  add(chatId: string, item: Omit<TaskNode, 'id' | 'chatId' | 'status' | 'createdAt' | 'updatedAt'>): TaskNode {
+    const list = tasksByChat.get(chatId) || [];
+    const now = Date.now();
+    const task: TaskNode = {
+      id: `task-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 5)}`,
+      chatId,
+      title: String(item.title).trim().slice(0, 120),
+      description: String(item.description).trim(),
+      goal: String(item.goal || '').trim(),
+      assumptions: Array.isArray(item.assumptions) ? item.assumptions.map(String) : [],
+      acceptanceCriteria: Array.isArray(item.acceptanceCriteria) ? item.acceptanceCriteria.map(String) : [],
+      toolHint: (item.toolHint as TaskNode['toolHint']) || 'mixed',
+      context: String(item.context || '').trim(),
+      dependsOn: Array.isArray(item.dependsOn) ? item.dependsOn.map(String) : [],
+      status: 'queued' as TaskStatus,
+      createdAt: now,
+      updatedAt: now,
+      agentId: item.agentId
     };
-    list[idx] = next;
+    list.push(task);
+    tasksByChat.set(chatId, list);
     emit(chatId);
     queueSave(chatId);
-    return next;
+    return task;
+  },
+
+  update(chatId: string, id: string, updates: Partial<TaskNode>) {
+    const list = tasksByChat.get(chatId);
+    if (!list) return;
+    const i = list.findIndex(t => t.id === id);
+    if (i < 0) return;
+    list[i] = { ...list[i], ...updates, updatedAt: Date.now() };
+    if (updates.status === 'done' || updates.status === 'error') {
+      list[i].completedAt = list[i].completedAt || Date.now();
+    }
+    queueSave(chatId);
+    emit(chatId);
+  },
+
+  updateByAgent(chatId: string, agentId: string, updates: Partial<TaskNode>) {
+    const list = tasksByChat.get(chatId);
+    if (!list) return;
+    const i = list.findIndex(t => t.agentId === agentId);
+    if (i < 0) return;
+    list[i] = { ...list[i], ...updates, updatedAt: Date.now() };
+    if (updates.status === 'done' || updates.status === 'error') {
+      list[i].completedAt = list[i].completedAt || Date.now();
+    }
+    queueSave(chatId);
+    emit(chatId);
   },
 
   // User path: Clear all for a chat (RightSidebar button). LLM never calls this.

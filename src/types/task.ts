@@ -20,4 +20,5 @@ export interface TaskNode {
   updatedAt: number;
   completedAt?: number;
   resultSummary?: string;
+  agentId?: string;
 }

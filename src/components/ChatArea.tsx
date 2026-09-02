@@ -535,6 +535,7 @@ const ChatArea = ({ onToggleSettings }: { onToggleSettings?: () => void }) => {
     chatId: homeChatIdRef.current,
     getAnnotations: () => messages.flatMap(m => (m.role === 'assistant' ? (m.comments || []) : [])),
     spawnAgent: (spec) => spawnSubAgent(spec, {
+      chatId: homeChatIdRef.current || chatStore.getActiveId()!,
       requestApproval,
       getModel: () => activeModelRef.current || lastUsedModel,
       signal: abortControllerRef.current?.signal

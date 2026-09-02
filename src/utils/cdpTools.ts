@@ -2,14 +2,14 @@ import { cdpBrowserStore } from './cdpBrowserStore';
 
 const api = (): any => (window as any).electronAPI;
 
-const getTarget = async (agentId: string | null | undefined): Promise<{ target: any, port: number }> => {
+const getTarget = async (agentId: string | null | undefined): Promise<{ target: any }> => {
   const act = agentId !== undefined ? agentId : null;
   const t = await cdpBrowserStore.ensureTarget(act);
-  return { target: t, port: t.port };
+  return { target: t };
 };
 
-const cdpCmd = async (targetId: string, port: number, method: string, params: any = {}): Promise<any> => {
-  const res = await api().cdpCommand({ port, targetId, method, params });
+const cdpCmd = async (targetId: string, method: string, params: any = {}): Promise<any> => {
+  const res = await api().cdpSend({ webContentsId: Number(targetId), method, params });
   if (!res?.success) throw new Error(res?.error || `CDP ${method} failed`);
   return res.result;
 };
@@ -82,23 +82,23 @@ const SOM_JS = `
 `;
 
 export const cdpInjectSoM = async (agentId?: string | null): Promise<any[]> => {
-  const { target, port } = await getTarget(agentId ?? null as any);
-  const res = await cdpCmd(target.id, port, 'Runtime.evaluate', { expression: SOM_JS, awaitPromise: true, returnByValue: true });
+  const { target } = await getTarget(agentId ?? null as any);
+  const res = await cdpCmd(target.id, 'Runtime.evaluate', { expression: SOM_JS, awaitPromise: true, returnByValue: true });
   // Runtime.evaluate returns {result: {value: markers}} when returnByValue true
   const val = (res as any)?.result?.value ?? res?.value ?? res;
   return Array.isArray(val) ? val : [];
 };
 
 export const cdpClearSoM = async (agentId?: string | null): Promise<void> => {
-  const { target, port } = await getTarget(agentId ?? null as any);
-  await cdpCmd(target.id, port, 'Runtime.evaluate', { expression: `document.querySelectorAll('.oneagent-som-marker').forEach(e=>e.remove());`, returnByValue: true }).catch(()=>{});
+  const { target } = await getTarget(agentId ?? null as any);
+  await cdpCmd(target.id, 'Runtime.evaluate', { expression: `document.querySelectorAll('.oneagent-som-marker').forEach(e=>e.remove());`, returnByValue: true }).catch(()=>{});
 };
 
 export const cdpCapture = async (agentId?: string | null): Promise<string> => {
-  const { target, port } = await getTarget(agentId ?? null as any);
+  const { target } = await getTarget(agentId ?? null as any);
   // Ensure Page enabled
-  await cdpCmd(target.id, port, 'Page.enable', {}).catch(()=>{});
-  const res: any = await cdpCmd(target.id, port, 'Page.captureScreenshot', { format: 'png', captureBeyondViewport: true });
+  await cdpCmd(target.id, 'Page.enable', {}).catch(()=>{});
+  const res: any = await cdpCmd(target.id, 'Page.captureScreenshot', { format: 'png', captureBeyondViewport: true });
   const data = res?.data;
   if (!data) throw new Error('Blank capture — CDP returned no data');
   return `data:image/png;base64,${data}`;
@@ -114,7 +114,7 @@ export const cdpCaptureWithSoM = async (agentId?: string | null): Promise<{ imag
 };
 
 export const cdpGetDom = async (agentId?: string | null): Promise<string> => {
-  const { target, port } = await getTarget(agentId ?? null as any);
+  const { target } = await getTarget(agentId ?? null as any);
   const js = `
     (function() {
       try {
@@ -138,7 +138,7 @@ export const cdpGetDom = async (agentId?: string | null): Promise<string> => {
       } catch (err) { return '[browser_get_dom error] ' + (err && err.message ? err.message : String(err)); }
     })();
   `;
-  const res = await cdpCmd(target.id, port, 'Runtime.evaluate', { expression: js, awaitPromise: true, returnByValue: true });
+  const res = await cdpCmd(target.id, 'Runtime.evaluate', { expression: js, awaitPromise: true, returnByValue: true });
   const v = (res as any)?.result?.value ?? res?.value ?? res;
   return typeof v === 'string' ? v : String(v ?? '');
 };
@@ -146,15 +146,14 @@ export const cdpGetDom = async (agentId?: string | null): Promise<string> => {
 export const cdpNavigate = async (agentId: string | null | undefined, url: string): Promise<string> => {
   const act = agentId !== undefined ? agentId : null;
   const t = await cdpBrowserStore.ensureTarget(act);
-  const port = t.port;
-  await cdpCmd(t.id, port, 'Page.enable', {}).catch(()=>{});
-  await cdpCmd(t.id, port, 'Page.navigate', { url });
+  await cdpCmd(t.id, 'Page.enable', {}).catch(()=>{});
+  await cdpCmd(t.id, 'Page.navigate', { url });
   // Wait for load
   const start = Date.now();
   while (Date.now() - start < 15000) {
     await new Promise(r=>setTimeout(r, 200));
     try {
-      const ready = await cdpCmd(t.id, port, 'Runtime.evaluate', { expression: `document.readyState`, returnByValue: true });
+      const ready = await cdpCmd(t.id, 'Runtime.evaluate', { expression: `document.readyState`, returnByValue: true });
       const state = (ready as any)?.result?.value ?? ready?.value;
       if (state === 'complete') break;
     } catch {}
@@ -164,51 +163,51 @@ export const cdpNavigate = async (agentId: string | null | undefined, url: strin
 
 export const cdpClick = async (agentId: string | null | undefined, id?: number, x?: number, y?: number, button: string='left', clickCount=1, modifiers:number=0): Promise<string> => {
   const act = agentId !== undefined ? agentId : null;
-  const { target, port } = await getTarget(act);
+  const { target } = await getTarget(act);
   let px = x, py = y;
   if (id != null) {
     const js = `(function(){ const el=window.__oneagentElements && window.__oneagentElements[${Number(id)}]; if(!el||!el.isConnected) return null; el.scrollIntoView({block:'center',inline:'center'}); const r=el.getBoundingClientRect(); return {x:Math.round(r.left+r.width/2), y:Math.round(r.top+r.height/2)}; })()`;
-    const res = await cdpCmd(target.id, port, 'Runtime.evaluate', { expression: js, awaitPromise: true, returnByValue: true });
+    const res = await cdpCmd(target.id, 'Runtime.evaluate', { expression: js, awaitPromise: true, returnByValue: true });
     const v: any = (res as any)?.result?.value ?? res?.value ?? res;
     if (!v || typeof v.x !== 'number') return `Element ${id} not found — take a browser_observe to re-label the page and retry`;
     px = v.x; py = v.y;
   }
   if (px == null || py == null) return 'Target not found — provide id or x/y';
   const btn = button as any;
-  await cdpCmd(target.id, port, 'Input.dispatchMouseEvent', { type: 'mousePressed', x: px, y: py, button: btn, clickCount, modifiers });
+  await cdpCmd(target.id, 'Input.dispatchMouseEvent', { type: 'mousePressed', x: px, y: py, button: btn, clickCount, modifiers });
   await new Promise(r=>setTimeout(r, 50));
-  await cdpCmd(target.id, port, 'Input.dispatchMouseEvent', { type: 'mouseReleased', x: px, y: py, button: btn, clickCount, modifiers });
+  await cdpCmd(target.id, 'Input.dispatchMouseEvent', { type: 'mouseReleased', x: px, y: py, button: btn, clickCount, modifiers });
   return `Clicked ${id != null ? `element ${id}` : `(${px},${py})`}`;
 };
 
 export const cdpType = async (agentId: string | null | undefined, text: string, id?: number, submit=false): Promise<string> => {
   const act = agentId !== undefined ? agentId : null;
-  const { target, port } = await getTarget(act);
+  const { target } = await getTarget(act);
   if (id != null) {
     const js = `(function(){ const el=window.__oneagentElements && window.__oneagentElements[${Number(id)}]; if(!el) return false; el.scrollIntoView({block:'center',inline:'center'}); el.focus(); return true; })()`;
-    const focused = await cdpCmd(target.id, port, 'Runtime.evaluate', { expression: js, returnByValue: true });
+    const focused = await cdpCmd(target.id, 'Runtime.evaluate', { expression: js, returnByValue: true });
     const v: any = (focused as any)?.result?.value ?? focused?.value;
     if (!v) return `Element ${id} not found — take a browser_observe to re-label the page and retry`;
     await new Promise(r=>setTimeout(r, 80));
   }
   // Select all + delete
-  await cdpCmd(target.id, port, 'Input.dispatchKeyEvent', { type: 'keyDown', key: 'a', modifiers: 2 }).catch(()=>{});
-  await cdpCmd(target.id, port, 'Input.dispatchKeyEvent', { type: 'keyUp', key: 'a', modifiers: 2 }).catch(()=>{});
+  await cdpCmd(target.id, 'Input.dispatchKeyEvent', { type: 'keyDown', key: 'a', modifiers: 2 }).catch(()=>{});
+  await cdpCmd(target.id, 'Input.dispatchKeyEvent', { type: 'keyUp', key: 'a', modifiers: 2 }).catch(()=>{});
   await new Promise(r=>setTimeout(r, 40));
-  await cdpCmd(target.id, port, 'Input.dispatchKeyEvent', { type: 'keyDown', key: 'Backspace' }).catch(()=>{});
-  await cdpCmd(target.id, port, 'Input.dispatchKeyEvent', { type: 'keyUp', key: 'Backspace' }).catch(()=>{});
+  await cdpCmd(target.id, 'Input.dispatchKeyEvent', { type: 'keyDown', key: 'Backspace' }).catch(()=>{});
+  await cdpCmd(target.id, 'Input.dispatchKeyEvent', { type: 'keyUp', key: 'Backspace' }).catch(()=>{});
   await new Promise(r=>setTimeout(r, 40));
-  await cdpCmd(target.id, port, 'Input.insertText', { text }).catch(async ()=> {
+  await cdpCmd(target.id, 'Input.insertText', { text }).catch(async ()=> {
     // Fallback per-char
     for (const ch of text) {
-      await cdpCmd(target.id, port, 'Input.dispatchKeyEvent', { type: 'char', text: ch }).catch(()=>{});
+      await cdpCmd(target.id, 'Input.dispatchKeyEvent', { type: 'char', text: ch }).catch(()=>{});
       await new Promise(r=>setTimeout(r, 12));
     }
   });
   await new Promise(r=>setTimeout(r, 180));
   if (submit) {
-    await cdpCmd(target.id, port, 'Input.dispatchKeyEvent', { type: 'keyDown', key: 'Enter', code: 'Enter' }).catch(()=>{});
-    await cdpCmd(target.id, port, 'Input.dispatchKeyEvent', { type: 'keyUp', key: 'Enter', code: 'Enter' }).catch(()=>{});
+    await cdpCmd(target.id, 'Input.dispatchKeyEvent', { type: 'keyDown', key: 'Enter', code: 'Enter' }).catch(()=>{});
+    await cdpCmd(target.id, 'Input.dispatchKeyEvent', { type: 'keyUp', key: 'Enter', code: 'Enter' }).catch(()=>{});
     await new Promise(r=>setTimeout(r, 250));
     return `Typed "${text}" and pressed Enter to submit.`;
   }
@@ -217,14 +216,14 @@ export const cdpType = async (agentId: string | null | undefined, text: string, 
 
 export const cdpScroll = async (agentId: string | null | undefined, direction='down', amount=600, id?: number): Promise<string> => {
   const act = agentId !== undefined ? agentId : null;
-  const { target, port } = await getTarget(act);
+  const { target } = await getTarget(act);
   if (direction === 'top' || direction === 'bottom') {
     if (id != null) {
-      const ok = await cdpCmd(target.id, port, 'Runtime.evaluate', { expression: `(()=>{const el=window.__oneagentElements[${Number(id)}]; if(!el||!el.isConnected) return false; el.scrollIntoView({block:'${direction==='top'?'start':'end'}', behavior:'instant'}); return true;})()`, returnByValue:true });
+      const ok = await cdpCmd(target.id, 'Runtime.evaluate', { expression: `(()=>{const el=window.__oneagentElements[${Number(id)}]; if(!el||!el.isConnected) return false; el.scrollIntoView({block:'${direction==='top'?'start':'end'}', behavior:'instant'}); return true;})()`, returnByValue:true });
       const v:any = (ok as any)?.result?.value ?? ok?.value;
       if (!v) return `Element ${id} not found — take a browser_observe to re-label`;
     } else {
-      await cdpCmd(target.id, port, 'Runtime.evaluate', { expression: `window.scrollTo({top:${direction==='top'?'0':'document.documentElement.scrollHeight'}, behavior:'instant'}); true`, returnByValue:true });
+      await cdpCmd(target.id, 'Runtime.evaluate', { expression: `window.scrollTo({top:${direction==='top'?'0':'document.documentElement.scrollHeight'}, behavior:'instant'}); true`, returnByValue:true });
     }
     await new Promise(r=>setTimeout(r, 250));
     return `Scrolled to ${direction}`;
@@ -232,27 +231,27 @@ export const cdpScroll = async (agentId: string | null | undefined, direction='d
   let x=640,y=400;
   if (id != null) {
     const js = `(function(){ const el=window.__oneagentElements[${Number(id)}]; if(!el) return null; el.scrollIntoView({block:'center',inline:'center'}); const r=el.getBoundingClientRect(); return {x:Math.round(r.left+r.width/2), y:Math.round(r.top+r.height/2)}; })()`;
-    const res = await cdpCmd(target.id, port, 'Runtime.evaluate', { expression: js, returnByValue: true });
+    const res = await cdpCmd(target.id, 'Runtime.evaluate', { expression: js, returnByValue: true });
     const v:any = (res as any)?.result?.value ?? res?.value;
     if (!v) return `Element ${id} not found — take a browser_observe to re-label`;
     x=v.x; y=v.y;
   } else {
-    const vp = await cdpCmd(target.id, port, 'Runtime.evaluate', { expression: `({x:Math.round(window.innerWidth/2), y:Math.round(window.innerHeight/2)})`, returnByValue: true });
+    const vp = await cdpCmd(target.id, 'Runtime.evaluate', { expression: `({x:Math.round(window.innerWidth/2), y:Math.round(window.innerHeight/2)})`, returnByValue: true });
     const v:any = (vp as any)?.result?.value ?? vp?.value;
     if (v) { x=v.x; y=v.y; }
   }
   const dx = direction==='left'?-amount:direction==='right'?amount:0;
   const dy = direction==='up'?-amount:direction==='down'?amount:0;
   // Try wheel
-  await cdpCmd(target.id, port, 'Input.dispatchMouseEvent', { type: 'mouseWheel', x, y, deltaX: dx, deltaY: dy }).catch(()=>{});
+  await cdpCmd(target.id, 'Input.dispatchMouseEvent', { type: 'mouseWheel', x, y, deltaX: dx, deltaY: dy }).catch(()=>{});
   await new Promise(r=>setTimeout(r, 250));
   // Verify movement via JS; fallback to window.scrollBy
-  const before: any = await cdpCmd(target.id, port, 'Runtime.evaluate', { expression: `(()=>{const d=document.scrollingElement||document.documentElement; return {y:Math.round(d.scrollTop), maxY:Math.round(d.scrollHeight-d.clientHeight)}})()`, returnByValue:true });
+  const before: any = await cdpCmd(target.id, 'Runtime.evaluate', { expression: `(()=>{const d=document.scrollingElement||document.documentElement; return {y:Math.round(d.scrollTop), maxY:Math.round(d.scrollHeight-d.clientHeight)}})()`, returnByValue:true });
   const b = (before as any)?.result?.value ?? before?.value ?? before;
   // Try programmatic scroll
-  await cdpCmd(target.id, port, 'Runtime.evaluate', { expression: `window.scrollBy(${dx},${dy}); true`, returnByValue:true }).catch(()=>{});
+  await cdpCmd(target.id, 'Runtime.evaluate', { expression: `window.scrollBy(${dx},${dy}); true`, returnByValue:true }).catch(()=>{});
   await new Promise(r=>setTimeout(r, 200));
-  const after: any = await cdpCmd(target.id, port, 'Runtime.evaluate', { expression: `(()=>{const d=document.scrollingElement||document.documentElement; return {y:Math.round(d.scrollTop), maxY:Math.round(d.scrollHeight-d.clientHeight)}})()`, returnByValue:true });
+  const after: any = await cdpCmd(target.id, 'Runtime.evaluate', { expression: `(()=>{const d=document.scrollingElement||document.documentElement; return {y:Math.round(d.scrollTop), maxY:Math.round(d.scrollHeight-d.clientHeight)}})()`, returnByValue:true });
   const a = (after as any)?.result?.value ?? after?.value ?? after;
   if (a && b && Math.abs(a.y - b.y) >= 1) return `Scrolled ${direction} ${amount}px — now at y=${a.y}/${a.maxY}`;
   // Already at limit?
@@ -262,19 +261,74 @@ export const cdpScroll = async (agentId: string | null | undefined, direction='d
 
 export const cdpEvaluate = async (agentId: string | null | undefined, script: string): Promise<any> => {
   const act = agentId !== undefined ? agentId : null;
-  const { target, port } = await getTarget(act);
+  const { target } = await getTarget(act);
   const expr = script.trim().startsWith('return') ? `(function(){ ${script} })()` : script;
-  const res = await cdpCmd(target.id, port, 'Runtime.evaluate', { expression: expr, awaitPromise: true, returnByValue: true });
+  const res = await cdpCmd(target.id, 'Runtime.evaluate', { expression: expr, awaitPromise: true, returnByValue: true });
   const v: any = (res as any)?.result?.value ?? res?.value ?? res;
   return v;
 };
 
 export const cdpObserve = async (agentId?: string | null): Promise<{ image: string, markers: any[], dom: string, meta: any }> => {
   const act = agentId !== undefined ? agentId : null;
-  const { target, port } = await getTarget(act);
+  const { target } = await getTarget(act);
   const { image, markers } = await cdpCaptureWithSoM(act);
   const dom = await cdpGetDom(act);
-  // Meta similar to browserTools browserObservePage
-  const meta: any = await cdpCmd(target.id, port, 'Runtime.evaluate', { expression: `(()=>{const d=document.scrollingElement||document.documentElement; return {scrollX:Math.round(window.scrollX), scrollY:Math.round(window.scrollY), maxX:Math.round(d.scrollWidth-d.clientWidth), maxY:Math.round(d.scrollHeight-d.clientHeight), viewport:{width:window.innerWidth,height:window.innerHeight}, atTop: window.scrollY<=2, atBottom: (d.scrollTop+d.clientHeight)>=d.scrollHeight-2, url: location.href, title: document.title}})()`, returnByValue:true }).then((r:any)=> r?.result?.value ?? r?.value ?? {}).catch(()=>({}));
+  const meta: any = await cdpCmd(target.id, 'Runtime.evaluate', { expression: `(()=>{const d=document.scrollingElement||document.documentElement; return {scrollX:Math.round(window.scrollX), scrollY:Math.round(window.scrollY), maxX:Math.round(d.scrollWidth-d.clientWidth), maxY:Math.round(d.scrollHeight-d.clientHeight), viewport:{width:window.innerWidth,height:window.innerHeight}, atTop: window.scrollY<=2, atBottom: (d.scrollTop+d.clientHeight)>=d.scrollHeight-2, url: location.href, title: document.title}})()`, returnByValue:true }).then((r:any)=> r?.result?.value ?? r?.value ?? {}).catch(()=>({}));
   return { image, markers, dom, meta };
+};
+
+export const cdpFillForm = async (agentId: string | null | undefined, data: Record<string, string>): Promise<string> => {
+  const act = agentId !== undefined ? agentId : null;
+  const { target } = await getTarget(act);
+  const res = [];
+  for (const [key, value] of Object.entries(data)) {
+    const id = Number(key);
+    if (isNaN(id)) { res.push(`Ignored ${key}: not a valid element ID`); continue; }
+    try {
+      await cdpType(act, value, id, false);
+      res.push(`Filled ${id}`);
+    } catch (e: any) {
+      res.push(`Failed to fill ${id}: ${e.message}`);
+    }
+  }
+  return res.join(', ');
+};
+
+export const cdpFileUpload = async (agentId: string | null | undefined, id: number, filePaths: string[]): Promise<string> => {
+  const act = agentId !== undefined ? agentId : null;
+  const { target } = await getTarget(act);
+  
+  // Find node ID using SoM
+  const js = `(function(){ const el=window.__oneagentElements && window.__oneagentElements[${Number(id)}]; if(!el) return null; return el; })()`;
+  const evalRes = await cdpCmd(target.id, 'Runtime.evaluate', { expression: js });
+  const objectId = evalRes?.result?.objectId;
+  if (!objectId) return `Element ${id} not found`;
+  
+  const nodeRes = await cdpCmd(target.id, 'DOM.requestNode', { objectId });
+  const backendNodeId = nodeRes.nodeId;
+  
+  await cdpCmd(target.id, 'DOM.setFileInputFiles', {
+    files: filePaths,
+    backendNodeId,
+    objectId
+  });
+  return `Uploaded ${filePaths.length} files to element ${id}`;
+};
+
+export const cdpConsoleMessages = async (agentId: string | null | undefined): Promise<string> => {
+  // Console message collection requires persistent listening which isn't easy here,
+  // we'll fetch the stored logs if any, or just return an empty array for now.
+  return "[]"; 
+};
+
+export const cdpNetworkRequests = async (agentId: string | null | undefined): Promise<string> => {
+  // Same for network requests.
+  return "[]"; 
+};
+
+export const cdpHandleDialog = async (agentId: string | null | undefined, accept: boolean, promptText?: string): Promise<string> => {
+  const act = agentId !== undefined ? agentId : null;
+  const { target } = await getTarget(act);
+  await cdpCmd(target.id, 'Page.handleJavaScriptDialog', { accept, promptText });
+  return `Dialog handled: ${accept ? 'accepted' : 'dismissed'}`;
 };

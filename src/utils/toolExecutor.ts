@@ -102,8 +102,8 @@ const isCdpMode = async (): Promise<boolean> => {
   try {
     const api: any = (window as any).electronAPI;
     if (!api?.chromeStatus) { _cdpCached = false; return false; }
-    const port = cdpBrowserStore.getPort();
-    const r = await api.chromeStatus(port);
+    const port = 9222;
+    const r = await api.chromeStatus();
     _cdpCached = !!r?.listening;
     return _cdpCached;
   } catch { _cdpCached = false; return false; }
@@ -231,7 +231,7 @@ const HANDLERS: Record<string, Handler> = {
       try {
         const t = await cdpBrowserStore.ensureTarget(((ctx as any).agentId ?? null));
         const api: any = (window as any).electronAPI;
-        const r = await api.cdpCommand({ port: t.port, targetId: t.id, method: 'Page.goBack', params: {} });
+        const r = await api.cdpSend({ webContentsId: Number(t.id), method: 'Page.goBack', params: {} });
         if (r?.success) return ok('OK');
       } catch {}
     }
@@ -240,12 +240,13 @@ const HANDLERS: Record<string, Handler> = {
   browser_terminate: async (_a, ctx) => {
     if (await isCdpMode()) {
       try {
-        const t = cdpBrowserStore.getTargetForAgent(((ctx as any).agentId ?? null));
+        const agentId = ((ctx as any).agentId ?? null);
+        const t = cdpBrowserStore.getTargetForAgent(agentId);
         if (t) {
           const api: any = (window as any).electronAPI;
-          await api.cdpCloseTarget({ port: t.port, targetId: t.id }).catch(()=>{});
-          cdpBrowserStore.removeByAgent(((ctx as any).agentId ?? null));
-          return ok('Browser terminated (CDP target closed). Next navigate will create fresh target.');
+          await api.destroyAgentBrowser(agentId).catch(()=>{});
+          cdpBrowserStore.removeByAgent(agentId);
+          return ok('Browser terminated (Agent browser closed). Next navigate will create fresh target.');
         }
       } catch {}
     }
@@ -330,13 +331,13 @@ const HANDLERS: Record<string, Handler> = {
     if (await isCdpMode()) {
       try {
         const id=p(args,'id'); const x=p(args,'x'); const y=p(args,'y'); const button=p(args,'button')||'left';
-        const act=((ctx as any).agentId ?? null); const {target, port}=await (await import('./cdpBrowserStore')).cdpBrowserStore.ensureTarget(act) as any;
+        const act=((ctx as any).agentId ?? null); const {target}=await (await import('./cdpBrowserStore')).cdpBrowserStore.ensureTarget(act) as any;
         let px=x, py=y;
         if (id!=null) {
           const js=`(function(){const el=window.__oneagentElements&&window.__oneagentElements[${Number(id)}]; if(!el)return null; el.scrollIntoView({block:'center',inline:'center'}); const r=el.getBoundingClientRect(); return {x:Math.round(r.left+r.width/2),y:Math.round(r.top+r.height/2)};})()`;
-          const api:any=(window as any).electronAPI; const r=await api.cdpCommand({port:target.port,targetId:target.id,method:'Runtime.evaluate',params:{expression:js,returnByValue:true}}); const v=r?.result?.result?.value ?? r?.result?.value ?? r?.result; if(v&&typeof v.x==='number'){px=v.x;py=v.y;} else return ok(`Element ${id} not found — take a browser_observe to re-label`);
+          const api:any=(window as any).electronAPI; const r=await api.cdpSend({webContentsId:Number(target.id),method:'Runtime.evaluate',params:{expression:js,returnByValue:true}}); const v=r?.result?.result?.value ?? r?.result?.value ?? r?.result; if(v&&typeof v.x==='number'){px=v.x;py=v.y;} else return ok(`Element ${id} not found — take a browser_observe to re-label`);
         }
-        const api:any=(window as any).electronAPI; await api.cdpCommand({port:target.port,targetId:target.id,method:'Input.dispatchMouseEvent',params:{type:'mousePressed',x:px,y:py,button,clickCount:1}});
+        const api:any=(window as any).electronAPI; await api.cdpSend({webContentsId:Number(target.id),method:'Input.dispatchMouseEvent',params:{type:'mousePressed',x:px,y:py,button,clickCount:1}});
         return ok(`Mouse down ${id!=null?`element ${id}`:`at (${px},${py})`}`);
       } catch {}
     }
@@ -346,14 +347,14 @@ const HANDLERS: Record<string, Handler> = {
     if (await isCdpMode()) {
       try {
         const id=p(args,'id'); const x=p(args,'x'); const y=p(args,'y'); const button=p(args,'button')||'left';
-        const act=((ctx as any).agentId ?? null); const {target, port}=await (await import('./cdpBrowserStore')).cdpBrowserStore.ensureTarget(act) as any;
+        const act=((ctx as any).agentId ?? null); const {target}=await (await import('./cdpBrowserStore')).cdpBrowserStore.ensureTarget(act) as any;
         let px=x, py=y;
         if (id!=null) {
           const js=`(function(){const el=window.__oneagentElements&&window.__oneagentElements[${Number(id)}]; if(!el)return null; const r=el.getBoundingClientRect(); return {x:Math.round(r.left+r.width/2),y:Math.round(r.top+r.height/2)};})()`;
-          const api:any=(window as any).electronAPI; const r=await api.cdpCommand({port:target.port,targetId:target.id,method:'Runtime.evaluate',params:{expression:js,returnByValue:true}}); const v=r?.result?.result?.value ?? r?.result?.value ?? r?.result; if(v) {px=v.x;py=v.y;}
+          const api:any=(window as any).electronAPI; const r=await api.cdpSend({webContentsId:Number(target.id),method:'Runtime.evaluate',params:{expression:js,returnByValue:true}}); const v=r?.result?.result?.value ?? r?.result?.value ?? r?.result; if(v) {px=v.x;py=v.y;}
         }
         if (px==null) px=0; if (py==null) py=0;
-        const api:any=(window as any).electronAPI; await api.cdpCommand({port:target.port,targetId:target.id,method:'Input.dispatchMouseEvent',params:{type:'mouseReleased',x:px,y:py,button,clickCount:1}});
+        const api:any=(window as any).electronAPI; await api.cdpSend({webContentsId:Number(target.id),method:'Input.dispatchMouseEvent',params:{type:'mouseReleased',x:px,y:py,button,clickCount:1}});
         return ok(`Mouse up ${id!=null?`element ${id}`:`at (${px},${py})`}`);
       } catch {}
     }
@@ -363,14 +364,14 @@ const HANDLERS: Record<string, Handler> = {
     if (await isCdpMode()) {
       try {
         const id=p(args,'id'); const x=p(args,'x'); const y=p(args,'y');
-        const act=((ctx as any).agentId ?? null); const {target, port}=await (await import('./cdpBrowserStore')).cdpBrowserStore.ensureTarget(act) as any;
+        const act=((ctx as any).agentId ?? null); const {target}=await (await import('./cdpBrowserStore')).cdpBrowserStore.ensureTarget(act) as any;
         let px=x, py=y;
         if (id!=null) {
           const js=`(function(){const el=window.__oneagentElements&&window.__oneagentElements[${Number(id)}]; if(!el)return null; const r=el.getBoundingClientRect(); return {x:Math.round(r.left+r.width/2),y:Math.round(r.top+r.height/2)};})()`;
-          const api:any=(window as any).electronAPI; const r=await api.cdpCommand({port:target.port,targetId:target.id,method:'Runtime.evaluate',params:{expression:js,returnByValue:true}}); const v=r?.result?.result?.value ?? r?.result?.value ?? r?.result; if(v) {px=v.x;py=v.y;}
+          const api:any=(window as any).electronAPI; const r=await api.cdpSend({webContentsId:Number(target.id),method:'Runtime.evaluate',params:{expression:js,returnByValue:true}}); const v=r?.result?.result?.value ?? r?.result?.value ?? r?.result; if(v) {px=v.x;py=v.y;}
         }
         if (px==null||py==null) return ok('Target not found — provide id or x/y');
-        const api:any=(window as any).electronAPI; await api.cdpCommand({port:target.port,targetId:target.id,method:'Input.dispatchMouseEvent',params:{type:'mouseMoved',x:px,y:py}});
+        const api:any=(window as any).electronAPI; await api.cdpSend({webContentsId:Number(target.id),method:'Input.dispatchMouseEvent',params:{type:'mouseMoved',x:px,y:py}});
         return ok(`Mouse moved to (${px},${py})`);
       } catch {}
     }
@@ -382,23 +383,23 @@ const HANDLERS: Record<string, Handler> = {
         const fi=p(args,'from_id'); const fx=p(args,'from_x'); const fy=p(args,'from_y');
         const ti=p(args,'to_id'); const tx=p(args,'to_x'); const ty=p(args,'to_y');
         const button=p(args,'button')||'left';
-        const act=((ctx as any).agentId ?? null); const {target, port}=await (await import('./cdpBrowserStore')).cdpBrowserStore.ensureTarget(act) as any;
+        const act=((ctx as any).agentId ?? null); const {target}=await (await import('./cdpBrowserStore')).cdpBrowserStore.ensureTarget(act) as any;
         const api:any=(window as any).electronAPI;
         let sx:any=fx, sy:any=fy;
         if (fi!=null) {
           const js=`(function(){const el=window.__oneagentElements&&window.__oneagentElements[${Number(fi)}]; if(!el)return null; el.scrollIntoView({block:'center',inline:'center'}); const r=el.getBoundingClientRect(); return {x:Math.round(r.left+r.width/2),y:Math.round(r.top+r.height/2)};})()`;
-          const r=await api.cdpCommand({port:target.port,targetId:target.id,method:'Runtime.evaluate',params:{expression:js,returnByValue:true}}); const v=r?.result?.result?.value ?? r?.result?.value ?? r?.result; if(v){sx=v.x;sy=v.y;}
+          const r=await api.cdpSend({webContentsId:Number(target.id),method:'Runtime.evaluate',params:{expression:js,returnByValue:true}}); const v=r?.result?.result?.value ?? r?.result?.value ?? r?.result; if(v){sx=v.x;sy=v.y;}
         }
         let ex:any=tx, ey:any=ty;
         if (ti!=null) {
           const js=`(function(){const el=window.__oneagentElements&&window.__oneagentElements[${Number(ti)}]; if(!el)return null; const r=el.getBoundingClientRect(); return {x:Math.round(r.left+r.width/2),y:Math.round(r.top+r.height/2)};})()`;
-          const r=await api.cdpCommand({port:target.port,targetId:target.id,method:'Runtime.evaluate',params:{expression:js,returnByValue:true}}); const v=r?.result?.result?.value ?? r?.result?.value ?? r?.result; if(v){ex=v.x;ey=v.y;}
+          const r=await api.cdpSend({webContentsId:Number(target.id),method:'Runtime.evaluate',params:{expression:js,returnByValue:true}}); const v=r?.result?.result?.value ?? r?.result?.value ?? r?.result; if(v){ex=v.x;ey=v.y;}
         }
         if (sx==null||sy==null||ex==null||ey==null) return ok('Drag requires source and destination');
-        await api.cdpCommand({port:target.port,targetId:target.id,method:'Input.dispatchMouseEvent',params:{type:'mousePressed',x:sx,y:sy,button,clickCount:1}});
+        await api.cdpSend({webContentsId:Number(target.id),method:'Input.dispatchMouseEvent',params:{type:'mousePressed',x:sx,y:sy,button,clickCount:1}});
         const steps=8;
-        for(let i=1;i<=steps;i++){ const ix=Math.round(sx+(ex-sx)*i/steps), iy=Math.round(sy+(ey-sy)*i/steps); await api.cdpCommand({port:target.port,targetId:target.id,method:'Input.dispatchMouseEvent',params:{type:'mouseMoved',x:ix,y:iy}}); await new Promise(r=>setTimeout(r,16)); }
-        await api.cdpCommand({port:target.port,targetId:target.id,method:'Input.dispatchMouseEvent',params:{type:'mouseReleased',x:ex,y:ey,button,clickCount:1}});
+        for(let i=1;i<=steps;i++){ const ix=Math.round(sx+(ex-sx)*i/steps), iy=Math.round(sy+(ey-sy)*i/steps); await api.cdpSend({webContentsId:Number(target.id),method:'Input.dispatchMouseEvent',params:{type:'mouseMoved',x:ix,y:iy}}); await new Promise(r=>setTimeout(r,16)); }
+        await api.cdpSend({webContentsId:Number(target.id),method:'Input.dispatchMouseEvent',params:{type:'mouseReleased',x:ex,y:ey,button,clickCount:1}});
         return ok(`Dragged ${fi!=null?`#${fi}`:`(${fx},${fy})`} → ${ti!=null?`#${ti}`:`(${tx},${ty})`}`);
       } catch {}
     }
@@ -408,12 +409,12 @@ const HANDLERS: Record<string, Handler> = {
     if (await isCdpMode()) {
       try {
         const key=String(p(args,'key')||''); const mods=p(args,'modifiers')||[]; const state=p(args,'state')||'press';
-        const act=((ctx as any).agentId ?? null); const {target, port}=await (await import('./cdpBrowserStore')).cdpBrowserStore.ensureTarget(act) as any;
+        const act=((ctx as any).agentId ?? null); const {target}=await (await import('./cdpBrowserStore')).cdpBrowserStore.ensureTarget(act) as any;
         const api:any=(window as any).electronAPI;
         const modMap:any={control:2, ctrl:2, alt:1, shift:8, meta:4, command:4};
         let modBits=0; for(const m of mods) modBits|=modMap[String(m).toLowerCase()]||0;
-        if (state==='down' || state==='press') await api.cdpCommand({port:target.port,targetId:target.id,method:'Input.dispatchKeyEvent',params:{type:'keyDown', key, modifiers:modBits}});
-        if (state==='up' || state==='press') { await new Promise(r=>setTimeout(r,30)); await api.cdpCommand({port:target.port,targetId:target.id,method:'Input.dispatchKeyEvent',params:{type:'keyUp', key, modifiers:modBits}}); }
+        if (state==='down' || state==='press') await api.cdpSend({webContentsId:Number(target.id),method:'Input.dispatchKeyEvent',params:{type:'keyDown', key, modifiers:modBits}});
+        if (state==='up' || state==='press') { await new Promise(r=>setTimeout(r,30)); await api.cdpSend({webContentsId:Number(target.id),method:'Input.dispatchKeyEvent',params:{type:'keyUp', key, modifiers:modBits}}); }
         return ok(`Pressed ${key} ${mods.length?`+${mods.join('+')}`:''}`);
       } catch {}
     }
@@ -439,6 +440,50 @@ const HANDLERS: Record<string, Handler> = {
       } catch {}
     }
     return ok(await browserScroll(args));
+  },
+  browser_fill_form: async (args, ctx) => {
+    if (await isCdpMode()) {
+      try {
+        const data = args.data || args.Data || {};
+        const res = await cdpTools.cdpFillForm(((ctx as any).agentId ?? null), data);
+        return ok(res);
+      } catch (e: any) { return ok(`Error: ${e.message}`); }
+    }
+    return ok('Fallback not implemented');
+  },
+  browser_file_upload: async (args, ctx) => {
+    if (await isCdpMode()) {
+      try {
+        const id = Number(p(args,'id'));
+        const files = p(args,'files') || [];
+        const res = await cdpTools.cdpFileUpload(((ctx as any).agentId ?? null), id, files);
+        return ok(res);
+      } catch (e: any) { return ok(`Error: ${e.message}`); }
+    }
+    return ok('Fallback not implemented');
+  },
+  browser_console_messages: async (args, ctx) => {
+    if (await isCdpMode()) {
+      try { return ok(await cdpTools.cdpConsoleMessages(((ctx as any).agentId ?? null))); } catch (e: any) { return ok(`Error: ${e.message}`); }
+    }
+    return ok('Fallback not implemented');
+  },
+  browser_network_requests: async (args, ctx) => {
+    if (await isCdpMode()) {
+      try { return ok(await cdpTools.cdpNetworkRequests(((ctx as any).agentId ?? null))); } catch (e: any) { return ok(`Error: ${e.message}`); }
+    }
+    return ok('Fallback not implemented');
+  },
+  browser_handle_dialog: async (args, ctx) => {
+    if (await isCdpMode()) {
+      try {
+        const accept = !!p(args,'accept');
+        const promptText = p(args,'promptText');
+        const res = await cdpTools.cdpHandleDialog(((ctx as any).agentId ?? null), accept, promptText);
+        return ok(res);
+      } catch (e: any) { return ok(`Error: ${e.message}`); }
+    }
+    return ok('Fallback not implemented');
   },
 
   // Embedded browser — internals

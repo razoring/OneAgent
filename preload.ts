@@ -64,6 +64,10 @@ const { ipcRenderer, webUtils } = require('electron');
   cdpNewTarget: (opts: any) => ipcRenderer.invoke('cdp-new-target', opts),
   cdpCloseTarget: (opts: any) => ipcRenderer.invoke('cdp-close-target', opts),
   cdpSend: (opts: any) => ipcRenderer.invoke('cdp-send', opts),
+  createAgentBrowser: (agentId: string, initialUrl?: string) => ipcRenderer.invoke('create-agent-browser', { agentId, initialUrl }),
+  destroyAgentBrowser: (agentId: string) => ipcRenderer.invoke('destroy-agent-browser', { agentId }),
+  takeControl: (agentId: string) => ipcRenderer.send('take-control', agentId),
+  returnToChat: () => ipcRenderer.send('return-to-chat'),
   cdpCommand: (opts: any) => ipcRenderer.invoke('cdp-command', opts),
 
   takeScreenshot: () => ipcRenderer.invoke('take-screenshot'),

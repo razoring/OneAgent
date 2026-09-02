@@ -1,6 +1,8 @@
 import { generateChatStream, getModelSettings, condenseThinking, LLMModel, ModelSettings, fetchModels } from './llm';
 import { executeToolCalls, ToolContext } from './toolExecutor';
 import { getSystemTools } from './tools';
+import { browserPreviewStore } from './browserPreviewStore';
+import { taskStore } from './taskStore';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -31,8 +33,8 @@ export interface SubAgentState {
   endedAt?: number;
 }
 
-// Host-provided capabilities routed from the orchestrator's ChatArea.
 export interface SubAgentHost {
+  chatId: string;
   requestApproval: (toolName: string, summary: string) => Promise<{ approved: boolean; message?: string }>;
   getModel: () => LLMModel | null;
   signal?: AbortSignal;
@@ -123,6 +125,20 @@ export const spawnSubAgent = (spec: SubAgentSpec, host: SubAgentHost): string =>
   };
   registry.set(id, state);
   hostMap.set(id, host);
+  
+  // Auto-sync: Create a linked task in the UI for this sub-agent
+  taskStore.add(host.chatId, {
+    title: state.label,
+    description: state.task,
+    goal: spec.context || '',
+    toolHint: state.tools === 'browser' ? 'browser' : state.tools === 'files' ? 'files' : 'mixed',
+    agentId: id,
+    assumptions: [],
+    acceptanceCriteria: [],
+    context: '',
+    dependsOn: []
+  });
+
   pumpQueue(hostMap);
   return id;
 };
@@ -169,17 +185,21 @@ const resolveModel = async (spec: SubAgentSpec, host: SubAgentHost): Promise<LLM
 const runSubAgent = async (agent: SubAgentState, host: SubAgentHost): Promise<void> => {
   agent.startedAt = Date.now();
   const controller = new AbortController();
+  const onAbort = () => controller.abort();
   if (host.signal) {
     if (host.signal.aborted) controller.abort();
-    else host.signal.addEventListener('abort', () => controller.abort(), { once: true });
+    else host.signal.addEventListener('abort', onAbort, { once: true });
   }
+
+  // Sync task status to running
+  taskStore.updateByAgent(host.chatId, agent.id, { status: 'running' });
 
   try {
     const model = await resolveModel(agentParamsOf(agent), host);
     agent.model = { id: model.id, provider: model.provider };
 
     const mergedSettings: ModelSettings = { ...getModelSettings(), ...(agent.params || {}) };
-    const toolDefs = getSystemTools().filter(t => TOOL_PRESETS[agent.tools].has(t.function.name));
+    const toolDefs = getSystemTools('subagent').filter(t => TOOL_PRESETS[agent.tools].has(t.function.name));
 
     const messages: any[] = [
       { role: 'system', content: subAgentPrompt(agent.tools) },
@@ -238,6 +258,7 @@ const runSubAgent = async (agent: SubAgentState, host: SubAgentHost): Promise<vo
         if (r.imageDataUrl) {
           parts.push({ type: 'text', text: `[${r.toolName} screenshot attached below]` });
           parts.push({ type: 'image_url', image_url: { url: r.imageDataUrl } });
+          browserPreviewStore.addImage(host.chatId, r.imageDataUrl);
           hasImage = true;
         }
       }
@@ -274,6 +295,14 @@ const runSubAgent = async (agent: SubAgentState, host: SubAgentHost): Promise<vo
     agent.status = 'error';
   } finally {
     agent.endedAt = Date.now();
+    if (host.signal) host.signal.removeEventListener('abort', onAbort);
+    
+    // Sync task completion
+    taskStore.updateByAgent(host.chatId, agent.id, { 
+      status: agent.status,
+      resultSummary: agent.status === 'error' ? agent.error : 'Sub-agent completed'
+    });
+    
     hostMap.delete(agent.id);
   }
 };

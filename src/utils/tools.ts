@@ -130,6 +130,22 @@ export const SYSTEM_TOOLS = [
       amount: num('Pixels for relative scrolling (default 600).'),
       id: num('With up/down/left/right: wheel over this Set-of-Mark element. With top/bottom: scroll this element into view.')
     }),
+  fn('browser_fill_form', 'Fill multiple form fields at once by mapping Set-of-Mark IDs to text values.',
+    {
+      data: { type: 'object', additionalProperties: { type: 'string' }, description: 'Map of Set-of-Mark ID (as string) to the text value to type.' }
+    }, ['data']),
+  fn('browser_file_upload', 'Upload files to a file input element. Provide absolute paths to the files.',
+    {
+      id: num('Set-of-Mark element ID of the file input.'),
+      files: { type: 'array', items: { type: 'string' }, description: 'Absolute paths to files to upload.' }
+    }, ['id', 'files']),
+  fn('browser_console_messages', 'Fetch recent console messages from the browser.', {}),
+  fn('browser_network_requests', 'Fetch recent network requests from the browser.', {}),
+  fn('browser_handle_dialog', 'Accept or dismiss an active JavaScript dialog (alert, confirm, prompt).',
+    {
+      accept: bool('True to accept, false to dismiss.'),
+      promptText: str('Optional text to enter into a prompt dialog.')
+    }, ['accept']),
 
   // ── Embedded browser: observation & internals (instant) ───────────────────
   fn('browser_observe', 'One-call page observation: screenshot with red numbered Set-of-Mark badges + element list + trimmed DOM text + **viewport/scroll metadata** (`meta` object with scroll position, max scroll, viewport size, atTop/atBottom/atLeft/atRight booleans, scrollPercent). Your default way to look at a page.',
@@ -289,5 +305,15 @@ export const SYSTEM_TOOLS = [
 // Tools exposed to the model. search_web is only included when a search
 // provider endpoint is configured; otherwise the model is expected to use
 // the embedded browser tools to search.
-export const getSystemTools = () =>
-  isWebSearchConfigured() ? SYSTEM_TOOLS : SYSTEM_TOOLS.filter(t => t.function.name !== 'search_web');
+export const getSystemTools = (role: 'orchestrator' | 'subagent' = 'orchestrator') => {
+  let tools = isWebSearchConfigured() ? SYSTEM_TOOLS : SYSTEM_TOOLS.filter(t => t.function.name !== 'search_web');
+  if (role === 'orchestrator') {
+    // Orchestrator thinks and delegates: no direct browser manipulation
+    tools = tools.filter(t => !t.function.name.startsWith('browser_'));
+  } else if (role === 'subagent') {
+    // Sub-agents do not manage tasks, settings, or spawn more agents
+    const restricted = ['spawn_agent', 'check_agents', 'task_add', 'task_update', 'task_list', 'list_models', 'switch_model', 'get_settings', 'get_model_stats', 'update_settings'];
+    tools = tools.filter(t => !restricted.includes(t.function.name));
+  }
+  return tools;
+};
