@@ -92,21 +92,8 @@ const j = (v: any): string => {
   }
 };
 
-// CDP live-profile check — cached to avoid IPC storm. Refreshed on demand.
-let _cdpLastCheck = 0;
-let _cdpCached = false;
 const isCdpMode = async (): Promise<boolean> => {
-  const now = Date.now();
-  if (now - _cdpLastCheck < 1500) return _cdpCached;
-  _cdpLastCheck = now;
-  try {
-    const api: any = (window as any).electronAPI;
-    if (!api?.chromeStatus) { _cdpCached = false; return false; }
-    const port = 9222;
-    const r = await api.chromeStatus();
-    _cdpCached = !!r?.listening;
-    return _cdpCached;
-  } catch { _cdpCached = false; return false; }
+  return true;
 };
 
 // Short human-readable description for permission cards.

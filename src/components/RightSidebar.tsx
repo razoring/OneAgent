@@ -1,10 +1,37 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Trash2 } from 'lucide-react';
-import { ModelSettings, getModelSettings, saveModelSettings } from '../utils/llm';
+import { ModelSettings, getModelSettings, saveModelSettings, getProviderStatus } from '../utils/llm';
 import { modelParamsStore } from '../utils/modelParamsStore';
 import { taskStore } from '../utils/taskStore';
 import { chatStore } from '../utils/chatStore';
 import { TaskNode } from '../types/task';
+
+const PieChart = ({ data, total, size = 64, thickness = 10 }: { data: { value: number, color: string }[], total: number, size?: number, thickness?: number }) => {
+  const r = (size - thickness) / 2;
+  const c = 2 * Math.PI * r;
+  let offset = 0;
+  return (
+    <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`} className="transform -rotate-90">
+      <circle cx={size/2} cy={size/2} r={r} fill="transparent" stroke="rgba(255,255,255,0.05)" strokeWidth={thickness} />
+      {data.map((d, i) => {
+        if (d.value <= 0) return null;
+        const pct = total > 0 ? d.value / total : 0;
+        const dash = pct * c;
+        const gap = c - dash;
+        const currentOffset = offset;
+        offset += dash;
+        return (
+          <circle
+            key={i} cx={size/2} cy={size/2} r={r} fill="transparent"
+            stroke={d.color} strokeWidth={thickness}
+            strokeDasharray={`${dash} ${gap}`}
+            strokeDashoffset={-currentOffset}
+          />
+        );
+      })}
+    </svg>
+  );
+};
 
 // Task title: truncates normally; running tasks whose text overflows get a
 // slow edge-faded marquee driven by rAF (exact end-to-end travel, no overshoot).
@@ -219,6 +246,7 @@ const TasksSection = ({ open }: { open: boolean }) => {
 const RightSidebar = ({ open }: { open: boolean }) => {
   const [modelSettings, setModelSettings] = useState<ModelSettings>(() => getModelSettings());
   const [estimatedTokens, setEstimatedTokens] = useState<{ system: number; history: number; prompt: number } | null>(modelParamsStore.get());
+  const [providerStatus, setProviderStatus] = useState<Record<string, any>>({});
 
   useEffect(() => modelParamsStore.subscribe(setEstimatedTokens), []);
 
@@ -226,6 +254,14 @@ const RightSidebar = ({ open }: { open: boolean }) => {
   useEffect(() => {
     modelParamsStore.setActive(open);
     return () => modelParamsStore.setActive(false);
+  }, [open]);
+
+  useEffect(() => {
+    if (!open) return;
+    const fetchStatus = () => getProviderStatus().then(setProviderStatus).catch(() => {});
+    fetchStatus();
+    const interval = setInterval(fetchStatus, 3000);
+    return () => { clearInterval(interval as any); };
   }, [open]);
 
   const updateSettings = (partial: Partial<ModelSettings>) => {
@@ -236,45 +272,77 @@ const RightSidebar = ({ open }: { open: boolean }) => {
 
   const contextLimit = modelSettings.contextWindow || 8192;
   const usageSegments = [
-    { key: 'prompt', label: 'Prompt', tokens: estimatedTokens?.prompt ?? 0, color: 'color-mix(in srgb, rgb(var(--accent-rgb)) 45%, white)' },
-    { key: 'history', label: 'History', tokens: estimatedTokens?.history ?? 0, color: 'color-mix(in srgb, rgb(var(--accent-rgb)) 70%, white)' },
-    { key: 'system', label: 'System', tokens: estimatedTokens?.system ?? 0, color: 'rgb(var(--accent-rgb))' },
+    { key: 'prompt', label: 'Prompt', value: estimatedTokens?.prompt ?? 0, color: 'color-mix(in srgb, rgb(var(--accent-rgb)) 45%, white)' },
+    { key: 'history', label: 'History', value: estimatedTokens?.history ?? 0, color: 'color-mix(in srgb, rgb(var(--accent-rgb)) 70%, white)' },
+    { key: 'system', label: 'System', value: estimatedTokens?.system ?? 0, color: 'rgb(var(--accent-rgb))' },
   ];
   const totalTokens = (estimatedTokens?.system ?? 0) + (estimatedTokens?.history ?? 0) + (estimatedTokens?.prompt ?? 0);
+
+  const ollamaStatus = providerStatus['ollama'];
+  let vramUsed = 0;
+  let vramModels = 0;
+  if (ollamaStatus?.kind === 'vram') {
+    vramUsed = ollamaStatus.models.reduce((acc: number, m: any) => acc + (m.vramBytes || 0), 0);
+    vramModels = ollamaStatus.models.length;
+  }
 
   return (
     <div className={`overflow-hidden transition-all duration-300 ease-in-out ${open ? 'w-[320px]' : 'w-0'}`}>
       <div className="w-[320px] h-full bg-background flex flex-col gap-4 p-4 overflow-y-auto text-textSecondary">
-        <span className="menu-header">Model Parameters</span>
+        <span className="menu-header">Hardware & Context</span>
 
-        {/* Context Usage Chart */}
-        <div className="flex flex-col gap-2">
-          <div className="flex items-baseline justify-between">
-            <span className="text-sm font-semibold text-white font-mono">
-              {totalTokens.toLocaleString()}
-            </span>
-            <span className="text-xs text-textSecondary font-mono">
-              of {contextLimit.toLocaleString()} tokens
-            </span>
+        {/* Context & VRAM Charts */}
+        <div className="flex gap-3 mb-2">
+          {/* Context Pie */}
+          <div className="flex-1 flex flex-col items-center gap-2 p-3 bg-black/20 border border-white/5 rounded-xl">
+            <span className="text-[10px] font-semibold text-textSecondary uppercase tracking-wider">Context</span>
+            <div className="relative">
+              <PieChart data={usageSegments} total={contextLimit} size={72} thickness={8} />
+              <div className="absolute inset-0 flex items-center justify-center flex-col">
+                <span className="text-[11px] text-white/90 font-mono font-semibold">
+                  {Math.round((totalTokens / contextLimit) * 100)}%
+                </span>
+              </div>
+            </div>
+            <div className="flex flex-col gap-0.5 w-full mt-1">
+              {usageSegments.map((seg) => (
+                <div key={seg.key} className="flex items-center justify-between text-[9px] text-textSecondary px-0.5">
+                  <span className="flex items-center gap-1.5">
+                    <span className="w-1.5 h-1.5 rounded-full" style={{ backgroundColor: seg.color }} />
+                    {seg.label}
+                  </span>
+                  <span className="font-mono">{seg.value}</span>
+                </div>
+              ))}
+            </div>
           </div>
-          <div className="flex h-2 w-full rounded-full overflow-hidden bg-white/10">
-            {usageSegments.map((seg) => (
-              <div
-                key={seg.key}
-                className="h-full"
-                style={{ width: `${(seg.tokens / contextLimit) * 100}%`, backgroundColor: seg.color }}
+          
+          {/* VRAM Pie */}
+          <div className="flex-1 flex flex-col items-center gap-2 p-3 bg-black/20 border border-white/5 rounded-xl opacity-90">
+            <span className="text-[10px] font-semibold text-textSecondary uppercase tracking-wider">VRAM</span>
+            <div className="relative">
+              <PieChart 
+                data={[{ value: vramUsed, color: 'rgb(var(--accent-rgb))' }]} 
+                total={Math.max(vramUsed, 8 * 1024 * 1024 * 1024)} 
+                size={72} thickness={8} 
               />
-            ))}
-          </div>
-          <div className="flex items-center justify-between text-xs text-textSecondary px-0.5">
-            {usageSegments.map((seg) => (
-              <span key={seg.key} className="flex items-center gap-1.5">
-                <span className="w-1.5 h-1.5 rounded-full" style={{ backgroundColor: seg.color }} />
-                {seg.label} {Math.round((seg.tokens / contextLimit) * 100)}%
+              <div className="absolute inset-0 flex items-center justify-center flex-col">
+                <span className="text-[11px] text-white/90 font-mono font-semibold">
+                  {vramModels}
+                </span>
+                <span className="text-[8px] text-textSecondary/60 font-mono">MDLS</span>
+              </div>
+            </div>
+            <div className="flex flex-col justify-center items-center h-full w-full mt-1">
+              <span className="text-[10px] text-textSecondary font-mono font-medium">
+                {vramUsed > 0 ? `${(vramUsed / (1024*1024*1024)).toFixed(1)} GB` : '0 GB'}
               </span>
-            ))}
+              <span className="text-[9px] text-textSecondary/50 font-mono">Used</span>
+            </div>
           </div>
         </div>
+
+        <span className="menu-header mt-2">Model Parameters</span>
 
         {/* Thinking Level */}
         <div className="flex flex-col gap-1.5">

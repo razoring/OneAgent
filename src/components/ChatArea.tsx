@@ -2,6 +2,7 @@ import React, { useState, useRef, useEffect } from 'react';
 import ChatInput from './ChatInput';
 import ThinkingBlock from './ThinkingBlock';
 import ToolCallBlock from './ToolCallBlock';
+import ScreenshotCarousel from './ScreenshotCarousel';
 import { generateChatStream, generateChatResponse, condenseThinking, LLMModel, fileToBase64, parseAttachmentDocument, getModelStats } from '../utils/llm';
 import { executeToolCalls, ToolContext } from '../utils/toolExecutor';
 import { spawnSubAgent, getAgentsSnapshot, waitForAgents } from '../utils/subAgents';
@@ -252,24 +253,6 @@ const BlockToolbar = ({ onEdit, onRegenerate, onDelete }: { onEdit?: () => void,
 const UnifiedToolsBlock = ({ activity, isGenerating, msgIsGenerating, activityFeed, isBrowserExpanded, setIsBrowserExpanded, handleUserKillBrowser, terminatedSnapshot, onEdit, onRegenerate, onDelete }: any) => {
   const { toolCalls } = activity.data;
   const [expanded, setExpanded] = useState(true);
-  const [cdpListening, setCdpListening] = useState<boolean | null>(null);
-  const isLatestBrowserBlock = activityFeed.lastBrowserToolsMessageId === activity.messageId;
-
-  useEffect(() => {
-    if (!isLatestBrowserBlock || !isBrowserExpanded) return;
-    let cancelled = false;
-    const check = async () => {
-      try {
-        const api: any = (window as any).electronAPI;
-        if (!api?.chromeStatus) return;
-        const s = await api.chromeStatus();
-        if (!cancelled) setCdpListening(!!s?.listening);
-      } catch { if (!cancelled) setCdpListening(false); }
-    };
-    check();
-    const id = setInterval(check, 2500);
-    return () => { cancelled = true; clearInterval(id); };
-  }, [isLatestBrowserBlock, isBrowserExpanded]);
 
   return (
     <div className="w-full group relative">
@@ -317,70 +300,6 @@ const UnifiedToolsBlock = ({ activity, isGenerating, msgIsGenerating, activityFe
               );
             })}
             
-            {/* Live Browser — teleports into the latest browser-bearing tools block */}
-            {activityFeed.lastBrowserToolsMessageId === activity.messageId && (
-              <div className="w-full rounded-xl border border-white/10 bg-white/[0.03] backdrop-blur-md overflow-hidden transition-all duration-200">
-                <div
-                  onClick={() => setIsBrowserExpanded(!isBrowserExpanded)}
-                  className="flex items-center justify-between px-3 py-2 cursor-pointer hover:bg-white/[0.05] transition-colors select-none text-xs text-textSecondary group"
-                >
-                  <div className="flex items-center gap-2 min-w-0">
-                    <Globe size={14} className="text-blue-400 shrink-0" />
-                    <span className="font-medium text-textSecondary group-hover:text-white transition-colors shrink-0">Live Browser Session</span>
-                  </div>
-                  <div className="flex items-center gap-2 shrink-0 ml-2">
-                    {terminatedSnapshot ? (
-                      <div className="w-2 h-2 rounded-full bg-red-500" title="Browser terminated" />
-                    ) : (
-                      <>
-                        <button
-                          onClick={(e) => { e.stopPropagation(); handleUserKillBrowser(); }}
-                          className="p-1 rounded hover:bg-red-500/20 text-textSecondary hover:text-red-400 transition-colors"
-                          title="Kill browser session"
-                        >
-                          <Trash2 size={14} />
-                        </button>
-                        <div className="w-2 h-2 rounded-full bg-green-500 animate-pulse" />
-                      </>
-                    )}
-                    {isBrowserExpanded ? (
-                      <ChevronDown size={14} className="text-textSecondary group-hover:text-gray-200 transition-transform" />
-                    ) : (
-                      <ChevronRight size={14} className="text-textSecondary group-hover:text-gray-200 transition-transform" />
-                    )}
-                  </div>
-                </div>
-
-                {isBrowserExpanded && (
-                  <div className="border-t border-white/5 bg-black/40 relative p-3">
-                    {terminatedSnapshot ? (
-                      <img
-                        src={terminatedSnapshot}
-                        alt="Terminated browser session"
-                        className="w-full h-[220px] object-cover grayscale rounded-lg"
-                      />
-                    ) : (
-                      <div className="w-full rounded-lg border border-white/10 bg-black/30 p-4 flex flex-col gap-2">
-                        <div className="flex items-center gap-2 text-xs">
-                          <span className={`w-2 h-2 rounded-full ${cdpListening ? 'bg-green-500 animate-pulse' : cdpListening===false ? 'bg-red-500' : 'bg-yellow-500 animate-pulse'}`} />
-                          <span className="text-white font-medium">{cdpListening ? 'External Chromium — CDP live profile connected' : cdpListening===false ? 'External Chromium — not running (click Browser in sidebar)' : 'Checking external browser…'}</span>
-                        </div>
-                        <p className="text-[11px] leading-relaxed text-textSecondary">
-                          {cdpListening
-                            ? 'Agent is driving parallel CDP Targets in your live profile (cookies shared, no banner). Use Browser button in the left sidebar to launch any Chromium with --remote-debugging-port. Each sub-agent gets its own Target — multitask is now truly parallel.'
-                            : 'Launch via the Browser button above Models (auto-detects Chrome/Edge/Brave on first click) or set the path in Settings → Browser. Tool calls (cursor move, screenshot via Page.captureScreenshot, typing via Input.insertText) are then sent over ws://127.0.0.1:PORT/json → CDP (Page/Input/Runtime/Storage domains).'}
-                        </p>
-                        {!cdpListening && (
-                          <div className="text-[11px] text-textSecondary/70 font-mono">
-                            ws://127.0.0.1:{(() => { try { return (window as any).__lastCdpPort || 9222; } catch { return 9222; } })()}/json
-                          </div>
-                        )}
-                      </div>
-                    )}
-                  </div>
-                )}
-              </div>
-            )}
           </div>
         )}
       </div>

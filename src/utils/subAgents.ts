@@ -258,7 +258,7 @@ const runSubAgent = async (agent: SubAgentState, host: SubAgentHost): Promise<vo
         if (r.imageDataUrl) {
           parts.push({ type: 'text', text: `[${r.toolName} screenshot attached below]` });
           parts.push({ type: 'image_url', image_url: { url: r.imageDataUrl } });
-          browserPreviewStore.addImage(host.chatId, r.imageDataUrl);
+          browserPreviewStore.addImage(agent.id, r.imageDataUrl);
           hasImage = true;
         }
       }

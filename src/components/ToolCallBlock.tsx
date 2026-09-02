@@ -1,5 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { ChevronRight, ChevronDown, Check, X, Terminal, FileCode, Search, Globe, MousePointer2, Loader2, Bot, SlidersHorizontal } from 'lucide-react';
+import ScreenshotCarousel from './ScreenshotCarousel';
+import { chatStore } from '../utils/chatStore';
 interface ToolCallBlockProps {
   toolName: string;
   args: any;
@@ -241,7 +243,7 @@ const ToolCallBlock: React.FC<ToolCallBlockProps> = ({ toolName, args, status, r
             </pre>
           </div>
 
-          {status !== 'executing' && !(isScreenshotTool && imageDataUrl) && (
+          {status !== 'executing' && !(isScreenshotTool && imageDataUrl) && toolName !== 'spawn_agent' && (
             <div className="px-3.5 pb-2.5">
               <div className="text-[10px] font-semibold uppercase tracking-wider text-textSecondary mb-1.5">Output</div>
               <pre className={`text-xs font-mono leading-relaxed whitespace-pre-wrap break-words max-h-[300px] overflow-y-auto select-text ${status === 'error' ? 'text-red-300' : 'text-textSecondary'}`}>
@@ -249,6 +251,20 @@ const ToolCallBlock: React.FC<ToolCallBlockProps> = ({ toolName, args, status, r
               </pre>
             </div>
           )}
+          
+          {toolName === 'spawn_agent' && status === 'completed' && result && (() => {
+            try {
+              const parsed = JSON.parse(result);
+              if (parsed.agentId) {
+                return (
+                  <div className="w-full h-[400px] flex flex-col border-t border-white/5">
+                    <ScreenshotCarousel agentId={parsed.agentId} chatId={chatStore.getActiveId()!} />
+                  </div>
+                );
+              }
+            } catch {}
+            return null;
+          })()}
         </div>
       )}
     </div>

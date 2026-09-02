@@ -1,5 +1,5 @@
 import { app, BrowserWindow, BaseWindow, WebContentsView, session, ipcMain, nativeImage, shell, desktopCapturer, screen, webContents, dialog, protocol, net } from 'electron';
-import { ExtensionsManager } from 'electron-chrome-extensions';
+import { ElectronChromeExtensions } from 'electron-chrome-extensions';
 import * as path from 'path';
 import * as fs from 'fs';
 import * as crypto from 'crypto';
@@ -18,19 +18,20 @@ let mainWindow: BaseWindow | null = null;
 let reactView: WebContentsView | null = null;
 const agentViews = new Map<string, WebContentsView>();
 let activeAgentViewId: string | null = null;
-let extensionsManager: ExtensionsManager | null = null;
+let extensionsManager: ElectronChromeExtensions | null = null;
 
 const createWindow = () => {
   const isMac = process.platform === 'darwin';
   const isWindows = process.platform === 'win32';
 
   const extSession = session.fromPartition('persist:oneagent_browser');
-  extensionsManager = new ExtensionsManager({ session: extSession });
+  extensionsManager = new ElectronChromeExtensions({ session: extSession, license: 'GPL-3.0' });
 
   mainWindow = new BaseWindow({
     width: 1200,
     height: 800,
     autoHideMenuBar: true,
+    backgroundColor: '#171717',
     ...(isMac
       ? { titleBarStyle: 'hidden' as const, trafficLightPosition: { x: 14, y: 10 } }
       : isWindows
@@ -52,27 +53,50 @@ const createWindow = () => {
   });
 
   mainWindow.contentView.addChildView(reactView);
-  
-  const resizeViews = () => {
-    if (!mainWindow) return;
+
+  const getViewBounds = () => {
+    if (!mainWindow) return { x: 0, y: 0, width: 1200, height: 800 };
     const [width, height] = mainWindow.getContentSize();
-    const bounds = { x: 0, y: 0, width, height };
+    return { x: 0, y: 0, width, height };
+  };
+
+  // Set initial bounds synchronously — BaseWindow 'resize' won't fire on creation
+  reactView.setBounds(getViewBounds());
+
+  const resizeViews = () => {
+    const bounds = getViewBounds();
     if (reactView) reactView.setBounds(bounds);
     for (const view of agentViews.values()) {
       view.setBounds(bounds);
     }
+    if (returnOverlayView) {
+      const [w, h] = mainWindow!.getContentSize();
+      returnOverlayView.setBounds({ x: Math.round(w / 2 - 100), y: h - 80, width: 200, height: 60 });
+    }
   };
 
   mainWindow.on('resize', resizeViews);
-  mainWindow.once('ready-to-show', resizeViews);
+  // BaseWindow has no 'ready-to-show' — show explicitly
+  mainWindow.show();
 
   reactView.webContents.on('console-message', (event, level, message, line, sourceId) => {
     const file = sourceId ? sourceId.split('/').pop() : '?';
     console.log(`[Renderer Console]: ${message} (${file}:${line})`);
   });
+  reactView.webContents.on('did-fail-load', (_e, code, desc, url, isMainFrame) => {
+    if (!isMainFrame) return;
+    if (code === -3) return; // aborted, navigation superseded
+    console.error(`[reactView] did-fail-load ${code} ${desc} — ${url}`);
+  });
+  reactView.webContents.on('did-finish-load', () => {
+    console.log('[reactView] did-finish-load', reactView!.webContents.getURL());
+    resizeViews();
+  });
 
   if (!app.isPackaged) {
-    reactView.webContents.loadURL('http://localhost:5173');
+    reactView.webContents.loadURL('http://localhost:5173').catch(err => {
+      console.error('[reactView] loadURL failed — is vite running on :5173?', err.message);
+    });
   } else {
     reactView.webContents.loadFile(path.join(import.meta.dirname, '../dist/index.html'));
   }
@@ -125,12 +149,14 @@ ipcMain.handle('destroy-agent-browser', async (event, { agentId }) => {
   return { success: true };
 });
 
-let activeAgentViewId: string | null = null;
 let returnOverlayView: WebContentsView | null = null;
 
 ipcMain.on('take-control', (event, agentId) => {
   if (!mainWindow) return;
-  const view = agentViews.get(agentId);
+  let view = agentId ? agentViews.get(agentId) : undefined;
+  if (!view && agentViews.size > 0) {
+    view = Array.from(agentViews.values()).pop();
+  }
   if (!view) return;
 
   // Hide react UI, show agent view
@@ -144,7 +170,7 @@ ipcMain.on('take-control', (event, agentId) => {
   }
   
   mainWindow.contentView.addChildView(view);
-  activeAgentViewId = agentId;
+  activeAgentViewId = agentId || Array.from(agentViews.entries()).find(([, v]) => v === view)?.[0] || null;
 
   // Ensure extensions tab is synced to this view
   if (extensionsManager) {
@@ -1169,16 +1195,6 @@ ipcMain.handle('cdp-close-target', async (_e, opts: { port?: number; targetId: s
     await mod.cdpCloseTarget(p, opts.targetId);
     mod.closeSession(opts.targetId);
     return { success:true };
-  } catch (e: any) { return { success:false, error:e?.message }; }
-});
-ipcMain.handle('cdp-send', async (_e, opts: { port?: number; targetId: string; wsUrl?: string; method: string; params?: any }) => {
-  try {
-    const mod: any = await import('./browser/cdp.js');
-    const p = Number(opts?.port) > 0 ? Number(opts.port) : 9222;
-    let wsUrl = opts.wsUrl;
-    if (!wsUrl) wsUrl = await mod.resolveWsUrl(p, opts.targetId);
-    const result = await mod.genericCdpSend(wsUrl, opts.targetId, opts.method, opts.params);
-    return { success:true, result };
   } catch (e: any) { return { success:false, error:e?.message }; }
 });
 // Generic CDP command — used by renderer to drive live-profile targets.

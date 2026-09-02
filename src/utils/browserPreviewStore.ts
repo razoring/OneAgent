@@ -1,22 +1,22 @@
 export class BrowserPreviewStore {
-  private imagesByChat: Record<string, string[]> = {};
+  private imagesByAgent: Record<string, string[]> = {};
   private listeners: Set<() => void> = new Set();
 
-  addImage(chatId: string, imageUrl: string) {
-    if (!this.imagesByChat[chatId]) {
-      this.imagesByChat[chatId] = [];
+  addImage(agentId: string, imageUrl: string) {
+    if (!this.imagesByAgent[agentId]) {
+      this.imagesByAgent[agentId] = [];
     }
-    this.imagesByChat[chatId].push(imageUrl);
+    this.imagesByAgent[agentId].push(imageUrl);
     this.notify();
   }
 
-  getImages(chatId: string | null): string[] {
-    if (!chatId) return [];
-    return this.imagesByChat[chatId] || [];
+  getImages(agentId: string | null): string[] {
+    if (!agentId) return [];
+    return this.imagesByAgent[agentId] || [];
   }
 
-  clearImages(chatId: string) {
-    delete this.imagesByChat[chatId];
+  clearImages(agentId: string) {
+    delete this.imagesByAgent[agentId];
     this.notify();
   }
 

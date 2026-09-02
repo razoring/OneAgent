@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { MessageSquarePlus, Settings, LayoutGrid, Pencil, Check, X, Trash2, Download, Globe } from 'lucide-react';
+import { MessageSquarePlus, Settings, LayoutGrid, Pencil, Check, X, Trash2, Download } from 'lucide-react';
 import SettingsModal from './SettingsModal';
 import { chatStore, DEFAULT_TITLE } from '../utils/chatStore';
 import { ChatMeta } from '../types/chat';
@@ -154,33 +154,6 @@ const ChatRow = ({ meta, activeId, onSelect }: ChatRowProps) => {
   );
 };
 
-// ─── Browser CDP launcher ────────────────────────────────────────────────────
-const BrowserButton: React.FC = () => {
-  const handleTakeControl = async () => {
-    try {
-      const activeChatId = chatStore.getActiveId();
-      if (!activeChatId) return;
-      const api: any = (window as any).electronAPI;
-      if (api && api.takeControl) {
-        await api.takeControl(activeChatId);
-      }
-    } catch (e: any) {
-      alert('Take control failed: ' + (e?.message || String(e)));
-    }
-  };
-
-  return (
-    <button
-      onClick={handleTakeControl}
-      className="flex items-center gap-3 w-full hover:bg-surfaceElevated transition-colors rounded-2xl p-3 text-left text-textSecondary"
-      title="Take Control of the active chat's integrated browser"
-    >
-      <Globe size={18} />
-      <span className="flex-1">Browser</span>
-    </button>
-  );
-};
-
 // ─── Sidebar ─────────────────────────────────────────────────────────────────
 
 const Sidebar = () => {
@@ -257,7 +230,6 @@ const Sidebar = () => {
 
       {/* Bottom Section */}
       <div className="px-4 pb-4 space-y-1.5">
-        <BrowserButton />
         <button className="flex items-center gap-3 w-full hover:bg-surfaceElevated transition-colors rounded-2xl p-3 text-left text-textSecondary">
           <LayoutGrid size={18} />
           Models

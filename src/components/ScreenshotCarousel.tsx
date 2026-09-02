@@ -1,24 +1,17 @@
 import React, { useState, useEffect } from 'react';
-import { chatStore } from '../utils/chatStore';
 import { browserPreviewStore } from '../utils/browserPreviewStore';
 
-export default function ScreenshotCarousel() {
-  const [activeChatId, setActiveChatId] = useState<string | null>(() => chatStore.getActiveId());
+export default function ScreenshotCarousel({ agentId, chatId }: { agentId: string, chatId: string }) {
   const [images, setImages] = useState<string[]>([]);
   const [currentIndex, setCurrentIndex] = useState(0);
 
   useEffect(() => {
-    const unsub = chatStore.subscribeActive(setActiveChatId);
-    return () => { unsub(); };
-  }, []);
-
-  useEffect(() => {
-    setImages(browserPreviewStore.getImages(activeChatId));
+    setImages(browserPreviewStore.getImages(agentId));
     const unsub = browserPreviewStore.subscribe(() => {
-      setImages(browserPreviewStore.getImages(activeChatId));
+      setImages(browserPreviewStore.getImages(agentId));
     });
     return () => { unsub(); };
-  }, [activeChatId]);
+  }, [agentId]);
 
   // When a new image is added, automatically scroll to the latest one
   useEffect(() => {
@@ -30,7 +23,7 @@ export default function ScreenshotCarousel() {
   const handleTakeControl = async () => {
     const api: any = (window as any).electronAPI;
     if (api && api.takeControl) {
-      await api.takeControl(activeChatId);
+      await api.takeControl(agentId);
     }
   };
 
