@@ -55,10 +55,22 @@ export interface ChatMeta {
 // messages.json envelope — tasks are persisted per-chat alongside messages
 // (LLM only sees active tasks via task_list; history not injected into context).
 import type { TaskNode } from './task';
+import type { LLMModel, ModelSettings } from '../utils/llm';
 
 export interface ChatFile {
   version: 1;
   meta: ChatMeta;
   messages: ChatMessage[];
   tasks?: TaskNode[];
+  // Persisted chat configuration so reloading restores exact models/parameters
+  chatConfig?: {
+    orchestratorModel: LLMModel | null;
+    subAgentModel: LLMModel | null;
+    modelSettings: ModelSettings;
+    savedAt: number;
+    savedAtIso: string;
+  };
+  // Top-level timestamps for debug exports
+  savedAt?: number;
+  savedAtIso?: string;
 }

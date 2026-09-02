@@ -3,7 +3,7 @@
 // the active (home) chat pointer and debounced autosave.
 // Flat history only — no sub-agent transcript nesting.
 import { ChatMeta, ChatFile, ChatMessage } from '../types/chat';
-import { fileToBase64 } from './llm';
+import { fileToBase64, getOrchestratorModel, getSubAgentModel, getModelSettings, setOrchestratorModel, setSubAgentModel, saveModelSettings } from './llm';
 
 const api = () => (window as any).electronAPI;
 
@@ -76,10 +76,52 @@ const MAX_WAIT_MS = 4000;
 interface PendingSave { payload: ChatMessage[]; timer: any; firstAt: number }
 const pending = new Map<string, PendingSave>();
 
+const buildChatConfig = () => {
+  try {
+    return {
+      orchestratorModel: getOrchestratorModel(),
+      subAgentModel: getSubAgentModel(),
+      modelSettings: getModelSettings(),
+      savedAt: Date.now(),
+      savedAtIso: new Date().toISOString(),
+    };
+  } catch {
+    return {
+      orchestratorModel: null,
+      subAgentModel: null,
+      modelSettings: getModelSettings(),
+      savedAt: Date.now(),
+      savedAtIso: new Date().toISOString(),
+    };
+  }
+};
+
+const applyChatConfig = (file: ChatFile) => {
+  try {
+    const cfg = file.chatConfig;
+    if (!cfg) return;
+    if (cfg.orchestratorModel !== undefined) setOrchestratorModel(cfg.orchestratorModel);
+    if (cfg.subAgentModel !== undefined) setSubAgentModel(cfg.subAgentModel);
+    if (cfg.modelSettings) saveModelSettings(cfg.modelSettings as any);
+  } catch (e) {
+    console.warn('[chatStore] applyChatConfig failed', e);
+  }
+};
+
 const doSave = async (chatId: string, messages: ChatMessage[]) => {
   try {
     const cleaned = stripRuntimeFields(await sanitizeAttachments(messages));
-    await api().chatsSave(chatId, { messages: cleaned });
+    // Ensure every message has timestamps for debug persistence
+    const now = Date.now();
+    const withTimestamps = cleaned.map(m => ({
+      ...m,
+      createdAt: m.createdAt ?? now,
+      // completedAt is set on assistant finalization; keep as-is if present
+    }));
+    const chatConfig = buildChatConfig();
+    const savedAt = chatConfig.savedAt;
+    const savedAtIso = chatConfig.savedAtIso;
+    await api().chatsSave(chatId, { messages: withTimestamps, chatConfig, savedAt, savedAtIso } as any);
   } catch (e) {
     console.error('[chatStore] save failed', e);
   }
@@ -221,6 +263,35 @@ export const chatStore = {
       const { taskStore } = await import('./taskStore');
       taskStore.hydrate(chatId, (file as any).tasks || []);
     } catch {}
+    // Restore exact models/parameters so replay matches original run
+    applyChatConfig(file);
+    // Rehydrate browser preview images from persisted toolCalls for visual confirmation
+    try {
+      const { browserPreviewStore } = await import('./browserPreviewStore');
+      // Derive agentId from persisted messages: spawn_agent results contain agentId
+      // For now, also hydrate generic images from toolCalls
+      for (const msg of (file.messages || [])) {
+        for (const tc of (msg as any).toolCalls || []) {
+          if (tc.image && typeof tc.image === 'string' && tc.image.length > 100) {
+            // image may already be chat-asset:// URL; still keep for fallback rendering via ToolCallBlock
+            // Additionally seed preview store so carousel fallback works after reload
+            let agentId: string | null = null;
+            try {
+              if (tc.name === 'spawn_agent' && tc.result) {
+                const p = JSON.parse(tc.result);
+                agentId = p.agentId || p.agent_id || null;
+              }
+            } catch {}
+            // Use agentId if found, else use message-bound fallback
+            if (agentId) browserPreviewStore.addImage(agentId, tc.image);
+            else if (String(tc.name || '').startsWith('browser')) {
+              // generic browser image attached to orchestrator chat — store under chatId for fallback
+              browserPreviewStore.addImage(chatId, tc.image);
+            }
+          }
+        }
+      }
+    } catch {}
     return (file.messages || []) as ChatMessage[];
   },
 
@@ -260,3 +331,17 @@ export const chatStore = {
     }
   }
 };
+
+// Persist chatConfig immediately when models/parameters change, even without a new message
+if (typeof window !== 'undefined') {
+  const persistChatConfig = () => {
+    if (!activeId || !ready) return;
+    try {
+      const cfg = buildChatConfig();
+      void api().chatsSave(activeId, { chatConfig: cfg, savedAt: cfg.savedAt, savedAtIso: cfg.savedAtIso } as any).catch(() => {});
+    } catch {}
+  };
+  window.addEventListener('model-settings-updated', persistChatConfig);
+  window.addEventListener('orchestrator-model-updated', persistChatConfig);
+  window.addEventListener('subagent-model-updated', persistChatConfig);
+}

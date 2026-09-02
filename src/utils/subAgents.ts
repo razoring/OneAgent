@@ -43,7 +43,7 @@ export interface SubAgentHost {
 // ─── Configuration ───────────────────────────────────────────────────────────
 
 export const MAX_CONCURRENT_AGENTS = 3;
-const MAX_AGENT_ROUNDS = 8;
+const MAX_AGENT_ROUNDS = 12;
 
 // Whitelists — sub-agents NEVER receive desktop control, shell commands,
 // deletion, self-modification or delegation regardless of requested preset.
@@ -79,14 +79,20 @@ const truncateForContext = (s: string, max = 6000) =>
 
 const subAgentPrompt = (preset: string) =>
 `You are a focused autonomous sub-agent spawned by an orchestrating main agent.
-Your job: fully complete the ONE task you were given, then report back.
+Your job: fully complete the ONE task you were given, then report findings to the orchestrator.
+
+Process — think, act, verify:
+1. Think step-by-step about the task, list assumptions and a 2-3 step plan in your reasoning.
+2. Use your tools (${preset} preset) to gather evidence and perform actions. Prefer parallel tool calls where independent.
+3. After each tool round, briefly reflect on what the results prove and what remains.
+4. Before finishing, verify your acceptance criteria are met; if not, keep working.
+5. Your FINAL text response is delivered verbatim to the orchestrator — start with concise verdict (done/partial/failed), then key evidence, exact paths/commands/URLs, and honest gaps.
 
 Rules:
-- Work autonomously with your tools (${preset} preset). Never ask questions — there is no human on this channel.
+- Work autonomously. Never ask questions — there is no human on this channel.
 - If blocked one way, try a reasonable alternative before reporting failure.
-- Your FINAL text response is delivered verbatim to the orchestrator as the task result. Make it concise and structured: direct answer first, key evidence/details after, failures honestly stated.
-- Do not address the user; do not add greetings or meta-commentary about being a sub-agent.
-- Stay strictly within the task scope.`;
+- Do not add greetings or meta-commentary about being a sub-agent.
+- Stay strictly within task scope. Do not mark done without tool-verified evidence.`;
 
 // ─── Registry & scheduler ────────────────────────────────────────────────────
 
@@ -112,12 +118,17 @@ const pumpQueue = (hosts: Map<string, SubAgentHost>) => {
 // concurrency slot frees up. Host wires approvals + default model + aborts.
 export const spawnSubAgent = (spec: SubAgentSpec, host: SubAgentHost): string => {
   const id = genId();
+  // Auto-upgrade preset: browsing tasks need full browser kit, not just general
+  const rawTools = spec.tools && TOOL_PRESETS[spec.tools] ? spec.tools : 'general';
+  const taskLower = (spec.task + ' ' + (spec.context || '')).toLowerCase();
+  const needsBrowser = /browser|navigate|click|type|scroll|website|webpage|page|search|screenshot|observe/.test(taskLower);
+  const effectiveTools = needsBrowser && rawTools === 'general' ? 'browser' : rawTools;
   const state: SubAgentState = {
     id,
     label: spec.label || spec.task.slice(0, 40),
     task: spec.task,
     context: spec.context,
-    tools: spec.tools && TOOL_PRESETS[spec.tools] ? spec.tools : 'general',
+    tools: effectiveTools,
     status: 'queued',
     model: spec.model,
     params: spec.params,
@@ -126,18 +137,27 @@ export const spawnSubAgent = (spec: SubAgentSpec, host: SubAgentHost): string =>
   registry.set(id, state);
   hostMap.set(id, host);
   
-  // Auto-sync: Create a linked task in the UI for this sub-agent
-  taskStore.add(host.chatId, {
-    title: state.label,
-    description: state.task,
-    goal: spec.context || '',
-    toolHint: state.tools === 'browser' ? 'browser' : state.tools === 'files' ? 'files' : 'mixed',
-    agentId: id,
-    assumptions: [],
-    acceptanceCriteria: [],
-    context: '',
-    dependsOn: []
-  });
+  // Link to an existing orchestrator task if one matches this sub-agent's assignment,
+  // otherwise create a minimal task so the RightSidebar shows worker progress.
+  const existing = taskStore.get(host.chatId).find(t =>
+    !t.agentId && (t.title.toLowerCase() === state.label.toLowerCase() || t.title.toLowerCase().includes(state.label.toLowerCase().slice(0, 20)))
+  );
+  if (existing) {
+    taskStore.update(host.chatId, existing.id, { agentId: id });
+  } else {
+    // No matching orchestrator task (e.g., direct spawn without task_add) — create a linked task
+    taskStore.add(host.chatId, {
+      title: state.label,
+      description: state.task,
+      goal: spec.context || '',
+      toolHint: state.tools === 'browser' ? 'browser' : state.tools === 'files' ? 'files' : 'mixed',
+      agentId: id,
+      assumptions: [],
+      acceptanceCriteria: [],
+      context: spec.context || '',
+      dependsOn: []
+    });
+  }
 
   pumpQueue(hostMap);
   return id;
@@ -198,7 +218,17 @@ const runSubAgent = async (agent: SubAgentState, host: SubAgentHost): Promise<vo
     const model = await resolveModel(agentParamsOf(agent), host);
     agent.model = { id: model.id, provider: model.provider };
 
-    const mergedSettings: ModelSettings = { ...getModelSettings(), ...(agent.params || {}) };
+    const base = getModelSettings();
+    const mergedSettings: ModelSettings = { ...base, ...(agent.params || {}) };
+    // Sub-agents should actually think — inherit orchestrator level but never stay 'off' unless explicitly asked for cheap workers
+    const wantsOff = agent.params?.thinkingLevel === 'off' || (agent.tools === 'observe' && !agent.params?.thinkingLevel);
+    if (!wantsOff && (!mergedSettings.thinkingLevel || mergedSettings.thinkingLevel === 'off')) {
+      mergedSettings.thinkingLevel = base.thinkingLevel && base.thinkingLevel !== 'off' ? base.thinkingLevel : 'medium';
+    }
+    // Browser sub-agents need higher token budget and patience for multi-step browsing
+    if (agent.tools === 'browser' && !agent.params?.maxOutputLength) {
+      mergedSettings.maxOutputLength = Math.max(mergedSettings.maxOutputLength || 4096, 8192);
+    }
     const toolDefs = getSystemTools('subagent').filter(t => TOOL_PRESETS[agent.tools].has(t.function.name));
 
     const messages: any[] = [
@@ -235,15 +265,48 @@ const runSubAgent = async (agent: SubAgentState, host: SubAgentHost): Promise<vo
       if (rawCalls.length === 0) {
         const truncated = res.finishReason === 'length';
         const wentSilent = !(res.content || '').trim() && !!(res.thinking || '').trim();
-        if ((truncated || wentSilent) && autoContinues < 2 && round < MAX_AGENT_ROUNDS - 1) {
+        const contentLen = (res.content || '').trim().length;
+        const finalLen = (finalContent || '').trim().length + contentLen;
+        const usedTools = agent.steps > 0;
+        const presetNeedsTools = agent.tools !== 'observe';
+        const quitTooEarly = presetNeedsTools && !usedTools && contentLen < 250;
+        const shortFinal = contentLen > 0 && contentLen < 100 && !usedTools;
+        const browsingWithoutInteraction = agent.tools === 'browser' && usedTools && agent.steps === 1 && finalLen < 300;
+        const futureTense = /\bwill (notify|report|complete|get back|update you)\b/i.test(res.content || '');
+        if ((truncated || wentSilent || quitTooEarly || shortFinal || browsingWithoutInteraction || futureTense) && autoContinues < 3 && round < MAX_AGENT_ROUNDS - 1) {
           autoContinues++;
-          // Forward the interrupted round's conclusions so the retry inherits
-          // its decision instead of re-deriving it from scratch.
           const digest = condenseThinking(res.thinking)
             .split('\n').filter(l => !l.startsWith('[Earlier')).join('\n').trim();
+          let reason = truncated ? 'Your reply hit the token limit mid-generation.'
+            : wentSilent ? 'Your reasoning ended without a tool call or answer.'
+            : quitTooEarly ? 'You tried to finish without using required tools or evidence.'
+            : futureTense ? 'Do not promise future work — you must complete the task NOW in this session. No follow-ups.'
+            : browsingWithoutInteraction ? 'You spawned/observed a browser but did no browsing (no click/type/navigate). Continue the browsing task.'
+            : 'Your final answer was too short to prove completion.';
+          if (agent.tools === 'browser' && !futureTense && contentLen < 200) {
+            reason += ' For browser tasks you must do: observe → act (click/type/navigate) → observe → repeat until done. A single observe is never enough.';
+          }
           messages.push({
             role: 'user',
-            content: `[System notice] ${truncated ? 'Your reply hit the token limit mid-generation.' : 'Your reasoning ended without a tool call or answer.'} The task is not done.${digest ? `\nConclusions already reached (trust these):\n${digest}` : ''} Respond with your next tool call now.`
+            content: `[System notice] ${reason} The task is not done. You must use tools to gather evidence before reporting.${digest ? `\nConclusions already reached (trust these):\n${digest}` : ''} Respond with your next tool call now (or a substantive ≥200-char report with evidence if truly blocked).`
+          });
+          continue;
+        }
+        // If we have a short answer but never verified, force one more evidence round
+        if (contentLen < 150 && usedTools && autoContinues < 1) {
+          autoContinues++;
+          messages.push({
+            role: 'user',
+            content: '[System notice] Your report is too brief to satisfy the task. Expand with exact evidence (paths, excerpts, tool outputs, observed page details) before finishing.'
+          });
+          continue;
+        }
+        // Future-tense check for already tool-using agents
+        if (futureTense && autoContinues < 2) {
+          autoContinues++;
+          messages.push({
+            role: 'user',
+            content: '[System notice] Do not use future tense. You must deliver the actual findings now, not promise to notify later. Continue working and report results immediately.'
           });
           continue;
         }

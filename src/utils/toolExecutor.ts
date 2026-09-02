@@ -98,6 +98,21 @@ const isCdpMode = async (): Promise<boolean> => {
   return true;
 };
 
+// Detects bundled enumeration that should be split into separate tasks/agents.
+// Triggers on "1. ... 2. ..." / "1) ... 2)" / "Step 1" ×2+ in same string.
+const hasBundledEnumeration = (text: string): boolean => {
+  const t = String(text || '');
+  // Count enumerated markers like "1. " / "1) " / "Step 1" at line start or after ; :
+  const enumMarkers = (t.match(/(?:^|[\n;])\s*(?:\d+[\.\)]\s+|Step\s*\d+[\.:]?\s+)/g) || []).length;
+  if (enumMarkers >= 2) return true;
+  // Fallback: repeated retailer/site pattern with "search for" and distinct retailer names
+  const retailerHits = (t.match(/Best Buy|Amazon|Canada Computers|Newegg|Walmart/gi) || []).length;
+  if (retailerHits >= 2 && /search for/i.test(t) && enumMarkers >= 1) return true;
+  // Explicit "Please perform the following steps: 1." phrasing
+  if (/perform the following steps:/i.test(t) && enumMarkers >= 1) return true;
+  return false;
+};
+
 // Short human-readable description for permission cards.
 export const summarizeArgs = (name: string, args: any): string => {
   try {
@@ -180,8 +195,14 @@ const HANDLERS: Record<string, Handler> = {
     return ok(j(res));
   },
   run_command: async (args) => {
+    const cmd = String(p(args, 'command', 'Command', 'cmd') || '');
+    if (/search\s+best buy|search\s+amazon|search.*intel arc|price.*compare/i.test(cmd)) {
+      throw new Error(
+        "run_command is not the browsing tool — for price checks across retailers, use spawn_agent with browser tools (e.g., spawn_agent(task=\"Check Best Buy for Intel Arc Pro B70\", tools=\"browser\"), spawn_agent for Amazon, etc., batched in parallel). Shell search was denied — adapt to browser sub-agents."
+      );
+    }
     const res = await (window as any).electronAPI.runCommand(
-      p(args, 'command', 'Command', 'cmd'),
+      cmd,
       p(args, 'cwd', 'Cwd'),
       Number(p(args, 'timeout_ms', 'timeoutMs')) || undefined
     );
@@ -620,10 +641,16 @@ const HANDLERS: Record<string, Handler> = {
     }));
   },
 
-  // Sub-agents
+  // Sub-agents — one atomic item per agent
   spawn_agent: async (args, ctx) => {
     const task = p(args, 'task', 'Task');
     if (!task || !String(task).trim()) throw new Error("spawn_agent requires 'task'");
+    if (hasBundledEnumeration(String(task)) || hasBundledEnumeration(String(p(args, 'context', 'Context') || ''))) {
+      throw new Error(
+        "spawn_agent task is bundled (contains enumerated steps like '1. ... 2. ... 3. ...'). " +
+        "Split into one spawn_agent per atomic item — e.g., for 3 retailers, call spawn_agent 3 times in parallel, each with ONE retailer (Best Buy only / Amazon only / Canada Computers only). Do not combine them."
+      );
+    }
     const rawParams = args.params || args.Params || {};
     const spec = {
       task: String(task),
@@ -691,6 +718,24 @@ const HANDLERS: Record<string, Handler> = {
       if (desc.length < descMin) throw new Error(`task_add: tasks[${i}].description must be verbose ≥${descMin} chars (why+how), got ${desc.length}. Rewrite more verbosely.`);
       if (ctxStr.length < ctxMin) throw new Error(`task_add: tasks[${i}].context must be ≥${ctxMin} chars verbatim (paths/commands/URLs), got ${ctxStr.length}. Include copy-paste ready context.`);
       if (!Array.isArray(acc) || acc.length < (isSmall ? 1 : 2)) throw new Error(`task_add: tasks[${i}].acceptanceCriteria requires ≥${isSmall?1:2} observable checkboxes, got ${Array.isArray(acc)?acc.length:0}`);
+      const bundledSource = `${title}\n${desc}\n${ctxStr}`;
+      if (hasBundledEnumeration(bundledSource)) {
+        throw new Error(
+          `task_add: tasks[${i}] is bundled — its title/description/context contains enumerated steps like "1. ... 2. ... 3. ..." covering multiple distinct items/retailers/sites. ` +
+          `Create one task per atomic item instead (e.g., 3 retailers → 3 tasks). Split "${title}" into separate tasks, each handling ONE retailer/site.`
+        );
+      }
+      if (raw.length === 1 && hasBundledEnumeration(`${desc}\n${ctxStr}`) === false) {
+        // Single-task with multi-item intent often hides as "compare X across A, B, C" — nudge to split
+        const multiRetailer = /Best Buy|Amazon|Canada Computers|Newegg|Walmart/gi;
+        const hits = (bundledSource.match(multiRetailer) || []).length;
+        if (hits >= 2 && /compare|across|each retailer/i.test(bundledSource)) {
+          throw new Error(
+            `task_add: single task covers ${hits} distinct retailers/sites but should be ${hits} tasks (one per retailer). ` +
+            `Split into ${hits} tasks so each sub-agent stays focused on one retailer.`
+          );
+        }
+      }
     }
     const items = raw.map((t: any) => ({
       title: String(t.title).trim(),
@@ -703,7 +748,7 @@ const HANDLERS: Record<string, Handler> = {
       dependsOn: Array.isArray(t.dependsOn) ? t.dependsOn.map((s:any)=>String(s)) : [],
     }));
     const created = taskStore.replaceAll(chatId, items);
-    return ok(j({ success: true, clearedPrevious: true, created: created.map(c=>({id:c.id, title:c.title, status:c.status})), note: 'Replaced all tasks for this chat (previous cleared). Update each via task_update when acceptance met.' }));
+    return ok(j({ success: true, clearedPrevious: true, created: created.map(c=>({id:c.id, title:c.title, status:c.status})), note: `Replaced all tasks (${created.length}) — these ARE your sub-agent assignments. Now spawn ONE sub-agent per task in parallel (batch spawn_agent calls), each with task= that task's description+context (atomic, no enumeration). Do not bundle multiple tasks into one agent.` }));
   },
 
   task_update: async (args, ctx) => {

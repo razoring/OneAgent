@@ -6,6 +6,7 @@ import * as crypto from 'crypto';
 import { pathToFileURL } from 'url';
 import AdmZip from 'adm-zip';
 import * as officeParser from 'officeparser';
+import { BrowserShared } from './browser/Browser.js';
 
 // chat-asset:// must be registered as privileged before app ready so the
 // renderer can load local images through it over both http (dev) and file (prod).
@@ -16,106 +17,38 @@ protocol.registerSchemesAsPrivileged([
 
 let mainWindow: BaseWindow | null = null;
 let reactView: WebContentsView | null = null;
-const agentViews = new Map<string, WebContentsView>();
+const agentViews = new Map<string, WebContentsView>(); // legacy single-view path — kept for compat, but new code uses Browser
 let activeAgentViewId: string | null = null;
 let extensionsManager: ElectronChromeExtensions | null = null;
 
-// ─── Per-agent tab views (real tabs) ──────────────────────────────────────
-const browserTabs = new Map<string, Map<string, WebContentsView>>(); // agentId -> tabId -> view
-const browserTabMeta = new Map<string, { url: string; title: string; loading: boolean; parked: boolean; favicon?: string; canGoBack?: boolean; canGoForward?: boolean }>(); // `${agentId}::${tabId}`
+// ─── Encapsulated shared browser core — one session/extensions, many instantiable browsers ───
+const browserShared = new BrowserShared();
+
+// Back-compat aliases — deprecated direct maps now delegate to BrowserShared instances
+// They keep old global names working for any leftover references while the true state lives in BrowserShared
+const browserTabs = new Map<string, Map<string, WebContentsView>>(); // deprecated — use browserShared.getOrCreate(id).tabs
+const browserTabMeta = new Map<string, any>();
 const activeTabForAgent = new Map<string, string>();
-// per-agent last bounds so standalone/agent switches don't clobber each other
 const lastBrowserBoundsForAgent = new Map<string, { x: number; y: number; width: number; height: number }>();
-const lastActiveAt = new Map<string, number>(); // tabKey -> timestamp
+const lastActiveAt = new Map<string, number>();
 const suspendTimers = new Map<string, NodeJS.Timeout>();
-const AUTO_SUSPEND_MS = 5 * 60 * 1000; // 5 min
+const AUTO_SUSPEND_MS = 5 * 60 * 1000;
 const tabKey = (agentId: string, tabId: string) => `${agentId}::${tabId}`;
-const getAgentTabs = (agentId: string) => {
-  let m = browserTabs.get(agentId);
-  if (!m) { m = new Map(); browserTabs.set(agentId, m); }
-  return m;
-};
+const getAgentTabs = (agentId: string) => browserShared.getOrCreate(agentId).tabs as any;
 const emitTabUpdate = (agentId: string, tabId: string) => {
-  const meta = browserTabMeta.get(tabKey(agentId, tabId));
-  if (!meta || !reactView || reactView.webContents.isDestroyed()) return;
-  reactView.webContents.send('browser-tab-updated', { agentId, tabId, ...meta });
+  const b = browserShared.get(agentId);
+  const m = b?.meta.get(`${agentId}::${tabId}`);
+  if (m) browserShared.emitTabUpdate(agentId, tabId, m as any);
 };
-const scheduleAutoSuspend = (agentId: string, tabId: string) => {
-  const key = tabKey(agentId, tabId);
-  if (suspendTimers.has(key)) clearTimeout(suspendTimers.get(key)!);
-  // never suspend active tab
-  if (activeTabForAgent.get(agentId) === tabId) return;
-  const meta = browserTabMeta.get(key);
-  if (!meta || meta.parked) return;
-  const view = browserTabs.get(agentId)?.get(tabId);
-  if (!view || view.webContents.isDestroyed()) return;
-  // don't suspend audible tabs
-  try { if ((view.webContents as any).isCurrentlyAudible?.()) return; } catch {}
-  const timer = setTimeout(() => {
-    suspendTimers.delete(key);
-    const curMeta = browserTabMeta.get(key);
-    const curView = browserTabs.get(agentId)?.get(tabId);
-    if (!curMeta || !curView || curView.webContents.isDestroyed()) return;
-    if (activeTabForAgent.get(agentId) === tabId) return;
-    try { if ((curView.webContents as any).isCurrentlyAudible?.()) { scheduleAutoSuspend(agentId, tabId); return; } } catch {}
-    curMeta.parked = true;
-    try { mainWindow?.contentView.removeChildView(curView); } catch {}
-    try { (curView.webContents as any).setBackgroundThrottling?.(true); } catch {}
-    try { curView.webContents.setAudioMuted(true); } catch {}
-    emitTabUpdate(agentId, tabId);
-    console.log(`[tabs] auto-suspended ${key}`);
-  }, AUTO_SUSPEND_MS);
-  suspendTimers.set(key, timer);
-};
-const cancelAutoSuspend = (agentId: string, tabId: string) => {
-  const key = tabKey(agentId, tabId);
-  const t = suspendTimers.get(key);
-  if (t) { clearTimeout(t); suspendTimers.delete(key); }
-};
+const scheduleAutoSuspend = (agentId: string, tabId: string) => browserShared.getOrCreate(agentId).tabs.has(tabId) && (browserShared.get(agentId) as any)?.['scheduleAutoSuspend']?.(tabId);
+const cancelAutoSuspend = (agentId: string, tabId: string) => { try { (browserShared.get(agentId) as any)?.['cancelAutoSuspend']?.(tabId); } catch {} };
 const attachTabEvents = (view: WebContentsView, agentId: string, tabId: string) => {
-  const key = tabKey(agentId, tabId);
-  const updateMeta = (patch: Partial<{ url: string; title: string; loading: boolean; favicon?: string; canGoBack?: boolean; canGoForward?: boolean }>) => {
-    const cur = browserTabMeta.get(key);
-    if (!cur) return;
-    Object.assign(cur, patch);
-    // keep nav state fresh
-    try {
-      cur.canGoBack = view.webContents.canGoBack();
-      cur.canGoForward = view.webContents.canGoForward();
-    } catch {}
-    emitTabUpdate(agentId, tabId);
-  };
-  const touchActive = () => {
-    lastActiveAt.set(key, Date.now());
-    cancelAutoSuspend(agentId, tabId);
-    // schedule suspend for other tabs that went inactive
-    const tabs = browserTabs.get(agentId);
-    if (tabs) for (const [tid] of tabs) if (tid !== tabId) scheduleAutoSuspend(agentId, tid);
-  };
-  view.webContents.on('did-start-loading', () => { updateMeta({ loading: true }); touchActive(); });
-  view.webContents.on('did-stop-loading', () => { updateMeta({ loading: false, title: view.webContents.getTitle() || curTitle(), url: view.webContents.getURL() }); touchActive(); });
-  view.webContents.on('did-navigate', (_e: any, url: string) => { updateMeta({ url }); touchActive(); });
-  view.webContents.on('did-navigate-in-page', (_e: any, url: string) => { updateMeta({ url }); touchActive(); });
-  // HTTP 30x redirects don't always fire did-navigate until commit — listen explicitly so URL bar updates immediately
-  view.webContents.on('did-redirect-navigation' as any, (_e: any, url: string) => { updateMeta({ url }); touchActive(); });
-  view.webContents.on('page-title-updated', (_e: any, title: string) => updateMeta({ title }));
-  view.webContents.on('page-favicon-updated', (_e: any, favicons: string[]) => {
-    if (favicons && favicons[0]) updateMeta({ favicon: favicons[0] });
-  });
-  view.webContents.on('did-fail-load', (_e: any, code: number, desc: string, url: string, isMainFrame: boolean) => {
-    if (!isMainFrame || code === -3) return;
-    updateMeta({ loading: false });
-  });
-  const curTitle = () => view.webContents.getTitle() || browserTabMeta.get(key)?.title || 'New Tab';
+  // deprecated — Browser instances handle their own events; no-op for compat
 };
 
 const createWindow = () => {
   const isMac = process.platform === 'darwin';
   const isWindows = process.platform === 'win32';
-
-  const extSession = session.fromPartition('persist:oneagent_browser');
-  extensionsManager = new ElectronChromeExtensions({ session: extSession, license: 'GPL-3.0' });
-  try { ElectronChromeExtensions.handleCRXProtocol(extSession); } catch (e) { console.warn('[extensions] handleCRXProtocol failed', e); }
 
   mainWindow = new BaseWindow({
     width: 1200,
@@ -143,6 +76,10 @@ const createWindow = () => {
   });
 
   mainWindow.contentView.addChildView(reactView);
+
+  // Encapsulated core init — single session/extensions shared by every Browser instance
+  browserShared.init(mainWindow, reactView);
+  extensionsManager = browserShared.extensionsManager;
 
   const getViewBounds = () => {
     if (!mainWindow) return { x: 0, y: 0, width: 1200, height: 800 };
@@ -220,6 +157,7 @@ ipcMain.handle('create-agent-browser', async (event, { agentId, initialUrl }) =>
   
   if (initialUrl) {
     view.webContents.loadURL(initialUrl).catch(err => {
+      if (err?.message?.includes('ERR_ABORTED') || err?.code === -3) return;
       console.error('[agentBrowser] loadURL failed:', err.message);
     });
   }
@@ -261,101 +199,36 @@ ipcMain.handle('take-control', async (event, agentId) => {
   if (!mainWindow) return { success: false };
   const id = agentId || 'default';
 
-  // If this agent has tab views, show the active tab instead of the legacy single view
-  const tabs = browserTabs.get(id);
-  const activeTid = tabs ? activeTabForAgent.get(id) : undefined;
-  if (tabs && activeTid && tabs.has(activeTid)) {
-    const tabView = tabs.get(activeTid)!;
-    // Hide previous agent's tab view
-    if (activeAgentViewId && activeAgentViewId !== id) {
-      const prevTabs = browserTabs.get(activeAgentViewId);
-      const prevTid = activeTabForAgent.get(activeAgentViewId);
-      if (prevTabs && prevTid) {
-        const prevView = prevTabs.get(prevTid);
-        if (prevView) try { mainWindow.contentView.removeChildView(prevView); } catch {}
-      }
-      const prevLegacy = agentViews.get(activeAgentViewId);
-      if (prevLegacy) try { mainWindow.contentView.removeChildView(prevLegacy); } catch {}
-    }
-    if (reactView) try { mainWindow.contentView.addChildView(reactView); } catch {}
-    try { mainWindow.contentView.addChildView(tabView); } catch {}
-    activeAgentViewId = id;
-    const b0 = lastBrowserBoundsForAgent.get(id);
-    if (b0) try { tabView.setBounds(b0 as any); } catch {}
-    if (extensionsManager) try { extensionsManager.selectTab(tabView.webContents); } catch {}
-    return { success: true, webContentsId: tabView.webContents.id };
+  // Encapsulated path — every browser (take-control & standalone) is now a Browser instance with identical core abilities
+  // Hide previously visible browser (if any) — whether it was another Browser instance or legacy agentViews
+  if (browserShared.activeBrowserId && browserShared.activeBrowserId !== id) {
+    try { browserShared.getOrCreate(browserShared.activeBrowserId).hide(); } catch {}
+    const prevLegacy = agentViews.get(browserShared.activeBrowserId);
+    if (prevLegacy) try { mainWindow.contentView.removeChildView(prevLegacy); } catch {}
+  }
+  // Also hide standalone if it was visible but not marked as activeBrowserId
+  if (!browserShared.activeBrowserId || browserShared.activeBrowserId !== id) {
+    try { browserShared.getOrCreate('__standalone__').hide(); } catch {}
   }
 
-  let view = agentViews.get(id);
-  if (!view && agentViews.size > 0) {
-    view = Array.from(agentViews.values())[0];
-  }
-  if (!view) {
-    const extSession = session.fromPartition('persist:oneagent_browser');
-    view = new WebContentsView({
-      webPreferences: { session: extSession, contextIsolation: true, nodeIntegration: false }
-    });
-    const [width, height] = mainWindow.getContentSize();
-    view.setBounds({ x: 0, y: 0, width, height });
-    agentViews.set(id, view);
-    view.webContents.on('before-input-event', (_event: any, input: any) => {
-      if (input.type === 'keyDown' && input.key === 'F12') view?.webContents.toggleDevTools();
-    });
-    view.webContents.loadURL('https://duckduckgo.com').catch(() => {});
-  }
-  if (activeAgentViewId && agentViews.has(activeAgentViewId)) {
-    const old = agentViews.get(activeAgentViewId);
-    if (old && old !== view) try { mainWindow.contentView.removeChildView(old); } catch {}
-  }
-  // Also hide previous agent's active tab view
-  if (activeAgentViewId && activeAgentViewId !== id) {
-    const prevTabs = browserTabs.get(activeAgentViewId);
-    const prevTid = activeTabForAgent.get(activeAgentViewId);
-    if (prevTabs && prevTid) {
-      const pv = prevTabs.get(prevTid);
-      if (pv) try { mainWindow.contentView.removeChildView(pv); } catch {}
-    }
-  }
+  const browser = browserShared.getOrCreate(id);
+  browserShared.activeBrowserId = id;
+  activeAgentViewId = id; // keep legacy var in sync for bounds/update handlers
   if (reactView) try { mainWindow.contentView.addChildView(reactView); } catch {}
-  try { mainWindow.contentView.addChildView(view); } catch {}
-  activeAgentViewId = id;
-  view.webContents.removeAllListeners('context-menu');
-  view.webContents.on('context-menu', (_: any, params: any) => {
-    const menu = Menu.buildFromTemplate([
-      { label: 'Back', click: () => view!.webContents.goBack(), enabled: view!.webContents.canGoBack() },
-      { label: 'Forward', click: () => view?.webContents.goForward(), enabled: view?.webContents.canGoForward() },
-      { label: 'Reload', click: () => view?.webContents.reload() },
-      { type: 'separator' },
-      { label: 'Copy', role: 'copy' },
-      { label: 'Paste', role: 'paste' },
-      { type: 'separator' },
-      { label: 'Inspect Element', click: () => view?.webContents.inspectElement(params.x, params.y) },
-    ]);
-    menu.popup();
-  });
+  browser.show();
 
-  // Ensure extensions tab is synced to this view
-  if (extensionsManager) {
-    extensionsManager.selectTab(view.webContents);
-  }
-  
-  return { success: true };
+  const activeTab = (browser as any).activeTabId ? (browser as any).tabs.get((browser as any).activeTabId) : null;
+  return { success: true, webContentsId: activeTab?.webContents.id || null };
 });
 
 ipcMain.handle('return-to-chat', async () => {
   if (!mainWindow) return { success: false };
-  // Hide active tab view if present
-  if (activeAgentViewId) {
-    const tid = activeTabForAgent.get(activeAgentViewId);
-    const tview = tid ? browserTabs.get(activeAgentViewId)?.get(tid) : undefined;
-    if (tview) {
-      try { mainWindow.contentView.removeChildView(tview); } catch {}
-      const meta = browserTabMeta.get(tabKey(activeAgentViewId, tid!));
-      // Keep parked tabs throttled, active tabs just detached
-      if (!meta?.parked) {
-        try { mainWindow.contentView.addChildView(tview, 0); } catch {}
-      }
-    }
+  // Unified hide — works for both Browser instances and legacy single view
+  if (browserShared.activeBrowserId) {
+    try { browserShared.getOrCreate(browserShared.activeBrowserId).hide(); } catch {}
+  } else if (activeAgentViewId) {
+    const b = browserShared.get(activeAgentViewId);
+    if (b) try { b.hide(); } catch {}
   }
   if (activeAgentViewId && agentViews.has(activeAgentViewId)) {
     const activeView = agentViews.get(activeAgentViewId);
@@ -366,21 +239,16 @@ ipcMain.handle('return-to-chat', async () => {
       } catch {}
     }
   }
+  browserShared.activeBrowserId = null;
   activeAgentViewId = null;
   return { success: true };
 });
 ipcMain.handle('browser-update-bounds', (event, bounds) => {
-  // store per active agent or standalone
-  const activeId = activeAgentViewId || '__standalone__';
-  lastBrowserBoundsForAgent.set(activeId, bounds);
-  lastBrowserBoundsForAgent.set('__standalone__', bounds); // keep in sync so standalone switch gets correct rect
-  const activeTabId = activeAgentViewId ? activeTabForAgent.get(activeAgentViewId) : activeTabForAgent.get('__standalone__');
-  const lookupId = activeAgentViewId || '__standalone__';
-  if (lookupId && activeTabId) {
-    const tabs = browserTabs.get(lookupId);
-    const view = tabs?.get(activeTabId);
-    if (view && !view.webContents.isDestroyed()) { try { view.setBounds(bounds); } catch {} return { success: true }; }
-  }
+  // Unified — single Browser core, per-instance bounds stored in each Browser
+  const activeId = browserShared.activeBrowserId || activeAgentViewId || '__standalone__';
+  try { browserShared.getOrCreate(activeId).updateBounds(bounds); } catch {}
+  try { browserShared.getOrCreate('__standalone__').updateBounds(bounds); } catch {}
+  // legacy fallback for any remaining agentViews consumers
   if (activeAgentViewId && agentViews.has(activeAgentViewId)) {
     const view = agentViews.get(activeAgentViewId);
     if (view && !view.webContents.isDestroyed()) try { view.setBounds(bounds); } catch {}
@@ -389,32 +257,29 @@ ipcMain.handle('browser-update-bounds', (event, bounds) => {
 });
 
 ipcMain.handle('browser-navigate', (event, url) => {
-  const pickActive = (): { id: string; tid: string } | null => {
-    if (activeAgentViewId) {
-      const tid = activeTabForAgent.get(activeAgentViewId);
-      if (tid) return { id: activeAgentViewId, tid };
-    }
-    const sTid = activeTabForAgent.get('__standalone__');
-    if (sTid) return { id: '__standalone__', tid: sTid };
-    return null;
-  };
-  const picked = pickActive();
-  if (picked) {
-    const view = browserTabs.get(picked.id)?.get(picked.tid);
-    if (view && !view.webContents.isDestroyed()) {
-      if (url === 'back') { if (view.webContents.canGoBack()) view.webContents.goBack(); }
-      else if (url === 'forward') { if (view.webContents.canGoForward()) view.webContents.goForward(); }
-      else if (url === 'reload') view.webContents.reload();
-      else if (url === 'stop') view.webContents.stop();
-      else view.webContents.loadURL(url).catch(() => {});
+  const activeId = browserShared.activeBrowserId || activeAgentViewId || '__standalone__';
+  const b = browserShared.get(activeId) || browserShared.getOrCreate(activeId);
+  // try active Browser instance first (covers both take-control and user-visible)
+  try {
+    const tid = (b as any).activeTabId;
+    if (tid) {
+      b.navigate(url);
       return { success: true };
     }
-  }
+  } catch {}
+  // fallback — try standalone if active had no tab
+  try {
+    const s = browserShared.get('__standalone__');
+    if (s && (s as any).activeTabId) { s.navigate(url); return { success: true }; }
+  } catch {}
   if (activeAgentViewId && agentViews.has(activeAgentViewId)) {
     const view = agentViews.get(activeAgentViewId);
     if (view && !view.webContents.isDestroyed()) {
-      if (url === 'back') { if (view.webContents.canGoBack()) view.webContents.goBack(); }
-      else if (url === 'forward') { if (view.webContents.canGoForward()) view.webContents.goForward(); }
+      const nav:any = (view.webContents as any).navigationHistory;
+      const canGoBack = () => { try{ return nav ? nav.canGoBack() : (view.webContents as any).canGoBack(); }catch{ return false; } };
+      const canGoForward = () => { try{ return nav ? nav.canGoForward() : (view.webContents as any).canGoForward(); }catch{ return false; } };
+      if (url === 'back') { if (canGoBack()) nav ? nav.goBack() : view.webContents.goBack(); }
+      else if (url === 'forward') { if (canGoForward()) nav ? nav.goForward() : view.webContents.goForward(); }
       else if (url === 'reload') view.webContents.reload();
       else if (url === 'stop') view.webContents.stop();
       else view.webContents.loadURL(url).catch(() => {});
@@ -423,363 +288,106 @@ ipcMain.handle('browser-navigate', (event, url) => {
   return { success: true };
 });
 
-// ─── Browser tabs: real WebContentsView per tab + parking ───────────────────
+// ─── Browser encapsulation — delegate to BrowserShared (single core, many instances) ───
 const ensureTabView = (agentId: string, tabId: string, initialUrl?: string) => {
-  const tabs = getAgentTabs(agentId);
-  let view = tabs.get(tabId);
-  if (view && !view.webContents.isDestroyed()) return view;
-  const extSession = session.fromPartition('persist:oneagent_browser');
-  view = new WebContentsView({
-    webPreferences: { session: extSession, contextIsolation: true, nodeIntegration: false }
-  });
-  // Context menu + F12 + Ctrl+R/F5 etc.
-  view.webContents.on('before-input-event', (_e: any, input: any) => {
-    if (input.type === 'keyDown' && input.key === 'F12') { try { view!.webContents.toggleDevTools(); } catch {} }
-    // Ctrl+R reload, Ctrl+Shift+R hard reload, Ctrl+W close tab signal handled in renderer via accelerator
-  });
-  // Don't clobber extensions handler repeatedly — remove only once at creation
-  try { view.webContents.removeAllListeners('context-menu'); } catch {}
-  view.webContents.on('context-menu', (_: any, params: any) => {
-    if (!view || view.webContents.isDestroyed()) return;
-    try {
-      const template: any[] = [
-        { label: 'Back', enabled: view.webContents.canGoBack(), click: () => { try { if (!view.webContents.isDestroyed()) view.webContents.goBack(); } catch {} } },
-        { label: 'Forward', enabled: view.webContents.canGoForward(), click: () => { try { if (!view.webContents.isDestroyed()) view.webContents.goForward(); } catch {} } },
-        { label: 'Reload', click: () => { try { if (!view.webContents.isDestroyed()) view.webContents.reload(); } catch {} } },
-        { type: 'separator' },
-      ];
-      if (params.linkURL) {
-        template.push(
-          { label: 'Open Link in New Tab', click: () => {
-            const newId = `tab-${Date.now()}`;
-            try { ensureTabView(agentId, newId, params.linkURL); } catch {}
-            // if this agent is active, switch to it on next tick
-            setTimeout(() => { try { const apiTabs = browserTabs.get(agentId); if (apiTabs?.has(newId)) {/* lazy switch handled by renderer */} } catch {} }, 0);
-          }},
-          { label: 'Copy Link Address', click: () => { try { require('electron').clipboard.writeText(params.linkURL); } catch {} } },
-          { type: 'separator' },
-        );
-      }
-      if (params.srcURL) {
-        template.push(
-          { label: 'Copy Image Address', click: () => { try { require('electron').clipboard.writeText(params.srcURL); } catch {} } },
-          { label: 'Save Image As…', click: () => { try { view.webContents.downloadURL(params.srcURL); } catch {} } },
-          { type: 'separator' },
-        );
-      }
-      if (params.selectionText) {
-        template.push(
-          { label: `Search for “${params.selectionText.slice(0, 30)}”`, click: () => {
-            const q = encodeURIComponent(params.selectionText);
-            const url = `https://duckduckgo.com/?q=${q}`;
-            const nid = `tab-${Date.now()}`;
-            try { ensureTabView(agentId, nid, url); } catch {}
-          }},
-          { type: 'separator' },
-        );
-      }
-      template.push(
-        { label: 'Copy', role: 'copy' },
-        { label: 'Paste', role: 'paste' },
-        { label: 'Cut', role: 'cut' },
-        { label: 'Select All', role: 'selectAll' },
-        { type: 'separator' },
-        { label: 'View Page Source', click: () => { try { const u = view.webContents.getURL(); const nid = `tab-${Date.now()}`; ensureTabView(agentId, nid, `view-source:${u}`); } catch {} } },
-        { label: 'Save As…', click: () => { try { view.webContents.downloadURL(view.webContents.getURL()); } catch {} } },
-        { label: 'Print…', click: () => { try { view.webContents.print({}); } catch {} } },
-        { type: 'separator' },
-        { label: 'Inspect Element', click: () => { try { if (!view.webContents.isDestroyed()) view.webContents.inspectElement(params.x, params.y); } catch {} } },
-      );
-      // Merge extension context menu items if any
-      try {
-        const extItems = extensionsManager?.getContextMenuItems(view.webContents as any, params as any) as any[];
-        if (extItems && extItems.length) {
-          template.splice(template.length - 2, 0, { type: 'separator' }, ...extItems);
-        }
-      } catch {}
-      const menu = Menu.buildFromTemplate(template);
-      // Electron 30+ prefers popup options object
-      try { (menu as any).popup({ window: mainWindow! }); } catch { menu.popup(); }
-    } catch (e) { console.error('[context-menu] failed', e); }
-  });
-  browserTabMeta.set(tabKey(agentId, tabId), { url: initialUrl || 'https://duckduckgo.com', title: 'New Tab', loading: false, parked: false });
-  attachTabEvents(view, agentId, tabId);
-  tabs.set(tabId, view);
-  // new-window (_blank) → new tab in same agent/standalone group
-  try {
-    view.webContents.setWindowOpenHandler(({ url }) => {
-      try {
-        const nid = `tab-${Date.now()}`;
-        ensureTabView(agentId, nid, url);
-        // auto-switch if this agent is currently visible
-        if (activeTabForAgent.get(agentId) && (activeAgentViewId === agentId || agentId === '__standalone__')) {
-          // defer so ensure finishes
-          setTimeout(() => {
-            const tabs2 = browserTabs.get(agentId);
-            const v2 = tabs2?.get(nid);
-            if (v2 && mainWindow && !v2.webContents.isDestroyed()) {
-              const prev = activeTabForAgent.get(agentId);
-              if (prev && prev !== nid) {
-                const pv = tabs2?.get(prev);
-                if (pv) try { mainWindow.contentView.removeChildView(pv); } catch {}
-              }
-              activeTabForAgent.set(agentId, nid);
-              try { mainWindow.contentView.addChildView(v2); } catch {}
-              const b = lastBrowserBoundsForAgent.get(agentId);
-              if (b) try { v2.setBounds(b as any); } catch {}
-              try { (v2.webContents as any).setBackgroundThrottling?.(false); } catch {}
-              if (extensionsManager) try { extensionsManager.selectTab(v2.webContents); } catch {}
-              emitTabUpdate(agentId, nid);
-              if (prev) emitTabUpdate(agentId, prev);
-            }
-          }, 0);
-        }
-      } catch {}
-      return { action: 'deny' };
-    });
-  } catch {}
-  if (initialUrl) view.webContents.loadURL(initialUrl).catch(() => {});
-  else view.webContents.loadURL('https://duckduckgo.com').catch(() => {});
-  return view;
+  // Unified: every caller now goes through the shared Browser core — same session, same extensions, same tab logic
+  return browserShared.getOrCreate(agentId).ensureTabView(tabId, initialUrl);
 };
 
 ipcMain.handle('browser-create-tab', async (_e, { agentId, tabId, url }) => {
   if (!agentId || !tabId) return { success: false, error: 'agentId and tabId required' };
-  ensureTabView(agentId, tabId, url);
-  return { success: true };
+  try { browserShared.getOrCreate(agentId).createTab(tabId, url); return { success: true }; } catch (e: any) { return { success: false, error: e.message }; }
 });
 
 ipcMain.handle('browser-switch-tab', async (_e, { agentId, tabId }) => {
   if (!mainWindow || !agentId || !tabId) return { success: false, error: 'agentId and tabId required' };
-  const tabs = browserTabs.get(agentId);
-  if (!tabs) return { success: false, error: 'no tabs for agent' };
-  let view = tabs.get(tabId);
-  if (!view || view.webContents.isDestroyed()) {
-    const meta = browserTabMeta.get(tabKey(agentId, tabId));
-    if (meta?.parked) {
-      // auto-unpark on switch
-      try { meta.parked = false; emitTabUpdate(agentId, tabId); } catch {}
-    }
-    view = ensureTabView(agentId, tabId, meta?.url);
-  }
-  const prevId = activeTabForAgent.get(agentId);
-  if (prevId && prevId !== tabId) {
-    const prevView = tabs.get(prevId);
-    if (prevView && !prevView.webContents.isDestroyed()) {
-      try { mainWindow.contentView.removeChildView(prevView); } catch {}
-      const pk = tabKey(agentId, prevId);
-      const pm = browserTabMeta.get(pk);
-      const isParked = !!pm?.parked;
-      if (isParked) {
-        try { (prevView.webContents as any).setBackgroundThrottling?.(true); } catch {}
-        try { prevView.webContents.setAudioMuted(true); } catch {}
-      } else {
-        // schedule auto-suspend for the tab we just left
-        scheduleAutoSuspend(agentId, prevId);
-      }
-    }
-  }
-  activeTabForAgent.set(agentId, tabId);
-  cancelAutoSuspend(agentId, tabId);
-  lastActiveAt.set(tabKey(agentId, tabId), Date.now());
-  const isVisibleAgent = activeAgentViewId === agentId || agentId === '__standalone__';
-  // standalone check: if activeAgentViewId is null but standalone is being shown, also attach
-  const shouldAttach = isVisibleAgent || (!activeAgentViewId && agentId === '__standalone__');
-  if (shouldAttach) {
-    try { mainWindow.contentView.addChildView(view); } catch {}
-    const bounds = lastBrowserBoundsForAgent.get(agentId) || lastBrowserBoundsForAgent.get('__standalone__') || lastBrowserBoundsForAgent.get(activeAgentViewId || '') || null;
-    if (bounds) { try { view.setBounds(bounds as any); } catch {} }
-    else {
-      const [w, h] = mainWindow.getContentSize();
-      try { view.setBounds({ x: 0, y: 0, width: w, height: h } as any); } catch {}
-    }
-    // Defer a second bounds push to settle ResizeObserver race
-    setTimeout(() => {
-      const b = lastBrowserBoundsForAgent.get(agentId);
-      if (b && !view!.webContents.isDestroyed()) try { view!.setBounds(b as any); } catch {}
-    }, 60);
-    try { (view.webContents as any).setBackgroundThrottling?.(false); } catch {}
-    try { view.webContents.setAudioMuted(false); } catch {}
-    if (extensionsManager) try { extensionsManager.selectTab(view.webContents); } catch {}
-  }
-  const meta = browserTabMeta.get(tabKey(agentId, tabId));
-  if (meta) { meta.parked = false; meta.loading = meta.loading ?? false; }
-  emitTabUpdate(agentId, tabId);
-  if (prevId && prevId !== tabId) emitTabUpdate(agentId, prevId);
-  return { success: true, webContentsId: view.webContents.id };
+  try {
+    const b = browserShared.getOrCreate(agentId);
+    // ensure active browser context matches the switched browser — both take-control and user-visible share same core
+    browserShared.activeBrowserId = agentId;
+    const res = b.switchTab(tabId);
+    return { success: true, webContentsId: res.webContentsId };
+  } catch (e: any) { return { success: false, error: e.message }; }
 });
 
 ipcMain.handle('browser-close-tab', async (_e, { agentId, tabId }) => {
   if (!agentId || !tabId) return { success: false, error: 'agentId and tabId required' };
-  const key = tabKey(agentId, tabId);
-  cancelAutoSuspend(agentId, tabId);
-  lastActiveAt.delete(key);
-  const tabs = browserTabs.get(agentId);
-  const view = tabs?.get(tabId);
-  if (!view) { browserTabMeta.delete(key); return { success: true }; }
-  const isActive = activeTabForAgent.get(agentId) === tabId;
-  if (isActive && mainWindow) {
-    try { mainWindow.contentView.removeChildView(view); } catch {}
-    activeTabForAgent.delete(agentId);
-  }
-  if (!view.webContents.isDestroyed()) try { view.webContents.close(); } catch {}
-  tabs!.delete(tabId);
-  browserTabMeta.delete(key);
-  if (mainWindow && reactView && !reactView.webContents.isDestroyed()) {
-    reactView.webContents.send('browser-tab-closed', { agentId, tabId });
-  }
-  return { success: true };
+  try { browserShared.getOrCreate(agentId).closeTab(tabId); return { success: true }; } catch (e: any) { return { success: false, error: e.message }; }
 });
 
 ipcMain.handle('browser-park-tab', async (_e, { agentId, tabId }) => {
   if (!agentId || !tabId) return { success: false, error: 'agentId and tabId required' };
-  const key = tabKey(agentId, tabId);
-  const view = browserTabs.get(agentId)?.get(tabId);
-  const meta = browserTabMeta.get(key);
-  if (!meta) return { success: false, error: 'tab not found' };
-  meta.parked = true;
-  cancelAutoSuspend(agentId, tabId);
-  const isActive = activeTabForAgent.get(agentId) === tabId;
-  if (isActive && mainWindow && view && !view.webContents.isDestroyed()) {
-    try { mainWindow.contentView.removeChildView(view); } catch {}
-    try { (view.webContents as any).setBackgroundThrottling?.(true); } catch {}
-    try { view.webContents.setAudioMuted(true); } catch {}
-    activeTabForAgent.delete(agentId);
-  } else if (view && !view.webContents.isDestroyed()) {
-    try { (view.webContents as any).setBackgroundThrottling?.(true); } catch {}
-    try { view.webContents.setAudioMuted(true); } catch {}
-  }
-  emitTabUpdate(agentId, tabId);
-  return { success: true };
+  try { browserShared.getOrCreate(agentId).parkTab(tabId); return { success: true }; } catch (e: any) { return { success: false, error: e.message }; }
 });
 
 ipcMain.handle('browser-unpark-tab', async (_e, { agentId, tabId }) => {
-  const key = tabKey(agentId, tabId);
-  const meta = browserTabMeta.get(key);
-  if (!meta) return { success: false, error: 'tab not found' };
-  meta.parked = false;
-  const view = browserTabs.get(agentId)?.get(tabId);
-  if (view && !view.webContents.isDestroyed()) {
-    try { (view.webContents as any).setBackgroundThrottling?.(false); } catch {}
-    try { view.webContents.setAudioMuted(false); } catch {}
-  }
-  lastActiveAt.set(key, Date.now());
-  emitTabUpdate(agentId, tabId);
-  // re-schedule auto suspend for others
-  const tabs = browserTabs.get(agentId);
-  if (tabs) for (const [tid] of tabs) if (tid !== tabId) scheduleAutoSuspend(agentId, tid);
-  return { success: true };
+  if (!agentId || !tabId) return { success: false, error: 'agentId and tabId required' };
+  try { browserShared.getOrCreate(agentId).unparkTab(tabId); return { success: true }; } catch (e: any) { return { success: false, error: e.message }; }
 });
 
 ipcMain.handle('browser-get-tabs', async (_e, { agentId }) => {
   if (!agentId) return { success: false, error: 'agentId required' };
-  const tabs = browserTabs.get(agentId);
-  const list = tabs ? Array.from(tabs.keys()).map(tabId => ({ tabId, ...browserTabMeta.get(tabKey(agentId, tabId))! })) : [];
-  return { success: true, tabs: list, activeTabId: activeTabForAgent.get(agentId) || null };
+  const b = browserShared.getOrCreate(agentId);
+  return { success: true, ...b.getTabs() };
 });
 
 // Agents can discover user-created tabs (shared cookies via same persist:oneagent_browser session)
 ipcMain.handle('browser-list-all-tabs', async () => {
   const all: any[] = [];
-  for (const [agentId, tabs] of browserTabs.entries()) {
-    for (const [tabId, view] of tabs.entries()) {
-      const meta = browserTabMeta.get(tabKey(agentId, tabId));
-      all.push({ agentId, tabId, url: meta?.url, title: meta?.title, loading: !!meta?.loading, parked: !!meta?.parked, favicon: meta?.favicon, active: activeTabForAgent.get(agentId) === tabId, destroyed: view.webContents.isDestroyed() });
-    }
+  for (const b of browserShared.allBrowsers()) {
+    for (const item of b.listAllTabsForExport()) all.push(item);
   }
   return { success: true, tabs: all };
 });
 // Let an agent adopt or create a tab in the shared user namespace (__standalone__)
 ipcMain.handle('browser-agent-ensure-tab', async (_e, { agentId, url }) => {
-  // Agents keep their own tab map for locking, but can optionally create in __standalone__ so user sees it
   const targetAgent = '__standalone__';
+  const b = browserShared.getOrCreate(targetAgent);
   const tabId = `agent-${agentId || 'anon'}-${Date.now()}`;
-  const view = ensureTabView(targetAgent, tabId, url || 'https://duckduckgo.com');
-  activeTabForAgent.set(targetAgent, tabId);
-  // If no user window is active, don't auto-attach; otherwise attach to show user immediately
+  const view = b.ensureTabView(tabId, url || 'https://duckduckgo.com');
+  (b as any).activeTabId = tabId;
+  browserShared.activeBrowserId = targetAgent;
   if (mainWindow && !activeAgentViewId) {
-    const b = lastBrowserBoundsForAgent.get(targetAgent);
     try { mainWindow.contentView.addChildView(view); } catch {}
-    if (b) try { view.setBounds(b as any); } catch {}
+    const bounds = (b as any).lastBounds;
+    if (bounds) try { view.setBounds(bounds as any); } catch {}
   }
   return { success: true, agentId: targetAgent, tabId, url: view.webContents.getURL(), webContentsId: view.webContents.id };
 });
 
-// ─── Standalone browser (shared partition, independent of agent take-control) ─
-// AgentId '__standalone__' uses same browserTabs map but separate activeTab + bounds
+// ─── Standalone browser (shared core — same Browser class, different browserId) ───
 ipcMain.handle('standalone-create-tab', async (_e, { tabId, url }) => {
   if (!tabId) return { success: false, error: 'tabId required' };
-  ensureTabView('__standalone__', tabId, url);
-  return { success: true };
+  try { browserShared.getOrCreate('__standalone__').createTab(tabId, url); return { success: true }; } catch (e: any) { return { success: false, error: e.message }; }
 });
 ipcMain.handle('standalone-switch-tab', async (_e, { tabId }) => {
-  const agentId = '__standalone__';
-  // Ensure the tab exists
-  const tabs = getAgentTabs(agentId);
-  if (!tabs.has(tabId)) {
-    // let browser-create handle it
-    ensureTabView(agentId, tabId, 'https://duckduckgo.com');
-  }
-  // If no agent is currently taking control, we show standalone directly
-  // Otherwise standalone tabs live detached until return-to-chat / standalone enter
-  const r: any = await (async () => {
-    // Reuse browser-switch logic via direct call
-    const view = browserTabs.get(agentId)?.get(tabId);
-    if (!view) return { success: false };
-    // DRY: call browser-switch-tab handler logic by emitting
-    // Instead duplicate minimal logic here
-    const prevId = activeTabForAgent.get(agentId);
-    if (prevId && prevId !== tabId) {
-      const prevView = tabs.get(prevId);
-      if (prevView && !prevView.webContents.isDestroyed()) {
-        try { mainWindow!.contentView.removeChildView(prevView); } catch {}
-        scheduleAutoSuspend(agentId, prevId);
-      }
-    }
-    activeTabForAgent.set(agentId, tabId);
-    cancelAutoSuspend(agentId, tabId);
-    lastActiveAt.set(tabKey(agentId, tabId), Date.now());
-    // Only attach if no agent is active, or we are explicitly in standalone mode (reactView still present)
-    const shouldAttach = !activeAgentViewId;
-    if (shouldAttach && mainWindow && view && !view.webContents.isDestroyed()) {
-      try { mainWindow.contentView.addChildView(view); } catch {}
-      const b = lastBrowserBoundsForAgent.get(agentId) || lastBrowserBoundsForAgent.get('__standalone__');
-      if (b) try { view.setBounds(b as any); } catch {}
-      try { (view.webContents as any).setBackgroundThrottling?.(false); } catch {}
-      try { view.webContents.setAudioMuted(false); } catch {}
-      if (extensionsManager) try { extensionsManager.selectTab(view.webContents); } catch {}
-    }
-    const meta = browserTabMeta.get(tabKey(agentId, tabId));
-    if (meta) meta.parked = false;
-    emitTabUpdate(agentId, tabId);
-    return { success: true, webContentsId: view.webContents.id };
-  })();
-  return r;
+  try { browserShared.activeBrowserId = '__standalone__'; const res = browserShared.getOrCreate('__standalone__').switchTab(tabId); return { success: true, webContentsId: res.webContentsId }; } catch (e: any) { return { success: false, error: e.message }; }
 });
 ipcMain.handle('standalone-get-tabs', async () => {
-  const agentId = '__standalone__';
-  const tabs = browserTabs.get(agentId);
-  const list = tabs ? Array.from(tabs.keys()).map(tabId => ({ tabId, ...browserTabMeta.get(tabKey(agentId, tabId))! })) : [];
-  return { success: true, tabs: list, activeTabId: activeTabForAgent.get(agentId) || null };
+  const b = browserShared.getOrCreate('__standalone__');
+  return { success: true, ...b.getTabs() };
 });
 ipcMain.handle('standalone-navigate', async (_e, { tabId, url }) => {
-  const agentId = '__standalone__';
-  const tid = tabId || activeTabForAgent.get(agentId);
+  const b = browserShared.getOrCreate('__standalone__');
+  const tid = tabId || (b as any).activeTabId;
   if (!tid) return { success: false, error: 'no active standalone tab' };
-  const view = browserTabs.get(agentId)?.get(tid);
+  const view = (b as any).tabs.get(tid);
   if (!view || view.webContents.isDestroyed()) return { success: false, error: 'view not found' };
-  if (url === 'back') { if (view.webContents.canGoBack()) view.webContents.goBack(); }
-  else if (url === 'forward') { if (view.webContents.canGoForward()) view.webContents.goForward(); }
+  const nav:any = (view.webContents as any).navigationHistory;
+  const canGoBack = () => { try{ return nav ? nav.canGoBack() : (view.webContents as any).canGoBack(); }catch{ return false; } };
+  const canGoForward = () => { try{ return nav ? nav.canGoForward() : (view.webContents as any).canGoForward(); }catch{ return false; } };
+  if (url === 'back') { if (canGoBack()) nav ? nav.goBack() : view.webContents.goBack(); }
+  else if (url === 'forward') { if (canGoForward()) nav ? nav.goForward() : view.webContents.goForward(); }
   else if (url === 'reload') view.webContents.reload();
   else if (url === 'stop') view.webContents.stop();
   else view.webContents.loadURL(url).catch(() => {});
   return { success: true };
 });
 ipcMain.handle('standalone-update-bounds', async (_e, bounds) => {
-  lastBrowserBoundsForAgent.set('__standalone__', bounds);
-  const tid = activeTabForAgent.get('__standalone__');
-  if (tid) {
-    const view = browserTabs.get('__standalone__')?.get(tid);
+  const b = browserShared.getOrCreate('__standalone__');
+  (b as any).lastBounds = bounds;
+  if ((b as any).activeTabId) {
+    const view = (b as any).tabs.get((b as any).activeTabId);
     if (view && !view.webContents.isDestroyed() && !activeAgentViewId) {
       try { view.setBounds(bounds); } catch {}
     }
@@ -788,38 +396,38 @@ ipcMain.handle('standalone-update-bounds', async (_e, bounds) => {
 });
 ipcMain.handle('standalone-enter', async () => {
   if (!mainWindow) return { success: false };
-  // Hide agent view if any
-  if (activeAgentViewId) {
-    const tid = activeTabForAgent.get(activeAgentViewId);
-    const av = tid ? browserTabs.get(activeAgentViewId)?.get(tid) : agentViews.get(activeAgentViewId);
-    if (av) try { mainWindow.contentView.removeChildView(av as any); } catch {}
-    const legacy = agentViews.get(activeAgentViewId);
-    if (legacy && legacy !== av) try { mainWindow.contentView.removeChildView(legacy); } catch {}
+  const curId = browserShared.activeBrowserId;
+  if (curId && curId !== '__standalone__') {
+    try { browserShared.getOrCreate(curId).hide(); } catch {}
+    const legacy = agentViews.get(curId);
+    if (legacy) try { mainWindow.contentView.removeChildView(legacy); } catch {}
   }
-  // Ensure standalone tab exists
-  let tid = activeTabForAgent.get('__standalone__');
-  if (!tid) {
-    tid = `tab-${Date.now()}`;
-    ensureTabView('__standalone__', tid, 'https://duckduckgo.com');
-    activeTabForAgent.set('__standalone__', tid);
+  const b = browserShared.getOrCreate('__standalone__');
+  browserShared.activeBrowserId = '__standalone__';
+  activeAgentViewId = '__standalone__';
+  if (!(b as any).activeTabId || !((b as any).tabs.has((b as any).activeTabId))) {
+    if ((b as any).tabs.size === 0) {
+      const tidNew = `tab-${Date.now()}`;
+      b.ensureTabView(tidNew, 'https://duckduckgo.com');
+      (b as any).activeTabId = tidNew;
+    } else {
+      (b as any).activeTabId = (b as any).tabs.keys().next().value;
+    }
   }
-  const view = browserTabs.get('__standalone__')!.get(tid!)!;
+  const tid2 = (b as any).activeTabId as string;
+  const view2 = (b as any).tabs.get(tid2)!;
   if (reactView) try { mainWindow.contentView.addChildView(reactView); } catch {}
-  try { mainWindow.contentView.addChildView(view); } catch {}
-  const b = lastBrowserBoundsForAgent.get('__standalone__');
-  if (b) try { view.setBounds(b as any); } catch {}
-  if (extensionsManager) try { extensionsManager.selectTab(view.webContents); } catch {}
-  // Mark that we are in standalone mode by clearing activeAgentViewId but keeping standalone attached
-  // Use a separate flag stored in activeTabForAgent
-  return { success: true, tabId: tid, webContentsId: view.webContents.id };
+  try { mainWindow.contentView.addChildView(view2); } catch {}
+  const bounds2 = (b as any).lastBounds;
+  if (bounds2) try { view2.setBounds(bounds2 as any); } catch {}
+  if (browserShared.extensionsManager) try { browserShared.extensionsManager.selectTab(view2.webContents); } catch {}
+  return { success: true, tabId: tid2, webContentsId: view2.webContents.id };
 });
 ipcMain.handle('standalone-leave', async () => {
   if (!mainWindow) return { success: false };
-  const tid = activeTabForAgent.get('__standalone__');
-  if (tid) {
-    const view = browserTabs.get('__standalone__')?.get(tid);
-    if (view) try { mainWindow.contentView.removeChildView(view); } catch {}
-  }
+  try { browserShared.getOrCreate('__standalone__').hide(); } catch {}
+  browserShared.activeBrowserId = null;
+  activeAgentViewId = null;
   return { success: true };
 });
 
@@ -923,16 +531,17 @@ ipcMain.handle('extensions-install-from-store', async (_e, { urlOrId }) => {
 });
 ipcMain.handle('extensions-open-store', async (_e, { url }) => {
   const target = url || 'https://chromewebstore.google.com/';
-  // Open in standalone tab instead of external browser
+  const b = browserShared.getOrCreate('__standalone__');
   const tid = `tab-${Date.now()}`;
-  ensureTabView('__standalone__', tid, target);
-  activeTabForAgent.set('__standalone__', tid);
+  b.ensureTabView(tid, target);
+  (b as any).activeTabId = tid;
+  browserShared.activeBrowserId = '__standalone__';
   if (!activeAgentViewId && mainWindow) {
-    const view = browserTabs.get('__standalone__')!.get(tid)!;
+    const view = (b as any).tabs.get(tid)!;
     try { mainWindow.contentView.addChildView(view); } catch {}
-    const b = lastBrowserBoundsForAgent.get('__standalone__');
-    if (b) try { view.setBounds(b as any); } catch {}
-    if (extensionsManager) try { extensionsManager.selectTab(view.webContents); } catch {}
+    const bounds = (b as any).lastBounds;
+    if (bounds) try { view.setBounds(bounds as any); } catch {}
+    if (browserShared.extensionsManager) try { browserShared.extensionsManager.selectTab(view.webContents); } catch {}
   }
   return { success: true, tabId: tid };
 });
@@ -1983,9 +1592,19 @@ ipcMain.handle('provider-status', async (event, { providers }) => {
     try {
       if (p.id === 'ollama') {
         const base = p.endpoint.replace(/\/v1\/?$/, '');
-        const res = await fetch(`${base}/api/ps`);
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const data = await res.json();
+        const [psRes, tagsRes] = await Promise.all([
+          fetch(`${base}/api/ps`),
+          fetch(`${base}/api/tags`).catch(() => null)
+        ]);
+        if (!psRes.ok) throw new Error(`HTTP ${psRes.status}`);
+        const data = await psRes.json();
+        let available: any[] = [];
+        if (tagsRes && tagsRes.ok) {
+          try {
+            const tags = await tagsRes.json();
+            available = (tags.models || []).map((m: any) => ({ id: m.name, sizeBytes: m.size }));
+          } catch {}
+        }
         status[p.id] = {
           kind: 'vram',
           summary: `${data.models?.length || 0} model(s) in memory`,
@@ -1994,7 +1613,8 @@ ipcMain.handle('provider-status', async (event, { providers }) => {
             sizeBytes: m.size,
             vramBytes: m.size_vram,
             expiresAt: m.expires_at
-          }))
+          })),
+          available
         };
       } else if (p.id === 'lmstudio') {
         const base = p.endpoint.replace(/\/v1\/?$/, '');
@@ -2016,6 +1636,28 @@ ipcMain.handle('provider-status', async (event, { providers }) => {
   }));
 
   return { success: true, status };
+});
+
+// Total system VRAM usage across all GPUs (used/total bytes). Uses
+// nvidia-smi when an NVIDIA driver is present; otherwise reports nothing.
+ipcMain.handle('vram-usage', async () => {
+  try {
+    const { execFile } = await import('child_process');
+    const out = await new Promise<string>((resolve, reject) => {
+      execFile('nvidia-smi', ['--query-gpu=memory.used,memory.total', '--format=csv,noheader,nounits'], { timeout: 3000 } as any, (err: any, stdout: any) => {
+        if (err) reject(err); else resolve(String(stdout));
+      });
+    });
+    let usedBytes = 0, totalBytes = 0;
+    for (const line of out.trim().split('\n')) {
+      const [u, t] = line.split(',').map((s: string) => parseInt(s.trim(), 10));
+      if (!isNaN(u) && !isNaN(t)) { usedBytes += u * 1024 * 1024; totalBytes += t * 1024 * 1024; }
+    }
+    if (totalBytes > 0) return { success: true, usedBytes, totalBytes };
+    return { success: false };
+  } catch {
+    return { success: false };
+  }
 });
 
 // ─── Chat history persistence ────────────────────────────────────────────────
@@ -2140,7 +1782,7 @@ ipcMain.handle('chats-load', async (_e, chatId: string) => {
   }
 });
 
-ipcMain.handle('chats-save', async (_e, chatId: string, payload: { meta?: any; messages?: any[]; tasks?: any[] }) => {
+ipcMain.handle('chats-save', async (_e, chatId: string, payload: { meta?: any; messages?: any[]; tasks?: any[]; chatConfig?: any; savedAt?: number; savedAtIso?: string }) => {
   try {
     return {
       success: true,
@@ -2161,13 +1803,18 @@ ipcMain.handle('chats-save', async (_e, chatId: string, payload: { meta?: any; m
           : (existing?.messages ?? []);
         // Tasks are persisted per-chat alongside messages; not injected into LLM context.
         const tasks = payload.tasks !== undefined ? payload.tasks : (existing?.tasks ?? []);
-        const file = { version: 1 as const, meta, messages, tasks };
-        await writeJsonAtomic(messagesFileOf(chatId), file);
+        const chatConfig = (payload as any).chatConfig !== undefined ? (payload as any).chatConfig : (existing as any)?.chatConfig;
+        const savedAt = (payload as any).savedAt ?? now;
+        const savedAtIso = (payload as any).savedAtIso ?? new Date(savedAt).toISOString();
+        const file: any = { version: 1 as const, meta, messages, tasks, chatConfig, savedAt, savedAtIso };
+        // Extract assets from chatConfig if they contain data URLs (e.g. embedded images in future)
+        const fileWithAssets = await extractAssets(file, chatId);
+        await writeJsonAtomic(messagesFileOf(chatId), fileWithAssets);
         const idx = await loadIndex();
         const i = idx.findIndex((m: any) => m.id === chatId);
         if (i >= 0) idx[i] = meta; else idx.push(meta);
         await saveIndex(idx);
-        return file;
+        return fileWithAssets;
       })
     };
   } catch (e: any) {

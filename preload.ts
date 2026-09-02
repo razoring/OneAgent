@@ -56,6 +56,7 @@ const { ipcRenderer, webUtils } = require('electron');
   findInPage: (options: any) => ipcRenderer.invoke('find-in-page', options),
   browserDownload: (options: any) => ipcRenderer.invoke('browser-download', options),
   providerStatus: (options: any) => ipcRenderer.invoke('provider-status', options),
+  vramUsage: () => ipcRenderer.invoke('vram-usage'),
   dialogShowOpen: (opts: any) => ipcRenderer.invoke('dialog-show-open', opts),
   chromeLaunch: (opts: any) => ipcRenderer.invoke('chrome-launch', opts),
   chromeForceRelaunch: (opts: any) => ipcRenderer.invoke('chrome-force-relaunch', opts),

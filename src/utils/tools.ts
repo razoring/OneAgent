@@ -242,10 +242,9 @@ export const SYSTEM_TOOLS = [
     }),
 
   // ── Sub-agents (instant to spawn; sub-agents inherit the approval gate) ───
-  fn('spawn_agent', 'Spawn an autonomous sub-agent that works on ONE focused task with its own context window and tool subset, while you keep orchestrating. It reports back a concise final answer. Use for bulky visual processing (e.g. interpreting Set-of-Mark screenshots), independent research threads, or parallelizable chunks. Sub-agents cannot spawn further agents and never receive desktop tools.',
+  fn('spawn_agent', 'Spawn an autonomous sub-agent that works on ONE atomic task with its own context window and tool subset, while you keep orchestrating. It reports back a concise final answer. Use for bulky visual processing (e.g. interpreting Set-of-Mark screenshots), independent research threads, or parallelizable chunks. ONE item per agent — for N retailers/sites spawn N agents in parallel (batch calls). Bundling “1. … 2. … 3. …” into one task will be rejected. Sub-agents cannot spawn further agents and never receive desktop tools.',
     {
-      task: str('Precise, self-contained instructions. Include everything the sub-agent needs — it cannot see this conversation.'),
-      tools: { type: 'string', enum: ['general', 'browser', 'files', 'web', 'observe'], description: 'Tool preset (default general: safe reads everywhere). browser = full virtual browser kit; files = file read/write/search; web = search + browse; observe = read-only page inspection.' },
+      task: str('Precise, self-contained instructions for ONE atomic item. Do not enumerate multiple steps like “1. … 2. … 3. …” — split into separate agents instead. Include everything the sub-agent needs — it cannot see this conversation.'),
       context: str('Optional extra data to hand over (text, URLs, prior findings).'),
       model: str('Model id for the sub-agent (see list_models). Defaults to YOUR current model.'),
       provider: str('Provider id for the model (optional disambiguation).'),
@@ -269,11 +268,11 @@ export const SYSTEM_TOOLS = [
   // LLM creates verbose tasks via task_add (clear-before-add), updates via task_update, reads via task_list.
   // Tasks are NOT injected into history; LLM only sees active (queued/running) via task_list.
   // User may Clear-all via sidebar; LLM must NOT expose single-delete to user.
-  fn('task_add', 'Create verbose tasks for THIS chat. REPLACES all existing tasks for this chat (clear-before-add). Each task must be verbose: description (3-5 sentences), goal, assumptions, acceptanceCriteria (≥2), context (verbatim paths/commands, ≥80 chars). No hard limit on count. Call once after Proceed with all Steps. LLM-owned.',
+  fn('task_add', 'Create verbose tasks for THIS chat. REPLACES all existing tasks for this chat (clear-before-add). One task per atomic item — NEVER bundle multiple distinct items/retailers/sites as enumerated “1. … 2. … 3. …” inside one description. When asked for N items, create N tasks. Each task must be verbose: description (3-5 sentences), goal, assumptions, acceptanceCriteria (≥2), context (verbatim paths/commands, ≥80 chars). No hard limit on count. Call once after Proceed with all Steps. LLM-owned.',
     {
       tasks: { type: 'array', items: { type: 'object', properties: {
-        title: str('Imperative ≤15 words, unique per chat'),
-        description: str('Verbose 3-5 sentences: why + approach + non-obvious details (≥120 chars)'),
+        title: str('Imperative ≤15 words, unique per chat — one atomic item only'),
+        description: str('Verbose 3-5 sentences: why + approach + non-obvious details (≥120 chars). Do not enumerate multiple items like “1. … 2. … 3. …”'),
         goal: str('Slice of plan Goal this task fulfills'),
         assumptions: { type: 'array', items: { type: 'string' }, description: 'A-refs from plan, e.g. ["A1","A2"]' },
         acceptanceCriteria: { type: 'array', items: { type: 'string' }, description: '≥2 observable checkboxes, e.g. "file X exists && tests pass"' },

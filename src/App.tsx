@@ -9,12 +9,19 @@ function App() {
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [rightSidebarOpen, setRightSidebarOpen] = useState(false);
   const [standaloneMode, setStandaloneMode] = useState(false);
+  const [controlledAgentId, setControlledAgentId] = useState<string | null>(null);
 
   useEffect(() => {
     const handleStandalone = () => setStandaloneMode(true);
     window.addEventListener('enter-standalone-browser', handleStandalone as EventListener);
+    const handleTakeControl = (e: Event) => {
+      const detail = (e as CustomEvent).detail;
+      if (detail) setControlledAgentId(String(detail));
+    };
+    window.addEventListener('enter-browser-mode', handleTakeControl as EventListener);
     return () => {
       window.removeEventListener('enter-standalone-browser', handleStandalone as EventListener);
+      window.removeEventListener('enter-browser-mode', handleTakeControl as EventListener);
     };
   }, []);
 
@@ -24,10 +31,24 @@ function App() {
     setStandaloneMode(false);
   };
 
+  const handleExitControlled = async () => {
+    const api: any = (window as any).electronAPI;
+    if (api?.returnToChat) await api.returnToChat().catch(()=>{});
+    setControlledAgentId(null);
+  };
+
   if (standaloneMode) {
     return (
       <div className="flex flex-col h-screen w-screen bg-background text-white font-sans overflow-hidden">
         <BrowserChrome agentId="__standalone__" onExit={handleExitStandalone} />
+      </div>
+    );
+  }
+
+  if (controlledAgentId) {
+    return (
+      <div className="flex flex-col h-screen w-screen bg-background text-white font-sans overflow-hidden">
+        <BrowserChrome agentId={controlledAgentId} onExit={handleExitControlled} />
       </div>
     );
   }

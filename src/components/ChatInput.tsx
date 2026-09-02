@@ -16,27 +16,31 @@ const PROVIDER_ICONS: Record<string, string> = {
   anthropic: 'https://www.anthropic.com/favicon.ico'
 };
 
-import { LLMModel, fetchModels, ModelSettings, getModelSettings, primeModel, flushModel } from '../utils/llm';
+import { LLMModel, fetchModels, ModelSettings, getModelSettings, primeModel, flushModel, getOrchestratorModel, setOrchestratorModel, getSubAgentModel, setSubAgentModel, isVisionModel } from '../utils/llm';
 import DEFAULT_SYSTEM_PROMPT from '../utils/systemPrompt.md?raw';
 import { modelParamsStore } from '../utils/modelParamsStore';
 import InlineUserPrompt from './ApprovalCard';
 import { userPromptStore } from '../utils/userPromptStore';
 
-const ModelItem = ({ model, isSelected, onClick }: { model: any, isSelected: boolean, onClick: () => void }) => (
+const ModelItem = ({ model, isSelected, onClick, subLabel }: { model: any, isSelected: boolean, onClick: () => void, subLabel?: string }) => (
   <button
     onClick={onClick}
-    className={`menu-item ${isSelected
+    className={`menu-item justify-between ${isSelected
       ? 'bg-white/10 text-white font-medium'
       : 'text-textSecondary hover:bg-white/5 hover:text-white'
       }`}
   >
-    <img
-      src={PROVIDER_ICONS[model.provider] || PROVIDER_ICONS['ollama']}
-      alt={model.provider}
-      className="w-5 h-5 rounded object-contain bg-white/10 p-0.5"
-      onError={(e) => e.currentTarget.style.display = 'none'}
-    />
-    <span className="truncate">{model.name}</span>
+    <span className="flex items-center gap-2 min-w-0">
+      <img
+        src={PROVIDER_ICONS[model.provider] || PROVIDER_ICONS['ollama']}
+        alt={model.provider}
+        className="w-5 h-5 rounded-full object-cover bg-white/10 p-0.5 border border-white/10 shrink-0"
+        style={{ borderRadius: '9999px' }}
+        onError={(e) => e.currentTarget.style.display = 'none'}
+      />
+      <span className="truncate">{model.name}</span>
+    </span>
+    {subLabel && <span className="text-[10px] opacity-60 shrink-0">{subLabel}</span>}
   </button>
 );
 
@@ -185,6 +189,9 @@ const ChatInput: React.FC<ChatInputProps> = ({ onSend, onStop, disabled, editing
   const [value, setValue] = useState('');
   const [isModelMenuOpen, setIsModelMenuOpen] = useState(false);
   const [allModels, setAllModels] = useState<LLMModel[]>([]);
+  const [orchestratorModel, setOrchestratorModelState] = useState<LLMModel | null>(() => getOrchestratorModel());
+  const [subAgentModel, setSubAgentModelState] = useState<LLMModel | null>(() => getSubAgentModel());
+  // Backward compat: selectedModel mirrors orchestrator
   const [selectedModel, setSelectedModel] = useState<LLMModel | null>(null);
   const [isLoadingModels, setIsLoadingModels] = useState(false);
 
@@ -347,27 +354,33 @@ const ChatInput: React.FC<ChatInputProps> = ({ onSend, onStop, disabled, editing
     }
   }, [attachments]);
 
+  // Keep selectedModel in sync with orchestratorModel for backward compat + notify parent
   useEffect(() => {
-    if (onModelChange) {
-      onModelChange(selectedModel);
-    }
-  }, [selectedModel, onModelChange]);
+    if (onModelChange) onModelChange(orchestratorModel || selectedModel);
+  }, [orchestratorModel, selectedModel, onModelChange]);
 
   // Stay in sync when the AGENT switches its own model or tunes parameters
-  // via tools (switch_model / update_settings dispatch these events).
   useEffect(() => {
     const onSettingsChanged = () => setModelSettings(getModelSettings());
     const onAgentModelChanged = (e: Event) => {
       const detail = (e as CustomEvent).detail;
       if (detail && detail.id && detail.provider) {
+        setOrchestratorModelState(detail);
+        setOrchestratorModel(detail);
         setSelectedModel(detail);
       }
     };
+    const onOrchUpdated = () => setOrchestratorModelState(getOrchestratorModel());
+    const onSubUpdated = () => setSubAgentModelState(getSubAgentModel());
     window.addEventListener('model-settings-updated', onSettingsChanged);
     window.addEventListener('agent-model-changed', onAgentModelChanged);
+    window.addEventListener('orchestrator-model-updated', onOrchUpdated);
+    window.addEventListener('subagent-model-updated', onSubUpdated);
     return () => {
       window.removeEventListener('model-settings-updated', onSettingsChanged);
       window.removeEventListener('agent-model-changed', onAgentModelChanged);
+      window.removeEventListener('orchestrator-model-updated', onOrchUpdated);
+      window.removeEventListener('subagent-model-updated', onSubUpdated);
     };
   }, []);
 
@@ -377,7 +390,14 @@ const ChatInput: React.FC<ChatInputProps> = ({ onSend, onStop, disabled, editing
       const models = await fetchModels();
       setAllModels(models);
       if (models.length > 0) {
-        setSelectedModel(prev => prev && models.some(m => m.id === prev.id) ? prev : models[0]);
+        const pick = (prev: LLMModel | null) => prev && models.some(m => m.id === prev.id && m.provider === prev.provider) ? prev : models[0];
+        const orchNext = pick(orchestratorModel || getOrchestratorModel() || selectedModel);
+        const subNext = pick(subAgentModel || getSubAgentModel());
+        if (!getOrchestratorModel() && orchNext) { setOrchestratorModel(orchNext); setOrchestratorModelState(orchNext); }
+        else if (orchNext) setOrchestratorModelState(orchNext);
+        if (!getSubAgentModel() && subNext) { setSubAgentModel(subNext); setSubAgentModelState(subNext); }
+        else if (subNext) setSubAgentModelState(subNext);
+        setSelectedModel(prev => prev && models.some(m => m.id === prev.id && m.provider === prev.provider) ? prev : orchNext || models[0]);
       } else {
         setSelectedModel(null);
       }
@@ -436,7 +456,12 @@ const ChatInput: React.FC<ChatInputProps> = ({ onSend, onStop, disabled, editing
   }, []);
 
   const handleSend = () => {
-    if ((!value.trim() && attachments.length === 0) || !selectedModel || disabled) return;
+    const effModel = orchestratorModel || selectedModel;
+    const hasImage = attachments.some(a => a.type === 'image');
+    if (hasImage && effModel && !isVisionModel(effModel)) {
+      alert(`Model ${effModel.id} does not support images (gemma: text-only). Switch to a vision model (llava, minicpm-v, qwen2-vl, etc.) or remove images. Images will be stripped.`);
+    }
+    if ((!value.trim() && attachments.length === 0) || !effModel || disabled) return;
 
     if (editingBlock && onSaveEdit) {
       onSaveEdit(editingBlock.id, editingBlock.type, value, attachments);
@@ -444,7 +469,7 @@ const ChatInput: React.FC<ChatInputProps> = ({ onSend, onStop, disabled, editing
       setAttachments([]);
       if (onCancelEdit) onCancelEdit();
     } else {
-      onSend(value, attachments, selectedModel);
+      onSend(value, attachments, effModel);
       setValue('');
       setAttachments([]);
     }
@@ -965,11 +990,11 @@ const ChatInput: React.FC<ChatInputProps> = ({ onSend, onStop, disabled, editing
           </div>
 
 
-          {/* Model Selector Drop-up */}
+          {/* Model Selector Drop-up — Orchestrator + Subagent */}
           <div className="relative">
             {isModelMenuOpen && (
-              <div className="absolute bottom-full left-0 mb-3 w-64 menu-panel rounded-[24px] p-2 z-50 flex flex-col">
-                <div className="flex items-center justify-between px-3 pt-3 pb-2">
+              <div className="absolute bottom-full left-0 mb-3 w-[340px] menu-panel rounded-[24px] p-2 z-50 flex flex-col max-h-[420px] overflow-hidden">
+                <div className="flex items-center justify-between px-3 pt-3 pb-2 shrink-0">
                   <span className="menu-header">Models</span>
                   <button
                     onClick={loadModels}
@@ -983,26 +1008,59 @@ const ChatInput: React.FC<ChatInputProps> = ({ onSend, onStop, disabled, editing
                 {isLoadingModels ? (
                   <div className="px-3 py-2 text-sm text-textSecondary">Loading...</div>
                 ) : allModels.length > 0 ? (
-                  allModels.map((model) => (
-                    <ModelItem
-                      key={`all-${model.id}`}
-                      model={model}
-                      isSelected={selectedModel?.id === model.id}
-                      onClick={() => {
-                        const isSwitching = !!selectedModel && selectedModel.id !== model.id;
-                        setSelectedModel(model);
-                        setIsModelMenuOpen(false);
-                        // While a generation is running, skip memory management:
-                        // flushing would unload the model mid-generation.
-                        if (!disabled) {
-                          if (isSwitching && selectedModel) {
-                            flushModel(selectedModel);
-                          }
-                          primeModel(model);
-                        }
-                      }}
-                    />
-                  ))
+                  <div className="flex flex-col gap-3 overflow-y-auto px-1 pb-1" style={{ scrollbarWidth: 'thin' }}>
+                    {/* Orchestrator */}
+                    <div>
+                      <div className="px-3 py-1 text-[10px] font-semibold tracking-widest uppercase text-textSecondary">Orchestrator — main chat</div>
+                      <div className="flex flex-col">
+                        {allModels.map((model) => {
+                          const sel = orchestratorModel?.id === model.id && orchestratorModel?.provider === model.provider;
+                          return (
+                            <ModelItem
+                              key={`orch-${model.provider}-${model.id}`}
+                              model={model}
+                              isSelected={!!sel}
+                              subLabel={model.provider}
+                              onClick={() => {
+                                const prev = orchestratorModel;
+                                const isSwitching = !!prev && (prev.id !== model.id || prev.provider !== model.provider);
+                                setOrchestratorModelState(model);
+                                setOrchestratorModel(model);
+                                setSelectedModel(model);
+                                // keep selection highlighted without closing menu immediately for compare
+                                if (!disabled) {
+                                  if (isSwitching && prev) flushModel(prev);
+                                  primeModel(model);
+                                }
+                              }}
+                            />
+                          );
+                        })}
+                      </div>
+                    </div>
+                    {/* Subagent */}
+                    <div className="border-t border-white/5 pt-3">
+                      <div className="px-3 py-1 text-[10px] font-semibold tracking-widest uppercase text-textSecondary">Subagents — parallel workers</div>
+                      <div className="flex flex-col">
+                        {allModels.map((model) => {
+                          const sel = subAgentModel?.id === model.id && subAgentModel?.provider === model.provider;
+                          return (
+                            <ModelItem
+                              key={`sub-${model.provider}-${model.id}`}
+                              model={model}
+                              isSelected={!!sel}
+                              subLabel={model.provider}
+                              onClick={() => {
+                                setSubAgentModelState(model);
+                                setSubAgentModel(model);
+                                if (!disabled) primeModel(model);
+                              }}
+                            />
+                          );
+                        })}
+                      </div>
+                    </div>
+                  </div>
                 ) : (
                   <div className="px-3 py-2 text-sm text-textSecondary">No models found</div>
                 )}
@@ -1011,17 +1069,31 @@ const ChatInput: React.FC<ChatInputProps> = ({ onSend, onStop, disabled, editing
 
             <button
               onClick={() => setIsModelMenuOpen(!isModelMenuOpen)}
-              className="flex items-center gap-2.5 px-3.5 py-2 rounded-2xl mac-element mac-element-hover text-gray-200 font-medium text-sm transition-all"
+              className="flex items-center gap-2.5 px-3 py-2 rounded-2xl mac-element mac-element-hover text-gray-200 font-medium text-sm transition-all"
+              title={`Orchestrator: ${orchestratorModel?.id ?? selectedModel?.id ?? '—'} / Subagent: ${subAgentModel?.id ?? 'auto'}`}
             >
-              {selectedModel ? (
+              {(orchestratorModel || selectedModel) ? (
                 <>
-                  <img
-                    src={PROVIDER_ICONS[selectedModel.provider] || PROVIDER_ICONS['ollama']}
-                    alt={selectedModel.provider}
-                    className="w-4 h-4 rounded-sm object-contain"
-                    onError={(e) => e.currentTarget.style.display = 'none'}
-                  />
-                  <span className="truncate max-w-[150px]">{selectedModel.name}</span>
+                  <span className="relative w-7 h-5 shrink-0 inline-block">
+                    <img
+                      src={PROVIDER_ICONS[(orchestratorModel || selectedModel)!.provider] || PROVIDER_ICONS['ollama']}
+                      alt={(orchestratorModel || selectedModel)!.provider}
+                      className="w-5 h-5 rounded-full object-cover bg-white/10 border border-white/20 absolute left-0 top-0"
+                      style={{ borderRadius: '9999px' }}
+                      onError={(e) => e.currentTarget.style.display = 'none'}
+                    />
+                    <img
+                      src={PROVIDER_ICONS[(subAgentModel || orchestratorModel || selectedModel)!.provider] || PROVIDER_ICONS['ollama']}
+                      alt={(subAgentModel || orchestratorModel || selectedModel)!.provider}
+                      className="w-4 h-4 rounded-full object-cover bg-white border-2 border-background absolute left-3 top-1.5"
+                      style={{ borderRadius: '9999px' }}
+                      onError={(e) => e.currentTarget.style.display = 'none'}
+                    />
+                  </span>
+                  <span className="truncate max-w-[150px] flex flex-col leading-none text-left">
+                    <span className="truncate text-xs">{(orchestratorModel || selectedModel)!.name}</span>
+                    <span className="text-[10px] text-textSecondary truncate">{subAgentModel ? `sub: ${subAgentModel.name}` : 'sub: auto'}</span>
+                  </span>
                 </>
               ) : (
                 <>

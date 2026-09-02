@@ -228,11 +228,18 @@ const ToolCallBlock: React.FC<ToolCallBlockProps> = ({ toolName, args, status, r
         </div>
       </div>
 
-      {/* Screenshot carousel preview — visible while the block is expanded */}
+      {/* Screenshot carousel preview — persistent: live carousel if browser running, else fallback to persisted image */}
       {expanded && isScreenshotTool && status === 'completed' && (
         <div className="px-3 pb-3 pt-0.5">
           <div className="w-full h-[360px] flex flex-col rounded-lg overflow-hidden border border-white/10 bg-black/20">
-            <ScreenshotCarousel agentId={args?.agentId || 'default'} chatId={chatStore.getActiveId() || 'home'} />
+            {imageDataUrl ? (
+              <div className="flex-1 relative bg-black/50 overflow-hidden flex flex-col">
+                <img src={imageDataUrl} alt="browser screenshot" className="max-w-full max-h-full object-contain rounded border border-white/10 shadow-xl m-auto" />
+                <div className="absolute bottom-2 left-2 text-[10px] px-2 py-0.5 rounded bg-black/70 text-white/70">persisted snapshot</div>
+              </div>
+            ) : (
+              <ScreenshotCarousel agentId={args?.agentId || 'default'} chatId={chatStore.getActiveId() || 'home'} />
+            )}
           </div>
         </div>
       )}

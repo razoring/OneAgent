@@ -3,7 +3,7 @@ import ChatInput from './ChatInput';
 import ThinkingBlock from './ThinkingBlock';
 import ToolCallBlock from './ToolCallBlock';
 import ScreenshotCarousel from './ScreenshotCarousel';
-import { generateChatStream, generateChatResponse, condenseThinking, LLMModel, fileToBase64, parseAttachmentDocument, getModelStats } from '../utils/llm';
+import { generateChatStream, generateChatResponse, condenseThinking, LLMModel, fileToBase64, parseAttachmentDocument, getModelStats, getOrchestratorModel, getSubAgentModel, getModelSettings } from '../utils/llm';
 import { executeToolCalls, ToolContext } from '../utils/toolExecutor';
 import { spawnSubAgent, getAgentsSnapshot, waitForAgents } from '../utils/subAgents';
 import { chatStore } from '../utils/chatStore';
@@ -20,7 +20,6 @@ import { MessageSquarePlus, Terminal, Globe, ChevronDown, ChevronRight, Trash2, 
 import { getSystemTools } from '../utils/tools';
 import { agentBrowserStore } from '../utils/agentBrowserStore';
 import { terminateBrowserSession } from '../utils/browserTools';
-import { transcriptStore } from '../utils/transcriptStore';
 import { userPromptStore } from '../utils/userPromptStore';
 import { browserPreviewStore } from '../utils/browserPreviewStore';
 
@@ -96,129 +95,66 @@ export interface ChatMessage {
   modelStats?: any;
 }
 
-// ─── Debug transcript ────────────────────────────────────────────────────────
-// Compact, LLM-parseable format: flattened metadata, a round-by-round timeline
-// with relative timestamps and full per-round thinking, then the exact model
-// context. Designed so token cost stays low while retaining everything needed
-// to debug model behavior (thinking style, stalls, recovery, tool results).
-const fmtTs = (t?: number) => (t ? new Date(t).toISOString() : '?');
-const secs = (ms: number) => `${(ms / 1000).toFixed(1)}s`;
-const oneLine = (v: any, max = 300): string => {
-  let s: string;
-  try { s = typeof v === 'string' ? v : JSON.stringify(v); } catch { s = String(v); }
-  if (s == null) s = 'null';
-  s = s.replace(/\s+/g, ' ').trim();
-  return s.length > max ? s.slice(0, max) + `…(+${s.length - max}ch)` : s;
-};
-const blockText = (v: any, max: number): string => {
-  let s: string;
-  try { s = typeof v === 'string' ? v : JSON.stringify(v, null, 1); } catch { s = String(v); }
-  return s == null ? '' : (s.length > max ? s.slice(0, max) + `\n…[+${s.length - max} chars truncated]` : s);
-};
-// Multimodal message parts → compact string ([image] placeholders for blobs).
-const msgToText = (content: any): string => {
-  if (typeof content === 'string') return content;
-  if (Array.isArray(content)) return content.map((p: any) =>
-    p?.type === 'image_url' ? '[image attached]' : (p?.text ?? '')).join('\n');
-  return JSON.stringify(content);
-};
-
-const buildTranscript = (msg: ChatMessage): string => {
-  const L: string[] = [];
-  const t0 = msg.createdAt;
-  const calls = msg.toolCalls || [];
-  const dur = t0 && msg.completedAt ? secs(msg.completedAt - t0) : '?';
-  const at = (t?: number) => (t0 && t ? `t+${secs(t - t0)}` : 't+?');
-
-  L.push(`# OneAgent Transcript ${msg.id}`);
-  L.push(`window ${fmtTs(t0)} → ${fmtTs(msg.completedAt)} | dur ${dur} | rounds ${calls.length}/${MAX_TOOL_ROUNDS} | generating ${!!msg.isGenerating}`);
-
-  // Model & settings snapshot — flattened, no JSON dumps.
-  if (msg.modelStats) {
-    const m = msg.modelStats;
-    if (m.activeModel) L.push(`model: ${m.activeModel.id ?? '?'} @ ${m.activeModel.provider ?? '?'}`);
-    const s = m.settings || {};
-    L.push(`settings: think=${s.thinkingLevel ?? '?'} thinkTO=${s.thinkingTimeout ?? 0}s temp=${s.temperature ?? '?'} topP=${s.topP ?? '?'} maxTok=${s.maxOutputLength ?? '?'} ctx=${s.contextWindow ?? '?'}`);
-    const u = m.totals || m.usage?.totals;
-    if (u) L.push(`usage: prompt=${u.promptTokens ?? 0} completion=${u.completionTokens ?? 0}`);
-  }
-
-  // Round timeline. thinkingParts[i] is the reasoning that preceded round i+1's
-  // tool calls; call timestamps give inter-round gaps (thinking + exec time).
-  const byRound = new Map<number, ToolCall[]>();
-  calls.forEach(tc => {
-    const m = /-tc-(\d+)-/.exec(tc.id || '');
-    const r = m ? parseInt(m[1], 10) : calls.indexOf(tc) + 1;
-    if (!byRound.has(r)) byRound.set(r, []);
-    byRound.get(r)!.push(tc);
-  });
-  const parts = msg.thinkingParts;
-
-  if (byRound.size > 0) {
-    L.push('\n## Timeline');
-    let prevTs: number | undefined = t0;
-    Array.from(byRound.keys()).sort((a, b) => a - b).forEach(r => {
-      const roundCalls = byRound.get(r)!;
-      const firstTs = roundCalls[0]?.timestamp;
-      const gap = prevTs && firstTs ? secs(firstTs - prevTs) : '?';
-      const think = parts?.[r - 1];
-      const recovery = [];
-      if (think) {
-        if (think.includes('[Thinking timeout')) recovery.push('think-timeout');
-        if (think.includes('[Auto-continued')) recovery.push('auto-continue');
+// Debug button saves latest messages.json with appended timestamps/model info for full restore
+const downloadDebugMessagesJson = async () => {
+  try {
+    const chatId = chatStore.getActiveId();
+    if (!chatId) return;
+    let file = null;
+    try {
+      const res = await (window as any).electronAPI.chatsLoad(chatId);
+      if (res?.success && res.file) file = res.file;
+    } catch {}
+    const inMemoryMeta = chatStore.getMeta(chatId);
+    const now = Date.now();
+    const iso = new Date(now).toISOString();
+    const chatConfig = {
+      orchestratorModel: getOrchestratorModel(),
+      subAgentModel: getSubAgentModel(),
+      modelSettings: getModelSettings(),
+      savedAt: now,
+      savedAtIso: iso,
+    };
+    const ensureTimestamps = (msgs: any[]) => msgs.map((m: any, idx: number) => ({
+      ...m,
+      createdAt: m.createdAt ?? (m.timestamp ?? now - (msgs.length - idx) * 1000),
+      createdAtIso: m.createdAt ? new Date(m.createdAt).toISOString() : iso,
+      completedAtIso: m.completedAt ? new Date(m.completedAt).toISOString() : undefined,
+    }));
+    const messages = file?.messages ? ensureTimestamps(file.messages) : [];
+    const debugPayload: any = {
+      version: 1,
+      meta: file?.meta || inMemoryMeta || { id: chatId, title: "Export" },
+      messages,
+      tasks: file?.tasks || [],
+      chatConfig: file?.chatConfig || chatConfig,
+      savedAt: now,
+      savedAtIso: iso,
+      exportedAt: iso,
+      exportedBy: "debug-button",
+    };
+    debugPayload.messages = debugPayload.messages.map((m: any) => ({
+      ...m,
+      _debug: {
+        role: m.role,
+        createdAtIso: m.createdAt ? new Date(m.createdAt).toISOString() : null,
+        completedAtIso: m.completedAt ? new Date(m.completedAt).toISOString() : null,
+        hasModelStats: !!m.modelStats,
+        toolCallCount: Array.isArray(m.toolCalls) ? m.toolCalls.length : 0,
       }
-      L.push(`\n### R${r} Δ${gap}${recovery.length ? ' ⚑ ' + recovery.join('+') : ''}`);
-      if (think && think.trim()) {
-        L.push(`think[${think.length}c]:`);
-        blockText(think, 4000).split('\n').forEach(line => L.push(`| ${line}`));
-      }
-      roundCalls.forEach(tc => {
-        L.push(`[${at(tc.timestamp)}] ${tc.name} → ${tc.status}`);
-        L.push(`  args: ${oneLine(tc.args)}`);
-        if (tc.result !== undefined) L.push(`  result: ${oneLine(tc.result, 400)}`);
-        if (tc.image) L.push('  result: [image]');
-        prevTs = tc.timestamp;
-      });
-    });
-  } else if (msg.thinking && msg.thinking.trim()) {
-    L.push(`\n## Thinking [${msg.thinking.length}c]`);
-    blockText(msg.thinking, 6000).split('\n').forEach(line => L.push(`| ${line}`));
+    }));
+    const blob = new Blob([JSON.stringify(debugPayload, null, 2)], { type: "application/json;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `messages-${chatId}-${iso.replace(/[:.]/g, "-")}.json`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  } catch (e) {
+    console.error("[debug] save messages.json failed", e);
   }
-
-  if (msg.content && msg.content.trim()) {
-    L.push(`\n## Final Answer [${msg.content.length}c]`);
-    L.push(blockText(msg.content, 2000));
-  }
-
-  // The exact messages sent to the model — the ground truth of what it saw,
-  // including reasoning_digest blocks and tool_call serialization.
-  if (msg.internalContext && msg.internalContext.length > 0) {
-    L.push('\n## Model Context (verbatim)');
-    msg.internalContext.forEach((m: any, i: number) => {
-      const body = msgToText(m.content);
-      L.push(`\n[${i + 1}] ${m.role} (${body.length}c)`);
-      L.push(blockText(body, 1800));
-    });
-  }
-
-  if (msg.comments && msg.comments.length > 0) {
-    L.push('\n## User Comments');
-    msg.comments.forEach(c => L.push(`- on "${oneLine(c.quote, 80)}": ${oneLine(c.text, 200)}`));
-  }
-
-  return L.join('\n');
-};
-
-const downloadTranscript = () => {
-  const blob = new Blob([transcriptStore.get()], { type: 'text/markdown;charset=utf-8' });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = `oneagent-transcript-${new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)}.md`;
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
-  setTimeout(() => URL.revokeObjectURL(url), 1000);
 };
 
 // Safety cap so a model stuck in tool-call loops can't run forever
@@ -376,16 +312,22 @@ const ChatArea = ({ onToggleSettings }: { onToggleSettings?: () => void }) => {
   const [terminatedSnapshot, setTerminatedSnapshot] = useState<string | null>(agentBrowserStore.getTerminatedSnapshot());
   useEffect(() => agentBrowserStore.subscribeSnapshot(setTerminatedSnapshot), []);
 
-  // Debug-transcript availability — button only shows after a generation completes.
-  const [hasTranscript, setHasTranscript] = useState(transcriptStore.get().length > 0);
-  useEffect(() => transcriptStore.subscribe(t => setHasTranscript(t.length > 0)), []);
-
   // Edit mode tracking
   const [editingBlock, setEditingBlock] = useState<{ id: string, type: 'user' | 'thinking' | 'response' | 'tools' } | null>(null);
   const [editPreview, setEditPreview] = useState<{ text: string, attachments: any[] } | null>(null);
   
-  const [currentModel, setCurrentModel] = useState<LLMModel | null>(null);
+  const [currentModel, setCurrentModel] = useState<LLMModel | null>(() => getOrchestratorModel());
   const [lastUsedModel, setLastUsedModel] = useState<LLMModel | null>(null);
+
+  // Keep orchestrator model in sync with ChatInput selector
+  useEffect(() => {
+    const sync = () => {
+      const m = getOrchestratorModel();
+      if (m) setCurrentModel(m);
+    };
+    window.addEventListener('orchestrator-model-updated', sync);
+    return () => window.removeEventListener('orchestrator-model-updated', sync);
+  }, []);
   
   // Selection state
   const [selectionContext, setSelectionContext] = useState<{ text: string, x: number, y: number, msgId: string, msgType: 'user' | 'thinking' | 'response' } | null>(null);
@@ -454,12 +396,16 @@ const ChatArea = ({ onToggleSettings }: { onToggleSettings?: () => void }) => {
     requestApproval,
     chatId: homeChatIdRef.current,
     getAnnotations: () => messages.flatMap(m => (m.role === 'assistant' ? (m.comments || []) : [])),
-    spawnAgent: (spec) => spawnSubAgent(spec, {
-      chatId: homeChatIdRef.current || chatStore.getActiveId()!,
-      requestApproval,
-      getModel: () => activeModelRef.current || lastUsedModel,
-      signal: abortControllerRef.current?.signal
-    }),
+    spawnAgent: (spec) => {
+      const subModel = getSubAgentModel();
+      if (!spec.model && subModel) spec.model = { id: subModel.id, provider: subModel.provider };
+      return spawnSubAgent(spec, {
+        chatId: homeChatIdRef.current || chatStore.getActiveId()!,
+        requestApproval,
+        getModel: () => subModel || activeModelRef.current || lastUsedModel,
+        signal: abortControllerRef.current?.signal
+      });
+    },
     getAgents: getAgentsSnapshot,
     waitForAgents,
     signal: abortControllerRef.current?.signal
@@ -810,7 +756,6 @@ const ChatArea = ({ onToggleSettings }: { onToggleSettings?: () => void }) => {
     setIsGenerating(true);
     // Hide the titlebar Transcripts button while a new generation runs —
     // it only reappears once the response completes.
-    transcriptStore.set('');
     abortControllerRef.current = new AbortController();
 
     // Re-enable autoscroll when generation starts
@@ -1038,28 +983,44 @@ const ChatArea = ({ onToggleSettings }: { onToggleSettings?: () => void }) => {
         const rawCalls = streamResult.toolCalls || [];
         if (rawCalls.length === 0) {
           const truncated = streamResult.finishReason === 'length';
-          // An aborted stream also resolves without tool calls — that's a
-          // manual kill, not a silent stop; never auto-continue it.
           const aborted = roundSignal.aborted || !abortControllerRef.current;
           const wentSilent = !aborted && !streamResult.content.trim() && !!streamResult.thinking.trim();
-          if ((truncated || wentSilent) && autoContinues < MAX_AUTO_CONTINUES && round < MAX_TOOL_ROUNDS) {
+          const finalLen = (streamResult.content || '').trim().length + accumulatedContent.trim().length;
+          const hasActiveTasks = (() => {
+            try {
+              const tasks = JSON.parse(localStorage.getItem(`tasks:${homeChatIdRef.current}`) || '[]');
+              return tasks.some((t: any) => t.status === 'queued' || t.status === 'running');
+            } catch { return false; }
+          })();
+          const hasRunningAgents = (() => {
+            try { const snap = getAgentsSnapshot(); return snap.some(a => a.status === 'running' || a.status === 'queued'); } catch { return false; }
+          })();
+          const hasDeniedError = allToolCalls.some((tc: any) => /USER DENIED/i.test(tc.result || '') || /do not silently retry/i.test(tc.result || ''));
+          const permissionAsk = /cannot execute.*without.*approval|cannot run.*without.*permission|explicit approval/i.test(streamResult.content || '');
+          const futureTense = /\bwill (notify|report|complete|get back|update you|inform you|let you know)\b/i.test(streamResult.content || '') || /\b(i'?ll|we will) (notify|follow up)\b/i.test(streamResult.content || '');
+          const quitTooEarly = !aborted && allToolCalls.length === 0 && finalLen < 300 && round <= 2;
+          const shortWithTasks = (hasActiveTasks || hasRunningAgents) && finalLen < 400;
+          if ((truncated || wentSilent || quitTooEarly || shortWithTasks || futureTense || (hasDeniedError && permissionAsk)) && autoContinues < MAX_AUTO_CONTINUES && round < MAX_TOOL_ROUNDS) {
             autoContinues++;
-            // Carry the interrupted round's conclusions forward — otherwise the
-            // next attempt re-derives everything from scratch and loops.
             const digest = condenseThinking(streamResult.thinking)
               .split('\n').filter(l => !l.startsWith('[Earlier')).join('\n').trim();
             const strict = autoContinues >= MAX_AUTO_CONTINUES
               ? ' No further analysis is allowed. Decide from what you have and emit ONE tool call immediately.'
               : ' Do NOT re-analyze from scratch.';
-            const reason = truncated
+            let reason = truncated
               ? 'Your reply hit the token limit mid-generation.'
-              : 'Your reasoning ended without a tool call or answer.';
-            const note = `[Auto-continued: ${truncated ? 'token cutoff' : 'stopped without acting'}]`;
+              : wentSilent ? 'Your reasoning ended without a tool call or answer.'
+              : futureTense ? 'Do not use future tense — complete the work now and report actual results. If you spawned sub-agents, you must call check_agents with wait_ms before answering.'
+              : (hasDeniedError && permissionAsk) ? 'Your last tool was denied (run_command for web). Do NOT ask for shell permission — switch to browser sub-agents: spawn_agent(task="Check ONE retailer …", tools="browser") for each retailer, batched in parallel.'
+              : quitTooEarly ? 'You answered without using tools or planning — the task requires verified actions.'
+              : (hasRunningAgents ? 'You have running sub-agents — call check_agents(wait_ms=15000) to collect their results before finishing.'
+              : 'You have active tasks still queued/running — verify completion before finishing.');
+            const note = `[Auto-continued: ${truncated ? 'token cutoff' : wentSilent ? 'stopped without acting' : futureTense ? 'future-tense promise' : hasDeniedError ? 'permission-denied' : 'task incomplete'}]`;
             accumulatedThinking = accumulatedThinking ? `${accumulatedThinking}\n\n${note}` : note;
             roundThinkingParts.push(note);
             formattedMessages.push({
               role: 'user',
-              content: `[System notice] ${reason} The task is not done.${digest ? `\nConclusions already reached (trust these):\n${digest}` : ''}${strict} Respond with your next tool call now.`
+              content: `[System notice] ${reason} The task is not done.${digest ? `\nConclusions already reached (trust these):\n${digest}` : ''}${strict} Respond with your next tool call now.${hasRunningAgents ? ' Suggested: check_agents(wait_ms=15000).' : ''}`
             });
             continue;
           }
@@ -1215,7 +1176,6 @@ const ChatArea = ({ onToggleSettings }: { onToggleSettings?: () => void }) => {
       });
 
       // Generation over — the titlebar Transcripts button appears now.
-      transcriptStore.set(buildTranscript(finalMsg));
       void maybeGenerateTitle(contextMsgs, targetModel, accumulatedContent);
 
 
@@ -1250,7 +1210,6 @@ const ChatArea = ({ onToggleSettings }: { onToggleSettings?: () => void }) => {
             isGenerating: false,
           };
           newMsgs[lastIdx] = errMsg;
-          transcriptStore.set(buildTranscript(errMsg));
         }
         return newMsgs;
       });
@@ -1445,17 +1404,15 @@ const ChatArea = ({ onToggleSettings }: { onToggleSettings?: () => void }) => {
   return (
     <div className="flex-1 flex flex-col bg-surface relative rounded-lg overflow-hidden min-w-0 bevel-light">
 
-      {/* Panel-level controls — top right */}
-      <div className="absolute top-2 right-2 z-30 flex items-center gap-1 no-drag-region">
-        {hasTranscript && (
-          <button
-            onClick={downloadTranscript}
-            className="p-1.5 rounded-full text-textSecondary hover:text-white hover:bg-white/10 transition-colors"
-            title="Download debug transcript"
-          >
-            <Bug size={15} />
-          </button>
-        )}
+      {/* Panel-level controls — header row that pushes content down (no overlay) */}
+      <div className="shrink-0 h-9 flex items-center justify-end gap-1 px-3 border-b border-white/5 bg-black/15 no-drag-region">
+        <button
+          onClick={downloadDebugMessagesJson}
+          className="p-1.5 rounded-full text-textSecondary hover:text-white hover:bg-white/10 transition-colors"
+          title="Save debug messages.json (with timestamps, models & parameters)"
+        >
+          <Bug size={15} />
+        </button>
         {onToggleSettings && (
           <button
             onClick={onToggleSettings}
@@ -1480,7 +1437,7 @@ const ChatArea = ({ onToggleSettings }: { onToggleSettings?: () => void }) => {
             </div>
           </div>
         ) : (
-          <div className="chat-measure flex flex-col gap-4 py-6 px-4 sm:px-6 lg:px-8 text-sm xl:text-base">
+          <div className="chat-measure flex flex-col gap-4 pt-10 pb-6 px-4 sm:px-6 lg:px-8 text-sm xl:text-base">
             {activityFeed.activities.map((activity, idx) => {
 
               if (activity.type === 'user') {

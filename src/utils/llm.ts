@@ -289,13 +289,86 @@ export const getProviderStatus = async (): Promise<Record<string, any>> => {
 
 // Combined self-stats snapshot consumed by the get_model_stats tool.
 export const getModelStats = async (activeModel?: LLMModel | null) => {
-  const [loaded] = await Promise.all([getProviderStatus()]);
+  const [report] = await Promise.all([getVramReport()]);
   return {
     activeModel: activeModel ? { id: activeModel.id, provider: activeModel.provider } : null,
     settings: getModelSettings(),
     tokenUsage: getSessionUsage(),
-    loadedModels: loaded
+    loadedModels: report.loadedModels,
+    ...(report.totalBytes != null ? {
+      vram: {
+        usedBytes: report.usedBytes,
+        totalBytes: report.totalBytes,
+        headroomBytes: report.headroomBytes,
+        note: 'A sub-agent/switch model must fit within headroomBytes or it will evict loaded models.'
+      }
+    } : {})
   };
+};
+
+// ─── VRAM awareness ──────────────────────────────────────────────────────────
+// Local providers keep a finite model cache: loading a new model can evict
+// resident ones (e.g. the orchestrator itself). These helpers give the agent
+// the numbers it needs to pick models that FIT alongside what is already
+// loaded, instead of triggering evict/reload thrash mid-task.
+
+export interface VramReport {
+  // False when only token-metered cloud providers are enabled.
+  supported: boolean;
+  usedBytes?: number;
+  totalBytes?: number;
+  headroomBytes?: number;
+  // providerId -> currently resident models (exact footprints when reported).
+  loadedModels: Record<string, { id: string; vramBytes?: number; sizeBytes?: number }[]>;
+  // lowercase model id -> on-disk size (estimation source for unloaded models).
+  diskSizes: Record<string, number>;
+}
+
+export const getVramReport = async (): Promise<VramReport> => {
+  const [status, gpu] = await Promise.all([
+    getProviderStatus(),
+    ((window as any).electronAPI?.vramUsage?.() ?? Promise.resolve({ success: false })) as Promise<any>
+  ]);
+  const loadedModels: VramReport['loadedModels'] = {};
+  const diskSizes: Record<string, number> = {};
+  let anyLocal = false;
+  for (const [pid, s] of Object.entries(status || {})) {
+    const st: any = s;
+    if (st?.kind === 'vram') {
+      anyLocal = true;
+      loadedModels[pid] = (st.models || []).map((m: any) => ({ id: m.id, vramBytes: m.vramBytes, sizeBytes: m.sizeBytes }));
+      for (const m of st.available || []) diskSizes[String(m.id).toLowerCase()] = m.sizeBytes;
+    } else if (st?.kind === 'load-state') {
+      anyLocal = true;
+      loadedModels[pid] = (st.models || []).map((m: any) => ({ id: m.id }));
+    }
+  }
+  const usedBytes = gpu?.success ? gpu.usedBytes : undefined;
+  const totalBytes = gpu?.success ? gpu.totalBytes : undefined;
+  return {
+    supported: anyLocal,
+    usedBytes,
+    totalBytes,
+    headroomBytes: usedBytes != null && totalBytes != null ? Math.max(0, totalBytes - usedBytes) : undefined,
+    loadedModels,
+    diskSizes
+  };
+};
+
+// Rough VRAM requirement for a model: exact footprint when already resident,
+// otherwise its on-disk size plus an allowance for KV cache/activations at
+// default context (~0.8 GiB — deliberately generous so estimates err safe).
+const VRAM_OVERHEAD_BYTES = Math.round(0.8 * 1024 * 1024 * 1024);
+
+export const estimateModelVram = (modelId: string, report: VramReport): number | undefined => {
+  const key = String(modelId).toLowerCase();
+  for (const models of Object.values(report.loadedModels)) {
+    const hit = models.find(m => String(m.id).toLowerCase() === key);
+    if (hit?.vramBytes != null) return hit.vramBytes;
+  }
+  const disk = report.diskSizes[key];
+  if (disk == null) return undefined;
+  return disk + VRAM_OVERHEAD_BYTES;
 };
 
 // Provider-specific reasoning/thinking parameters.
@@ -325,6 +398,67 @@ export interface LLMModel {
   name: string;
   provider: string; // provider ID
 }
+
+// ——— Orchestrator / sub-agent model selection ———————
+const ORCH_MODEL_KEY = 'llm_orchestrator_model';
+const SUBAGENT_MODEL_KEY = 'llm_subagent_model';
+
+export const getOrchestratorModel = (): LLMModel | null => {
+  try {
+    const raw = localStorage.getItem(ORCH_MODEL_KEY);
+    return raw ? JSON.parse(raw) as LLMModel : null;
+  } catch { return null; }
+};
+export const setOrchestratorModel = (m: LLMModel | null) => {
+  if (m) localStorage.setItem(ORCH_MODEL_KEY, JSON.stringify(m));
+  else localStorage.removeItem(ORCH_MODEL_KEY);
+  window.dispatchEvent(new Event('orchestrator-model-updated'));
+};
+export const getSubAgentModel = (): LLMModel | null => {
+  try {
+    const raw = localStorage.getItem(SUBAGENT_MODEL_KEY);
+    return raw ? JSON.parse(raw) as LLMModel : null;
+  } catch { return null; }
+};
+export const setSubAgentModel = (m: LLMModel | null) => {
+  if (m) localStorage.setItem(SUBAGENT_MODEL_KEY, JSON.stringify(m));
+  else localStorage.removeItem(SUBAGENT_MODEL_KEY);
+  window.dispatchEvent(new Event('subagent-model-updated'));
+};
+
+// ——— Vision capability ———————
+// gemma*:e4b etc. are text-only; only known vision families support image_url
+const VISION_SUBSTRINGS = ['vision','vl','llava','bakllava','minicpm-v','moondream','qwen2-vl','qwen2.5-vl','internvl','phi3-vision','pixtral','gemma3:','gemma-3'];
+export const isVisionModel = (model: LLMModel | null | undefined): boolean => {
+  if (!model) return false;
+  const id = model.id.toLowerCase();
+  const provider = model.provider?.toLowerCase();
+  // OpenAI / Gemini / Anthropic vision is broad, assume vision if model contains vision or is gpt-4o / gemini
+  if (['openai','openrouter','gemini','anthropic'].includes(provider)) {
+    if (id.includes('vision') || id.includes('gpt-4o') || id.includes('gemini') || id.includes('claude-3')) return true;
+    // For OpenRouter/Gemini we conservatively allow images (provider will reject if not supported)
+    return provider !== 'ollama' && provider !== 'lmstudio';
+  }
+  if (provider === 'ollama' || provider === 'lmstudio') {
+    return VISION_SUBSTRINGS.some(s => id.includes(s));
+  }
+  // Cloud groq/together often text-only unless explicitly vision
+  return VISION_SUBSTRINGS.some(s => id.includes(s));
+};
+export const stripImagesForNonVision = (messages: any[], model: LLMModel | null): any[] => {
+  if (isVisionModel(model)) return messages;
+  // Replace image_url parts with placeholders so non-vision models don't error
+  return messages.map(m => {
+    const c = m.content;
+    if (!Array.isArray(c)) return m;
+    const hasImage = c.some((p: any) => p?.type === 'image_url');
+    if (!hasImage) return m;
+    const filtered = c.filter((p: any) => p?.type !== 'image_url');
+    // Ensure at least the text describing the attachment survives
+    const placeholder = { type: 'text', text: '[image omitted — model does not support vision; describe the image in text or switch to a vision model like llava/minicpm-v]' };
+    return { ...m, content: [...filtered, placeholder] };
+  });
+};
 
 export const fetchModels = async (): Promise<LLMModel[]> => {
   const providers = getProviders().filter(p => p.enabled);
@@ -739,9 +873,13 @@ export const generateChatStream = async (
         reject(new Error(data.error || 'Streaming error occurred'));
       });
 
+      const safeMessages = stripImagesForNonVision(messages, model);
+      if (safeMessages !== messages && messages.some((m: any) => Array.isArray(m.content) && m.content.some((p: any) => p?.type === 'image_url'))) {
+        console.warn(`[llm] Stripped image parts for non-vision model ${model.id} (${model.provider}) — switch to llava/minicpm-v for vision`);
+      }
       const payload: any = {
         model: model.id,
-        messages,
+        messages: safeMessages,
       };
 
       if (tools && tools.length > 0) {
@@ -797,9 +935,10 @@ export const generateChatResponse = async (
   if (!provider) throw new Error('Provider not found');
 
   const modelSettings = settings || getModelSettings();
+  const safeMessages2 = stripImagesForNonVision(messages, model);
   const payload: any = {
     model: model.id,
-    messages,
+    messages: safeMessages2,
   };
 
   if (typeof modelSettings.temperature === 'number') {

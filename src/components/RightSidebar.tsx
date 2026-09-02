@@ -257,13 +257,52 @@ const RightSidebar = ({ open }: { open: boolean }) => {
     return () => modelParamsStore.setActive(false);
   }, [open]);
 
+  // Keep sliders in sync when a chat restores its saved modelSettings (chatConfig)
+  useEffect(() => {
+    const sync = () => setModelSettings(getModelSettings());
+    window.addEventListener('model-settings-updated', sync);
+    return () => window.removeEventListener('model-settings-updated', sync);
+  }, []);
+
+  // Live VRAM update every 1s — ONLY while sidebar is open (Ollama status)
   useEffect(() => {
     if (!open) return;
-    const fetchStatus = () => getProviderStatus().then(setProviderStatus).catch(() => {});
+    let cancelled = false;
+    const fetchStatus = async () => {
+      try {
+        const s = await getProviderStatus();
+        if (!cancelled) setProviderStatus(s);
+      } catch {}
+    };
     fetchStatus();
-    const interval = setInterval(fetchStatus, 3000);
-    return () => { clearInterval(interval as any); };
+    const interval = setInterval(fetchStatus, 1000);
+    return () => { cancelled = true; clearInterval(interval as any); };
   }, [open]);
+
+  // Total system VRAM via nvidia-smi (what Task Manager shows) — polls every 2s
+  const [vram, setVram] = useState<{ usedBytes: number; totalBytes: number } | null>(null);
+  useEffect(() => {
+    if (!open) return;
+    let cancelled = false;
+    const poll = async () => {
+      try {
+        const res = await (window as any).electronAPI?.vramUsage?.();
+        if (!cancelled) setVram(res?.success ? { usedBytes: res.usedBytes, totalBytes: res.totalBytes } : null);
+      } catch {
+        if (!cancelled) setVram(null);
+      }
+    };
+    poll();
+    const t = setInterval(poll, 2000);
+    return () => { cancelled = true; clearInterval(t as any); };
+  }, [open]);
+
+  const fmtBytes = (b: number) => {
+    if (!b) return '0 B';
+    const units = ['B','KB','MB','GB','TB'];
+    const i = Math.min(units.length - 1, Math.floor(Math.log(b)/Math.log(1024)));
+    return `${(b/Math.pow(1024,i)).toFixed(i>2?1:0)} ${units[i]}`;
+  };
 
   const updateSettings = (partial: Partial<ModelSettings>) => {
     const updated = { ...modelSettings, ...partial };
@@ -318,27 +357,38 @@ const RightSidebar = ({ open }: { open: boolean }) => {
             </div>
           </div>
           
-          {/* VRAM Pie */}
+          {/* VRAM Pie — system total via nvidia-smi (Task Manager), fallback to Ollama sum */}
           <div className="flex-1 flex flex-col items-center gap-2 p-3 bg-black/20 border border-white/5 rounded-xl opacity-90">
             <span className="text-[10px] font-semibold text-textSecondary uppercase tracking-wider">VRAM</span>
             <div className="relative">
-              <PieChart 
-                data={[{ value: vramUsed, color: 'rgb(var(--accent-rgb))' }]} 
-                total={Math.max(vramUsed, 8 * 1024 * 1024 * 1024)} 
-                size={72} thickness={8} 
-              />
+              {vram ? (
+                <PieChart 
+                  data={[
+                    { value: vram.usedBytes, color: 'rgb(var(--accent-rgb))' },
+                    { value: Math.max(0, vram.totalBytes - vram.usedBytes), color: 'rgba(255,255,255,0.12)' }
+                  ]} 
+                  total={vram.totalBytes} 
+                  size={72} thickness={8} 
+                />
+              ) : (
+                <PieChart 
+                  data={[{ value: vramUsed, color: 'rgb(var(--accent-rgb))' }]} 
+                  total={Math.max(vramUsed, 8 * 1024 * 1024 * 1024)} 
+                  size={72} thickness={8} 
+                />
+              )}
               <div className="absolute inset-0 flex items-center justify-center flex-col">
                 <span className="text-[11px] text-white/90 font-mono font-semibold">
-                  {vramModels}
+                  {vram ? fmtBytes(vram.usedBytes) : vramModels}
                 </span>
-                <span className="text-[8px] text-textSecondary/60 font-mono">MDLS</span>
+                <span className="text-[8px] text-textSecondary/60 font-mono">{vram ? `/ ${fmtBytes(vram.totalBytes)}` : 'MDLS'}</span>
               </div>
             </div>
             <div className="flex flex-col justify-center items-center h-full w-full mt-1">
               <span className="text-[10px] text-textSecondary font-mono font-medium">
-                {vramUsed > 0 ? `${(vramUsed / (1024*1024*1024)).toFixed(1)} GB` : '0 GB'}
+                {vram ? `${fmtBytes(vram.usedBytes)} / ${fmtBytes(vram.totalBytes)}` : vramUsed > 0 ? `${(vramUsed / (1024*1024*1024)).toFixed(1)} GB` : '0 GB'}
               </span>
-              <span className="text-[9px] text-textSecondary/50 font-mono">Used</span>
+              <span className="text-[9px] text-textSecondary/50 font-mono">{vram ? 'system (nvidia-smi) — matches Task Manager' : vramModels > 0 ? `${vramModels} model(s) (Ollama only)` : 'no GPU data'}</span>
             </div>
           </div>
         </div>
