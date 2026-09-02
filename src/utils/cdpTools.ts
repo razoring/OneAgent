@@ -1,4 +1,5 @@
 import { cdpBrowserStore } from './cdpBrowserStore';
+import { browserPreviewStore } from './browserPreviewStore';
 
 const api = (): any => (window as any).electronAPI;
 
@@ -84,7 +85,6 @@ const SOM_JS = `
 export const cdpInjectSoM = async (agentId?: string | null): Promise<any[]> => {
   const { target } = await getTarget(agentId ?? null as any);
   const res = await cdpCmd(target.id, 'Runtime.evaluate', { expression: SOM_JS, awaitPromise: true, returnByValue: true });
-  // Runtime.evaluate returns {result: {value: markers}} when returnByValue true
   const val = (res as any)?.result?.value ?? res?.value ?? res;
   return Array.isArray(val) ? val : [];
 };
@@ -96,9 +96,17 @@ export const cdpClearSoM = async (agentId?: string | null): Promise<void> => {
 
 export const cdpCapture = async (agentId?: string | null): Promise<string> => {
   const { target } = await getTarget(agentId ?? null as any);
-  // Ensure Page enabled
+  try {
+    const apiObj = api();
+    if (apiObj && apiObj.browserCapture) {
+      const cap = await apiObj.browserCapture(Number(target.id));
+      if (cap?.success && cap.image) {
+        return cap.image;
+      }
+    }
+  } catch {}
   await cdpCmd(target.id, 'Page.enable', {}).catch(()=>{});
-  const res: any = await cdpCmd(target.id, 'Page.captureScreenshot', { format: 'png', captureBeyondViewport: true });
+  const res: any = await cdpCmd(target.id, 'Page.captureScreenshot', { format: 'png' });
   const data = res?.data;
   if (!data) throw new Error('Blank capture — CDP returned no data');
   return `data:image/png;base64,${data}`;
@@ -145,9 +153,13 @@ export const cdpGetDom = async (agentId?: string | null): Promise<string> => {
 
 export const cdpNavigate = async (agentId: string | null | undefined, url: string): Promise<string> => {
   const act = agentId !== undefined ? agentId : null;
-  const t = await cdpBrowserStore.ensureTarget(act);
-  await cdpCmd(t.id, 'Page.enable', {}).catch(()=>{});
-  await cdpCmd(t.id, 'Page.navigate', { url });
+  const t = await cdpBrowserStore.ensureTarget(act, url);
+  try {
+    await cdpCmd(t.id, 'Page.enable', {}).catch(()=>{});
+    await cdpCmd(t.id, 'Page.navigate', { url });
+  } catch {
+    await cdpCmd(t.id, 'Runtime.evaluate', { expression: `window.location.href = ${JSON.stringify(url)};` }).catch(()=>{});
+  }
   // Wait for load
   const start = Date.now();
   while (Date.now() - start < 15000) {
@@ -155,9 +167,13 @@ export const cdpNavigate = async (agentId: string | null | undefined, url: strin
     try {
       const ready = await cdpCmd(t.id, 'Runtime.evaluate', { expression: `document.readyState`, returnByValue: true });
       const state = (ready as any)?.result?.value ?? ready?.value;
-      if (state === 'complete') break;
+      if (state === 'complete' || state === 'interactive') break;
     } catch {}
   }
+  try {
+    const img = await cdpCapture(act);
+    if (img) browserPreviewStore.addImage(act, img);
+  } catch {}
   return `Navigation complete: ${url}`;
 };
 
@@ -274,6 +290,9 @@ export const cdpObserve = async (agentId?: string | null): Promise<{ image: stri
   const { image, markers } = await cdpCaptureWithSoM(act);
   const dom = await cdpGetDom(act);
   const meta: any = await cdpCmd(target.id, 'Runtime.evaluate', { expression: `(()=>{const d=document.scrollingElement||document.documentElement; return {scrollX:Math.round(window.scrollX), scrollY:Math.round(window.scrollY), maxX:Math.round(d.scrollWidth-d.clientWidth), maxY:Math.round(d.scrollHeight-d.clientHeight), viewport:{width:window.innerWidth,height:window.innerHeight}, atTop: window.scrollY<=2, atBottom: (d.scrollTop+d.clientHeight)>=d.scrollHeight-2, url: location.href, title: document.title}})()`, returnByValue:true }).then((r:any)=> r?.result?.value ?? r?.value ?? {}).catch(()=>({}));
+  try {
+    if (image) browserPreviewStore.addImage(act, image);
+  } catch {}
   return { image, markers, dom, meta };
 };
 

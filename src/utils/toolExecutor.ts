@@ -58,6 +58,8 @@ export interface ToolContext {
   waitForAgents: (ids: string[] | undefined, ms: number) => Promise<any[]>;
   // Active chat for per-chat task isolation.
   chatId?: string | null;
+  // Sub-agent identifier — each agent gets its own CDP browser target.
+  agentId?: string | null;
   // Inline annotations on the assistant reply — delivered with ask_user answers.
   getAnnotations?: () => { quote: string; text: string }[];
   signal?: AbortSignal;
@@ -120,7 +122,7 @@ export const summarizeArgs = (name: string, args: any): string => {
 // webview is single-view and serializes. Desktop remains global.
 const lockKeyFor = (name: string, ctx: ToolContext): string | null => {
   if (name.startsWith('browser') || name === 'find_in_page') {
-    return `browser:${(ctx as any).agentId ?? (ctx as any).currentActor ?? '__user__'}`;
+    return `browser:${ctx.agentId ?? (ctx as any).currentActor ?? '__user__'}`;
   }
   if (name.startsWith('desktop')) return 'desktop';
   return null;
@@ -209,14 +211,14 @@ const HANDLERS: Record<string, Handler> = {
       else url = 'https://html.duckduckgo.com/html/?q=' + encodeURIComponent(url);
     }
     if (await isCdpMode()) {
-      try { return ok(await cdpTools.cdpNavigate(((ctx as any).agentId ?? null), url)); } catch (e: any) { /* fallback */ }
+      try { return ok(await cdpTools.cdpNavigate((ctx.agentId ?? null), url)); } catch (e: any) { /* fallback */ }
     }
     return ok(await executeBrowserNavigation('navigate', url));
   },
   browser_go_back: async (_a, ctx) => {
     if (await isCdpMode()) {
       try {
-        const t = await cdpBrowserStore.ensureTarget(((ctx as any).agentId ?? null));
+        const t = await cdpBrowserStore.ensureTarget((ctx.agentId ?? null));
         const api: any = (window as any).electronAPI;
         const r = await api.cdpSend({ webContentsId: Number(t.id), method: 'Page.goBack', params: {} });
         if (r?.success) return ok('OK');
@@ -227,7 +229,7 @@ const HANDLERS: Record<string, Handler> = {
   browser_terminate: async (_a, ctx) => {
     if (await isCdpMode()) {
       try {
-        const agentId = ((ctx as any).agentId ?? null);
+        const agentId = (ctx.agentId ?? null);
         const t = cdpBrowserStore.getTargetForAgent(agentId);
         if (t) {
           const api: any = (window as any).electronAPI;
@@ -241,14 +243,14 @@ const HANDLERS: Record<string, Handler> = {
   },
   browser_get_dom: async (_a, ctx) => {
     if (await isCdpMode()) {
-      try { return ok(await cdpTools.cdpGetDom(((ctx as any).agentId ?? null))); } catch {}
+      try { return ok(await cdpTools.cdpGetDom((ctx.agentId ?? null))); } catch {}
     }
     return ok(await getSemanticDOM());
   },
   browser_observe: async (_a, ctx) => {
     if (await isCdpMode()) {
       try {
-        const obs = await cdpTools.cdpObserve(((ctx as any).agentId ?? null));
+        const obs = await cdpTools.cdpObserve((ctx.agentId ?? null));
         return {
           result: j({
             success: true,
@@ -280,7 +282,7 @@ const HANDLERS: Record<string, Handler> = {
   browser_screenshot: async (_a, ctx) => {
     if (await isCdpMode()) {
       try {
-        const { image, markers } = await cdpTools.cdpCaptureWithSoM(((ctx as any).agentId ?? null));
+        const { image, markers } = await cdpTools.cdpCaptureWithSoM((ctx.agentId ?? null));
         return {
           result: j({
             success: true,
@@ -308,7 +310,7 @@ const HANDLERS: Record<string, Handler> = {
       try {
         const id = p(args,'id'); const x=p(args,'x'); const y=p(args,'y');
         const button = p(args,'button')||'left'; const clickCount = Number(p(args,'click_count')||1);
-        const res = await cdpTools.cdpClick(((ctx as any).agentId ?? null), id!=null?Number(id):undefined, x!=null?Number(x):undefined, y!=null?Number(y):undefined, button, clickCount);
+        const res = await cdpTools.cdpClick((ctx.agentId ?? null), id!=null?Number(id):undefined, x!=null?Number(x):undefined, y!=null?Number(y):undefined, button, clickCount);
         return ok(res);
       } catch {}
     }
@@ -318,7 +320,7 @@ const HANDLERS: Record<string, Handler> = {
     if (await isCdpMode()) {
       try {
         const id=p(args,'id'); const x=p(args,'x'); const y=p(args,'y'); const button=p(args,'button')||'left';
-        const act=((ctx as any).agentId ?? null); const {target}=await (await import('./cdpBrowserStore')).cdpBrowserStore.ensureTarget(act) as any;
+        const act=(ctx.agentId ?? null); const {target}=await (await import('./cdpBrowserStore')).cdpBrowserStore.ensureTarget(act) as any;
         let px=x, py=y;
         if (id!=null) {
           const js=`(function(){const el=window.__oneagentElements&&window.__oneagentElements[${Number(id)}]; if(!el)return null; el.scrollIntoView({block:'center',inline:'center'}); const r=el.getBoundingClientRect(); return {x:Math.round(r.left+r.width/2),y:Math.round(r.top+r.height/2)};})()`;
@@ -334,7 +336,7 @@ const HANDLERS: Record<string, Handler> = {
     if (await isCdpMode()) {
       try {
         const id=p(args,'id'); const x=p(args,'x'); const y=p(args,'y'); const button=p(args,'button')||'left';
-        const act=((ctx as any).agentId ?? null); const {target}=await (await import('./cdpBrowserStore')).cdpBrowserStore.ensureTarget(act) as any;
+        const act=(ctx.agentId ?? null); const {target}=await (await import('./cdpBrowserStore')).cdpBrowserStore.ensureTarget(act) as any;
         let px=x, py=y;
         if (id!=null) {
           const js=`(function(){const el=window.__oneagentElements&&window.__oneagentElements[${Number(id)}]; if(!el)return null; const r=el.getBoundingClientRect(); return {x:Math.round(r.left+r.width/2),y:Math.round(r.top+r.height/2)};})()`;
@@ -351,7 +353,7 @@ const HANDLERS: Record<string, Handler> = {
     if (await isCdpMode()) {
       try {
         const id=p(args,'id'); const x=p(args,'x'); const y=p(args,'y');
-        const act=((ctx as any).agentId ?? null); const {target}=await (await import('./cdpBrowserStore')).cdpBrowserStore.ensureTarget(act) as any;
+        const act=(ctx.agentId ?? null); const {target}=await (await import('./cdpBrowserStore')).cdpBrowserStore.ensureTarget(act) as any;
         let px=x, py=y;
         if (id!=null) {
           const js=`(function(){const el=window.__oneagentElements&&window.__oneagentElements[${Number(id)}]; if(!el)return null; const r=el.getBoundingClientRect(); return {x:Math.round(r.left+r.width/2),y:Math.round(r.top+r.height/2)};})()`;
@@ -370,7 +372,7 @@ const HANDLERS: Record<string, Handler> = {
         const fi=p(args,'from_id'); const fx=p(args,'from_x'); const fy=p(args,'from_y');
         const ti=p(args,'to_id'); const tx=p(args,'to_x'); const ty=p(args,'to_y');
         const button=p(args,'button')||'left';
-        const act=((ctx as any).agentId ?? null); const {target}=await (await import('./cdpBrowserStore')).cdpBrowserStore.ensureTarget(act) as any;
+        const act=(ctx.agentId ?? null); const {target}=await (await import('./cdpBrowserStore')).cdpBrowserStore.ensureTarget(act) as any;
         const api:any=(window as any).electronAPI;
         let sx:any=fx, sy:any=fy;
         if (fi!=null) {
@@ -396,7 +398,7 @@ const HANDLERS: Record<string, Handler> = {
     if (await isCdpMode()) {
       try {
         const key=String(p(args,'key')||''); const mods=p(args,'modifiers')||[]; const state=p(args,'state')||'press';
-        const act=((ctx as any).agentId ?? null); const {target}=await (await import('./cdpBrowserStore')).cdpBrowserStore.ensureTarget(act) as any;
+        const act=(ctx.agentId ?? null); const {target}=await (await import('./cdpBrowserStore')).cdpBrowserStore.ensureTarget(act) as any;
         const api:any=(window as any).electronAPI;
         const modMap:any={control:2, ctrl:2, alt:1, shift:8, meta:4, command:4};
         let modBits=0; for(const m of mods) modBits|=modMap[String(m).toLowerCase()]||0;
@@ -412,7 +414,7 @@ const HANDLERS: Record<string, Handler> = {
       try {
         const text=String(p(args,'text')||''); if(!text) throw new Error("browser_type requires 'text'");
         const id=p(args,'id'); const submit=!!p(args,'submit');
-        const res=await cdpTools.cdpType(((ctx as any).agentId ?? null), text, id!=null?Number(id):undefined, submit);
+        const res=await cdpTools.cdpType((ctx.agentId ?? null), text, id!=null?Number(id):undefined, submit);
         return ok(res);
       } catch {}
     }
@@ -422,7 +424,7 @@ const HANDLERS: Record<string, Handler> = {
     if (await isCdpMode()) {
       try {
         const dir=String(p(args,'direction')||'down'); const amount=Number(p(args,'amount')||600); const id=p(args,'id');
-        const res=await cdpTools.cdpScroll(((ctx as any).agentId ?? null), dir, amount, id!=null?Number(id):undefined);
+        const res=await cdpTools.cdpScroll((ctx.agentId ?? null), dir, amount, id!=null?Number(id):undefined);
         return ok(res);
       } catch {}
     }
@@ -432,7 +434,7 @@ const HANDLERS: Record<string, Handler> = {
     if (await isCdpMode()) {
       try {
         const data = args.data || args.Data || {};
-        const res = await cdpTools.cdpFillForm(((ctx as any).agentId ?? null), data);
+        const res = await cdpTools.cdpFillForm((ctx.agentId ?? null), data);
         return ok(res);
       } catch (e: any) { return ok(`Error: ${e.message}`); }
     }
@@ -443,7 +445,7 @@ const HANDLERS: Record<string, Handler> = {
       try {
         const id = Number(p(args,'id'));
         const files = p(args,'files') || [];
-        const res = await cdpTools.cdpFileUpload(((ctx as any).agentId ?? null), id, files);
+        const res = await cdpTools.cdpFileUpload((ctx.agentId ?? null), id, files);
         return ok(res);
       } catch (e: any) { return ok(`Error: ${e.message}`); }
     }
@@ -451,13 +453,13 @@ const HANDLERS: Record<string, Handler> = {
   },
   browser_console_messages: async (args, ctx) => {
     if (await isCdpMode()) {
-      try { return ok(await cdpTools.cdpConsoleMessages(((ctx as any).agentId ?? null))); } catch (e: any) { return ok(`Error: ${e.message}`); }
+      try { return ok(await cdpTools.cdpConsoleMessages((ctx.agentId ?? null))); } catch (e: any) { return ok(`Error: ${e.message}`); }
     }
     return ok('Fallback not implemented');
   },
   browser_network_requests: async (args, ctx) => {
     if (await isCdpMode()) {
-      try { return ok(await cdpTools.cdpNetworkRequests(((ctx as any).agentId ?? null))); } catch (e: any) { return ok(`Error: ${e.message}`); }
+      try { return ok(await cdpTools.cdpNetworkRequests((ctx.agentId ?? null))); } catch (e: any) { return ok(`Error: ${e.message}`); }
     }
     return ok('Fallback not implemented');
   },
@@ -466,7 +468,7 @@ const HANDLERS: Record<string, Handler> = {
       try {
         const accept = !!p(args,'accept');
         const promptText = p(args,'promptText');
-        const res = await cdpTools.cdpHandleDialog(((ctx as any).agentId ?? null), accept, promptText);
+        const res = await cdpTools.cdpHandleDialog((ctx.agentId ?? null), accept, promptText);
         return ok(res);
       } catch (e: any) { return ok(`Error: ${e.message}`); }
     }
@@ -643,9 +645,13 @@ const HANDLERS: Record<string, Handler> = {
     const waitMs = Number(p(args, 'wait_ms', 'waitMs')) || 0;
     if (waitMs > 0) {
       const states = await ctx.waitForAgents([agentId], waitMs);
-      return ok(j({ agent_id: agentId, states }));
+      const stillRunning = states.some((s: any) => s.status === 'running' || s.status === 'queued');
+      return ok(j({ 
+        agent_id: agentId, agentId: agentId, states,
+        ...(stillRunning ? { note: `Agent still ${states[0]?.status} after ${waitMs}ms — poll again with check_agents(agent_ids=["${agentId}"], wait_ms=10000) until status is done/error.` } : {})
+      }));
     }
-    return ok(j({ agent_id: agentId, status: 'spawned', note: `Poll with check_agents(agent_ids=["${agentId}"]).` }));
+    return ok(j({ agent_id: agentId, agentId: agentId, status: 'spawned', note: `Poll with check_agents(agent_ids=["${agentId}"], wait_ms=10000).` }));
   },
   check_agents: async (args, ctx) => {
     const ids = p(args, 'agent_ids', 'agentIds', 'ids');
@@ -654,7 +660,11 @@ const HANDLERS: Record<string, Handler> = {
     const states = waitMs > 0
       ? await ctx.waitForAgents(normIds, waitMs)
       : ctx.getAgents(normIds);
-    return ok(j({ agents: states }));
+    const stillRunning = states.some((s: any) => s.status === 'running' || s.status === 'queued');
+    return ok(j({ 
+      agents: states,
+      ...(stillRunning && waitMs > 0 && waitMs < 8000 ? { note: `Some agents still running after ${waitMs}ms — repoll with wait_ms=15000 for browser tasks.` } : {})
+    }));
   },
 
   // ── Persistent per-chat tasks (LLM-owned, not injected into history) ──

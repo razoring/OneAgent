@@ -2,21 +2,30 @@ export class BrowserPreviewStore {
   private imagesByAgent: Record<string, string[]> = {};
   private listeners: Set<() => void> = new Set();
 
-  addImage(agentId: string, imageUrl: string) {
-    if (!this.imagesByAgent[agentId]) {
-      this.imagesByAgent[agentId] = [];
+  addImage(agentId: string | null | undefined, imageUrl: string) {
+    const key = agentId || 'default';
+    if (!this.imagesByAgent[key]) {
+      this.imagesByAgent[key] = [];
     }
-    this.imagesByAgent[agentId].push(imageUrl);
+    this.imagesByAgent[key].push(imageUrl);
     this.notify();
   }
 
-  getImages(agentId: string | null): string[] {
-    if (!agentId) return [];
-    return this.imagesByAgent[agentId] || [];
+  getImages(agentId: string | null | undefined): string[] {
+    const key = agentId || 'default';
+    if (this.imagesByAgent[key] && this.imagesByAgent[key].length > 0) {
+      return this.imagesByAgent[key];
+    }
+    const all = Object.values(this.imagesByAgent);
+    for (let i = all.length - 1; i >= 0; i--) {
+      if (all[i].length > 0) return all[i];
+    }
+    return [];
   }
 
-  clearImages(agentId: string) {
-    delete this.imagesByAgent[agentId];
+  clearImages(agentId: string | null | undefined) {
+    const key = agentId || 'default';
+    delete this.imagesByAgent[key];
     this.notify();
   }
 
@@ -31,3 +40,4 @@ export class BrowserPreviewStore {
 }
 
 export const browserPreviewStore = new BrowserPreviewStore();
+

@@ -103,7 +103,14 @@ const createWindow = () => {
 };
 
 ipcMain.handle('create-agent-browser', async (event, { agentId, initialUrl }) => {
-  if (agentViews.has(agentId)) return { success: true, webContentsId: agentViews.get(agentId)!.webContents.id };
+  const id = agentId || 'default';
+  if (agentViews.has(id)) {
+    const existing = agentViews.get(id)!;
+    if (initialUrl && existing.webContents.getURL() !== initialUrl) {
+      existing.webContents.loadURL(initialUrl).catch(() => {});
+    }
+    return { success: true, webContentsId: existing.webContents.id };
+  }
   
   const extSession = session.fromPartition('persist:oneagent_browser');
   const view = new WebContentsView({
@@ -117,35 +124,38 @@ ipcMain.handle('create-agent-browser', async (event, { agentId, initialUrl }) =>
   if (mainWindow) {
     const [width, height] = mainWindow.getContentSize();
     view.setBounds({ x: 0, y: 0, width, height });
+    // Add view behind reactView if reactView is active so Chromium renders it
+    if (reactView && activeAgentViewId === null) {
+      try { mainWindow.contentView.addChildView(view, 0); } catch {}
+    }
   }
 
-  agentViews.set(agentId, view);
-
-  // We don't add it to mainWindow.contentView yet (Spectator Mode).
-  // It runs headlessly/hidden.
+  agentViews.set(id, view);
   
   if (initialUrl) {
-    view.webContents.loadURL(initialUrl);
+    view.webContents.loadURL(initialUrl).catch(err => {
+      console.error('[agentBrowser] loadURL failed:', err.message);
+    });
   }
 
   return { success: true, webContentsId: view.webContents.id };
 });
 
 ipcMain.handle('destroy-agent-browser', async (event, { agentId }) => {
-  const view = agentViews.get(agentId);
+  const id = agentId || 'default';
+  const view = agentViews.get(id);
   if (!view) return { success: true };
   
-  if (activeAgentViewId === agentId && mainWindow) {
+  if (activeAgentViewId === id && mainWindow) {
     mainWindow.contentView.removeChildView(view);
     if (reactView) mainWindow.contentView.addChildView(reactView);
     activeAgentViewId = null;
   }
   
-  // Close webcontents properly if possible
   if (!view.webContents.isDestroyed()) {
     view.webContents.close();
   }
-  agentViews.delete(agentId);
+  agentViews.delete(id);
   return { success: true };
 });
 
@@ -153,24 +163,44 @@ let returnOverlayView: WebContentsView | null = null;
 
 ipcMain.on('take-control', (event, agentId) => {
   if (!mainWindow) return;
-  let view = agentId ? agentViews.get(agentId) : undefined;
+  const id = agentId || 'default';
+  let view = agentViews.get(id);
   if (!view && agentViews.size > 0) {
-    view = Array.from(agentViews.values()).pop();
+    view = Array.from(agentViews.values())[0];
   }
-  if (!view) return;
+  if (!view) {
+    // Create new view if none exists
+    const extSession = session.fromPartition('persist:oneagent_browser');
+    view = new WebContentsView({
+      webPreferences: {
+        session: extSession,
+        contextIsolation: true,
+        nodeIntegration: false,
+      }
+    });
+    const [width, height] = mainWindow.getContentSize();
+    view.setBounds({ x: 0, y: 0, width, height });
+    agentViews.set(id, view);
+    view.webContents.loadURL('https://duckduckgo.com').catch(() => {});
+  }
 
   // Hide react UI, show agent view
-  if (reactView) mainWindow.contentView.removeChildView(reactView);
+  if (reactView) {
+    try { mainWindow.contentView.removeChildView(reactView); } catch {}
+  }
   if (activeAgentViewId && agentViews.has(activeAgentViewId)) {
-    mainWindow.contentView.removeChildView(agentViews.get(activeAgentViewId)!);
+    const old = agentViews.get(activeAgentViewId);
+    if (old && old !== view) {
+      try { mainWindow.contentView.removeChildView(old); } catch {}
+    }
   }
   if (returnOverlayView) {
-    mainWindow.contentView.removeChildView(returnOverlayView);
+    try { mainWindow.contentView.removeChildView(returnOverlayView); } catch {}
     returnOverlayView = null;
   }
   
-  mainWindow.contentView.addChildView(view);
-  activeAgentViewId = agentId || Array.from(agentViews.entries()).find(([, v]) => v === view)?.[0] || null;
+  try { mainWindow.contentView.addChildView(view); } catch {}
+  activeAgentViewId = id;
 
   // Ensure extensions tab is synced to this view
   if (extensionsManager) {
@@ -180,18 +210,19 @@ ipcMain.on('take-control', (event, agentId) => {
   // Create native floating return button overlay
   returnOverlayView = new WebContentsView({
     webPreferences: {
-      preload: path.join(__dirname, 'preload.js'),
-      transparent: true
+      preload: path.join(import.meta.dirname, 'preload.js'),
+      nodeIntegration: true,
+      contextIsolation: false,
     }
   });
   
   const [w, h] = mainWindow.getContentSize();
-  returnOverlayView.setBounds({ x: w / 2 - 100, y: h - 80, width: 200, height: 60 });
+  returnOverlayView.setBounds({ x: Math.round(w / 2 - 100), y: h - 80, width: 200, height: 60 });
   returnOverlayView.setBackgroundColor('#00000000'); // transparent
   
   const html = `
     <html>
-      <body style="margin:0;overflow:hidden;display:flex;justify-content:center;align-items:center;height:100vh;">
+      <body style="margin:0;overflow:hidden;display:flex;justify-content:center;align-items:center;height:100vh;background:transparent;">
         <button onclick="window.electronAPI.returnToChat()" style="background:#ff3b30;color:white;border:none;padding:12px 24px;border-radius:30px;font-family:sans-serif;font-weight:bold;font-size:14px;cursor:pointer;box-shadow:0 4px 15px rgba(0,0,0,0.5);transition:transform 0.1s;">
           Return to Chat
         </button>
@@ -211,16 +242,25 @@ ipcMain.on('take-control', (event, agentId) => {
 ipcMain.on('return-to-chat', () => {
   if (!mainWindow) return;
   if (activeAgentViewId && agentViews.has(activeAgentViewId)) {
-    mainWindow.contentView.removeChildView(agentViews.get(activeAgentViewId)!);
+    const activeView = agentViews.get(activeAgentViewId);
+    if (activeView) {
+      try {
+        mainWindow.contentView.removeChildView(activeView);
+        // Re-add in background so it keeps rendering
+        mainWindow.contentView.addChildView(activeView, 0);
+      } catch {}
+    }
   }
   activeAgentViewId = null;
   
   if (returnOverlayView) {
-    mainWindow.contentView.removeChildView(returnOverlayView);
+    try { mainWindow.contentView.removeChildView(returnOverlayView); } catch {}
     returnOverlayView = null;
   }
   
-  if (reactView) mainWindow.contentView.addChildView(reactView);
+  if (reactView) {
+    try { mainWindow.contentView.addChildView(reactView); } catch {}
+  }
 });
 
 // Generic internal CDP dispatcher for WebContentsView targets

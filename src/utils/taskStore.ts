@@ -155,30 +155,32 @@ export const taskStore = {
     return task;
   },
 
-  update(chatId: string, id: string, updates: Partial<TaskNode>) {
+  update(chatId: string, id: string, updates: Partial<TaskNode>): TaskNode | null {
     const list = tasksByChat.get(chatId);
-    if (!list) return;
+    if (!list) return null;
     const i = list.findIndex(t => t.id === id);
-    if (i < 0) return;
+    if (i < 0) return null;
     list[i] = { ...list[i], ...updates, updatedAt: Date.now() };
     if (updates.status === 'done' || updates.status === 'error') {
       list[i].completedAt = list[i].completedAt || Date.now();
     }
     queueSave(chatId);
     emit(chatId);
+    return list[i];
   },
 
-  updateByAgent(chatId: string, agentId: string, updates: Partial<TaskNode>) {
+  updateByAgent(chatId: string, agentId: string, updates: Partial<TaskNode>): TaskNode | null {
     const list = tasksByChat.get(chatId);
-    if (!list) return;
+    if (!list) return null;
     const i = list.findIndex(t => t.agentId === agentId);
-    if (i < 0) return;
+    if (i < 0) return null;
     list[i] = { ...list[i], ...updates, updatedAt: Date.now() };
     if (updates.status === 'done' || updates.status === 'error') {
       list[i].completedAt = list[i].completedAt || Date.now();
     }
     queueSave(chatId);
     emit(chatId);
+    return list[i];
   },
 
   // User path: Clear all for a chat (RightSidebar button). LLM never calls this.

@@ -22,6 +22,7 @@ import { agentBrowserStore } from '../utils/agentBrowserStore';
 import { terminateBrowserSession } from '../utils/browserTools';
 import { transcriptStore } from '../utils/transcriptStore';
 import { userPromptStore } from '../utils/userPromptStore';
+import { browserPreviewStore } from '../utils/browserPreviewStore';
 
 const MarkdownComponents: any = {
   p: ({node, ...props}: any) => <p className="mb-2 last:mb-0" {...props} />,
@@ -1106,7 +1107,10 @@ const ChatArea = ({ onToggleSettings }: { onToggleSettings?: () => void }) => {
           const tcObj = roundToolCalls[i];
           tcObj.status = er.error ? 'error' : 'completed';
           tcObj.result = er.result;
-          if (er.imageDataUrl) tcObj.image = er.imageDataUrl;
+          if (er.imageDataUrl) {
+            tcObj.image = er.imageDataUrl;
+            browserPreviewStore.addImage(homeChatIdRef.current || 'default', er.imageDataUrl);
+          }
         });
 
         setMessages(prev => {

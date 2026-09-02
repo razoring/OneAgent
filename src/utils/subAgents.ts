@@ -213,6 +213,8 @@ const runSubAgent = async (agent: SubAgentState, host: SubAgentHost): Promise<vo
       spawnAgent: () => '',
       getAgents: () => [],
       waitForAgents: async () => [],
+      chatId: host.chatId,
+      agentId: agent.id,
       signal: controller.signal
     };
 

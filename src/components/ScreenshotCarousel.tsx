@@ -6,10 +6,17 @@ export default function ScreenshotCarousel({ agentId, chatId }: { agentId: strin
   const [currentIndex, setCurrentIndex] = useState(0);
 
   useEffect(() => {
-    setImages(browserPreviewStore.getImages(agentId));
-    const unsub = browserPreviewStore.subscribe(() => {
-      setImages(browserPreviewStore.getImages(agentId));
-    });
+    const updateImages = () => {
+      const latest = browserPreviewStore.getImages(agentId);
+      setImages(prev => {
+        if (prev.length === latest.length && prev.every((img, i) => img === latest[i])) {
+          return prev;
+        }
+        return latest;
+      });
+    };
+    updateImages();
+    const unsub = browserPreviewStore.subscribe(updateImages);
     return () => { unsub(); };
   }, [agentId]);
 

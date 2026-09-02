@@ -186,20 +186,21 @@ const TasksSection = ({ open }: { open: boolean }) => {
   useEffect(() => {
     const unsubActive = chatStore.subscribeActive((id) => {
       setActiveChatId(id);
-      if (id) {
-        setTasks(taskStore.listAllForChat(id));
-      } else {
-        setTasks([]);
-      }
+      setTasks(id ? taskStore.listAllForChat(id) : []);
     });
     return () => unsubActive();
   }, []);
 
   useEffect(() => {
     if (!activeChatId) return;
-    const unsub = taskStore.subscribe(activeChatId, setTasks);
-    // Hydrate if store empty but disk has tasks (chatStore hydrate happens on chat load; ensure we pick up)
-    if (tasks.length === 0) setTasks(taskStore.listAllForChat(activeChatId));
+    const unsub = taskStore.subscribe(activeChatId, (newTasks) => {
+      setTasks(prev => {
+        if (prev.length === newTasks.length && prev.every((t, i) => t.id === newTasks[i].id && t.status === newTasks[i].status && t.updatedAt === newTasks[i].updatedAt)) {
+          return prev;
+        }
+        return newTasks;
+      });
+    });
     return () => unsub();
   }, [activeChatId]);
 

@@ -139,8 +139,15 @@ const formatOutput = (result?: string): string => {
           `${a.label || a.id} [${a.status}]${a.steps ? ` (${a.steps} tool calls)` : ''}${a.result ? `\n→ ${String(a.result).slice(0, 400)}` : ''}${a.error ? `\n→ Error: ${a.error}` : ''}`
         ).join('\n\n');
       }
-      if (parsed.agent_id) {
-        return `${parsed.agent_id} — ${parsed.status || 'spawned'}${parsed.note ? `\n${parsed.note}` : ''}`;
+      if (Array.isArray(parsed.states)) {
+        const note = parsed.note ? `\n${parsed.note}` : '';
+        return parsed.states.map((a: any) =>
+          `${a.label || a.id} [${a.status}]${a.steps ? ` (${a.steps} tool calls)` : ''}${a.result ? `\n→ ${String(a.result).slice(0, 400)}` : ''}${a.error ? `\n→ Error: ${a.error}` : ''}`
+        ).join('\n\n') + note;
+      }
+      if (parsed.agent_id || parsed.agentId) {
+        const id = parsed.agentId || parsed.agent_id;
+        return `${id} — ${parsed.status || 'spawned'}${parsed.note ? `\n${parsed.note}` : ''}`;
       }
       // Model listing
       if (Array.isArray(parsed.providers)) {
@@ -221,14 +228,12 @@ const ToolCallBlock: React.FC<ToolCallBlockProps> = ({ toolName, args, status, r
         </div>
       </div>
 
-      {/* Screenshot preview — visible only while the block is expanded */}
-      {expanded && isScreenshotTool && status === 'completed' && imageDataUrl && (
+      {/* Screenshot carousel preview — visible while the block is expanded */}
+      {expanded && isScreenshotTool && status === 'completed' && (
         <div className="px-3 pb-3 pt-0.5">
-          <img
-            src={imageDataUrl}
-            alt={`${label} capture`}
-            className="w-full rounded-lg border border-white/10 bg-black/20"
-          />
+          <div className="w-full h-[360px] flex flex-col rounded-lg overflow-hidden border border-white/10 bg-black/20">
+            <ScreenshotCarousel agentId={args?.agentId || 'default'} chatId={chatStore.getActiveId() || 'home'} />
+          </div>
         </div>
       )}
 
@@ -255,10 +260,11 @@ const ToolCallBlock: React.FC<ToolCallBlockProps> = ({ toolName, args, status, r
           {toolName === 'spawn_agent' && status === 'completed' && result && (() => {
             try {
               const parsed = JSON.parse(result);
-              if (parsed.agentId) {
+              const aid = parsed.agentId || parsed.agent_id;
+              if (aid) {
                 return (
                   <div className="w-full h-[400px] flex flex-col border-t border-white/5">
-                    <ScreenshotCarousel agentId={parsed.agentId} chatId={chatStore.getActiveId()!} />
+                    <ScreenshotCarousel agentId={aid} chatId={chatStore.getActiveId()!} />
                   </div>
                 );
               }
