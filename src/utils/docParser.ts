@@ -111,22 +111,25 @@ export function extractThinkingAndContent(raw: string): ParsedThinkingResult {
   let content = raw;
   let isThinking = false;
 
-  // 1. Extract ALL thinking blocks. Models occasionally emit more than one
-  //    (e.g. re-open <think> after answering); any block left unextracted
-  //    would leak raw reasoning into the visible response.
-  while (true) {
-    const thinkOpenIndex = content.indexOf('<think>');
-    if (thinkOpenIndex === -1) break;
-    const thinkCloseIndex = content.indexOf('</think>', thinkOpenIndex);
-    if (thinkCloseIndex === -1) {
-      // Unclosed block: everything up to <think> is content, the rest is thinking.
-      thinking = [thinking, content.slice(thinkOpenIndex + 7).trim()].filter(Boolean).join('\n\n');
-      content = content.slice(0, thinkOpenIndex).trim();
-      isThinking = true;
-      break;
+  // 1. Extract ALL thinking blocks (<think>, <reasoning_digest>, <reasoning>).
+  const thinkTags = ['think', 'reasoning_digest', 'reasoning'];
+  for (const tag of thinkTags) {
+    const openTag = `<${tag}>`;
+    const closeTag = `</${tag}>`;
+    while (true) {
+      const thinkOpenIndex = content.indexOf(openTag);
+      if (thinkOpenIndex === -1) break;
+      const thinkCloseIndex = content.indexOf(closeTag, thinkOpenIndex);
+      if (thinkCloseIndex === -1) {
+        // Unclosed block: everything up to openTag is content, the rest is thinking.
+        thinking = [thinking, content.slice(thinkOpenIndex + openTag.length).trim()].filter(Boolean).join('\n\n');
+        content = content.slice(0, thinkOpenIndex).trim();
+        isThinking = true;
+        break;
+      }
+      thinking = [thinking, content.slice(thinkOpenIndex + openTag.length, thinkCloseIndex).trim()].filter(Boolean).join('\n\n');
+      content = (content.slice(0, thinkOpenIndex) + '\n\n' + content.slice(thinkCloseIndex + closeTag.length)).trim();
     }
-    thinking = [thinking, content.slice(thinkOpenIndex + 7, thinkCloseIndex).trim()].filter(Boolean).join('\n\n');
-    content = (content.slice(0, thinkOpenIndex) + '\n\n' + content.slice(thinkCloseIndex + 8)).trim();
   }
 
   // 2. Extract Tool Calls

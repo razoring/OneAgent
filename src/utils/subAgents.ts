@@ -229,7 +229,17 @@ const runSubAgent = async (agent: SubAgentState, host: SubAgentHost): Promise<vo
     if (agent.tools === 'browser' && !agent.params?.maxOutputLength) {
       mergedSettings.maxOutputLength = Math.max(mergedSettings.maxOutputLength || 4096, 8192);
     }
-    const toolDefs = getSystemTools('subagent').filter(t => TOOL_PRESETS[agent.tools].has(t.function.name));
+
+    const COMPACT_BROWSER_TOOLS = new Set([
+      'browser_navigate', 'browser_snapshot', 'browser_click', 'browser_type',
+      'browser_scroll', 'browser_wait_for', 'browser_terminate'
+    ]);
+
+    const isSmallModel = /0\.8b|1b|2b|3b|4b|mini|small|gemma/i.test(model.id.toLowerCase());
+    let toolDefs = getSystemTools('subagent').filter(t => TOOL_PRESETS[agent.tools].has(t.function.name));
+    if (isSmallModel && agent.tools === 'browser') {
+      toolDefs = toolDefs.filter(t => COMPACT_BROWSER_TOOLS.has(t.function.name));
+    }
 
     const messages: any[] = [
       { role: 'system', content: subAgentPrompt(agent.tools) },
@@ -249,13 +259,10 @@ const runSubAgent = async (agent: SubAgentState, host: SubAgentHost): Promise<vo
     };
 
     let finalContent = '';
-    // Auto-recovery: nudge models that stop after thinking without acting or
-    // get cut off mid-generation by max_tokens, instead of ending the task.
     let autoContinues = 0;
-    // Function-scoped so the budget-exhaustion check below can read it: it
-    // only equals MAX_AGENT_ROUNDS if the loop ran out without breaking early.
     let round = 0;
-    for (; round < MAX_AGENT_ROUNDS; round++) {
+    const maxRounds = isSmallModel ? 6 : MAX_AGENT_ROUNDS;
+    for (; round < maxRounds; round++) {
       if (controller.signal.aborted) throw new Error('Aborted by user');
 
       const res = await generateChatStream(model, messages, () => {}, controller.signal, mergedSettings, toolDefs);
@@ -344,7 +351,7 @@ const runSubAgent = async (agent: SubAgentState, host: SubAgentHost): Promise<vo
 
     // Tool budget exhausted: one final tools-free turn so the sub-agent
     // reports its findings instead of ending on a bare tool result.
-    if (round >= MAX_AGENT_ROUNDS && !controller.signal.aborted) {
+    if (round >= maxRounds && !controller.signal.aborted) {
       messages.push({
         role: 'user',
         content: '[System notice] Tool-call budget reached — no further tool calls will execute. Report your findings and the task outcome now, concisely.'

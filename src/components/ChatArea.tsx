@@ -955,9 +955,11 @@ const ChatArea = ({ onToggleSettings }: { onToggleSettings?: () => void }) => {
               // Live chunk for the in-flight round; completed rounds stay frozen.
               const liveParts = [...roundThinkingParts];
               if (update.thinking) liveParts[roundThinkingParts.length] = update.thinking;
+              const rawFull = accumulatedContent ? (update.content ? `${accumulatedContent}\n\n${update.content}` : accumulatedContent) : update.content;
+              const cleanFull = rawFull.replace(/<reasoning_digest>[\s\S]*?<\/reasoning_digest>/gi, '').replace(/<reasoning>[\s\S]*?<\/reasoning>/gi, '').replace(/<think>[\s\S]*?<\/think>/gi, '').trim();
               newMsgs[targetIdx] = {
                 ...newMsgs[targetIdx],
-                content: accumulatedContent ? (update.content ? `${accumulatedContent}\n\n${update.content}` : accumulatedContent) : update.content,
+                content: cleanFull,
                 thinking: accumulatedThinking ? (update.thinking ? `${accumulatedThinking}\n\n${update.thinking}` : accumulatedThinking) : update.thinking,
                 thinkingParts: liveParts.length > 0 ? liveParts : undefined,
                 isGenerating: true,
