@@ -298,7 +298,7 @@ export const cdpObserve = async (agentId?: string | null): Promise<{ image: stri
 
 export const cdpFillForm = async (agentId: string | null | undefined, data: Record<string, string>): Promise<string> => {
   const act = agentId !== undefined ? agentId : null;
-  const { target } = await getTarget(act);
+  await getTarget(act);
   const res = [];
   for (const [key, value] of Object.entries(data)) {
     const id = Number(key);
@@ -334,13 +334,13 @@ export const cdpFileUpload = async (agentId: string | null | undefined, id: numb
   return `Uploaded ${filePaths.length} files to element ${id}`;
 };
 
-export const cdpConsoleMessages = async (agentId: string | null | undefined): Promise<string> => {
+export const cdpConsoleMessages = async (_agentId: string | null | undefined): Promise<string> => {
   // Console message collection requires persistent listening which isn't easy here,
   // we'll fetch the stored logs if any, or just return an empty array for now.
   return "[]"; 
 };
 
-export const cdpNetworkRequests = async (agentId: string | null | undefined): Promise<string> => {
+export const cdpNetworkRequests = async (_agentId: string | null | undefined): Promise<string> => {
   // Same for network requests.
   return "[]"; 
 };
@@ -351,3 +351,54 @@ export const cdpHandleDialog = async (agentId: string | null | undefined, accept
   await cdpCmd(target.id, 'Page.handleJavaScriptDialog', { accept, promptText });
   return `Dialog handled: ${accept ? 'accepted' : 'dismissed'}`;
 };
+
+export const cdpSnapshot = async (agentId?: string | null, options: { visual_grounding?: boolean; boxes?: boolean } = {}): Promise<any> => {
+  const act = agentId !== undefined ? agentId : null;
+  const { target } = await getTarget(act);
+  
+  // 1. Fetch Spatial HUD
+  const meta: any = await cdpCmd(target.id, 'Runtime.evaluate', {
+    expression: `(()=>{const d=document.scrollingElement||document.documentElement; return {scrollX:Math.round(window.scrollX), scrollY:Math.round(window.scrollY), maxX:Math.round(d.scrollWidth-d.clientWidth), maxY:Math.round(d.scrollHeight-d.clientHeight), viewport:{width:window.innerWidth,height:window.innerHeight}, atTop: window.scrollY<=2, atBottom: (d.scrollTop+d.clientHeight)>=d.scrollHeight-2, url: location.href, title: document.title}})()`,
+    returnByValue: true
+  }).then((r: any) => r?.result?.value ?? r?.value ?? {}).catch(() => ({}));
+
+  const spatial = {
+    url: meta.url || '',
+    title: meta.title || '',
+    viewport: `${meta.viewport?.width || 1280}x${meta.viewport?.height || 800}`,
+    scroll_y: meta.scrollY || 0,
+    max_scroll_y: meta.maxY || 0,
+    scroll_percent: meta.maxY > 0 ? `${Math.round(((meta.scrollY || 0) / meta.maxY) * 100)}%` : '100%',
+    at_top: !!meta.atTop,
+    at_bottom: !!meta.atBottom,
+    more_content_below: !meta.atBottom && (meta.maxY > meta.scrollY)
+  };
+
+  // 2. Fetch Accessibility / Interactive Elements
+  let markers: any[] = [];
+  let image: string | undefined = undefined;
+
+  if (options.visual_grounding) {
+    const capRes = await cdpCaptureWithSoM(act);
+    image = capRes.image;
+    markers = capRes.markers;
+  } else {
+    try { markers = await cdpInjectSoM(act); } catch {}
+  }
+
+  const dom = await cdpGetDom(act);
+
+  return {
+    spatial,
+    elements: markers.map(m => ({
+      target: `som:${m.id}`,
+      id: m.id,
+      tag: m.tag,
+      text: m.text,
+      ...(options.boxes ? { box: `[box=${m.rect.left},${m.rect.top},${m.rect.width},${m.rect.height}]` } : {})
+    })),
+    dom,
+    ...(image ? { image } : {})
+  };
+};
+

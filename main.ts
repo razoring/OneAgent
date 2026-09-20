@@ -243,6 +243,38 @@ ipcMain.handle('return-to-chat', async () => {
   activeAgentViewId = null;
   return { success: true };
 });
+
+ipcMain.handle('browser-open-devtools', async (_e, { agentId, tabId }: { agentId?: string; tabId?: string } = {}) => {
+  const id = agentId || browserShared.activeBrowserId || '__standalone__';
+  const b = browserShared.get(id);
+  if (!b) return { success: false, error: 'Browser instance not found' };
+  const ok = b.openDevTools(tabId);
+  return { success: ok };
+});
+
+ipcMain.handle('browser-dock-view', async (_e, { agentId, bounds }: { agentId?: string; bounds?: any } = {}) => {
+  if (!mainWindow) return { success: false };
+  const id = agentId || 'default';
+  const b = browserShared.getOrCreate(id);
+  browserShared.activeBrowserId = id;
+  activeAgentViewId = id;
+  b.show();
+  if (bounds) b.updateBounds(bounds);
+  return { success: true };
+});
+
+ipcMain.handle('browser-undock-view', async (_e, { agentId }: { agentId?: string } = {}) => {
+  if (!mainWindow) return { success: false };
+  const id = agentId || browserShared.activeBrowserId;
+  if (id) {
+    const b = browserShared.get(id);
+    if (b) b.hide();
+  }
+  if (browserShared.activeBrowserId === id) browserShared.activeBrowserId = null;
+  if (activeAgentViewId === id) activeAgentViewId = null;
+  return { success: true };
+});
+
 ipcMain.handle('browser-update-bounds', (event, bounds) => {
   // Unified — single Browser core, per-instance bounds stored in each Browser
   const activeId = browserShared.activeBrowserId || activeAgentViewId || '__standalone__';

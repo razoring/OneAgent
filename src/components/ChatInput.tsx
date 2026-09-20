@@ -16,18 +16,20 @@ const PROVIDER_ICONS: Record<string, string> = {
   anthropic: 'https://www.anthropic.com/favicon.ico'
 };
 
-import { LLMModel, fetchModels, ModelSettings, getModelSettings, primeModel, flushModel, getOrchestratorModel, setOrchestratorModel, getSubAgentModel, setSubAgentModel, isVisionModel } from '../utils/llm';
+import { LLMModel, fetchModels, ModelSettings, getModelSettings, primeModel, flushModel, getOrchestratorModel, setOrchestratorModel, getSubAgentModel, setSubAgentModel, isVisionModel, getVramReport, estimateModelVram, VramReport } from '../utils/llm';
 import DEFAULT_SYSTEM_PROMPT from '../utils/systemPrompt.md?raw';
 import { modelParamsStore } from '../utils/modelParamsStore';
 import InlineUserPrompt from './ApprovalCard';
 import { userPromptStore } from '../utils/userPromptStore';
 
-const ModelItem = ({ model, isSelected, onClick, subLabel }: { model: any, isSelected: boolean, onClick: () => void, subLabel?: string }) => (
+const ModelItem = ({ model, isSelected, fitsVram = true, onClick, subLabel }: { model: any, isSelected: boolean, fitsVram?: boolean, onClick: () => void, subLabel?: string }) => (
   <button
     onClick={onClick}
     className={`menu-item justify-between ${isSelected
       ? 'bg-white/10 text-white font-medium'
-      : 'text-textSecondary hover:bg-white/5 hover:text-white'
+      : fitsVram
+      ? 'text-textSecondary hover:bg-white/5 hover:text-white'
+      : 'text-textSecondary/50 hover:bg-white/5 hover:text-white opacity-40 hover:opacity-100'
       }`}
   >
     <span className="flex items-center gap-2 min-w-0">
@@ -194,6 +196,8 @@ const ChatInput: React.FC<ChatInputProps> = ({ onSend, onStop, disabled, editing
   // Backward compat: selectedModel mirrors orchestrator
   const [selectedModel, setSelectedModel] = useState<LLMModel | null>(null);
   const [isLoadingModels, setIsLoadingModels] = useState(false);
+  const [activeTab, setActiveTab] = useState<'orchestrator' | 'subagents'>('orchestrator');
+  const [vramReport, setVramReport] = useState<VramReport | null>(null);
 
   const [isAttachMenuOpen, setIsAttachMenuOpen] = useState(false);
 
@@ -384,10 +388,92 @@ const ChatInput: React.FC<ChatInputProps> = ({ onSend, onStop, disabled, editing
     };
   }, []);
 
+  const updateVramReport = useCallback(async () => {
+    try {
+      const report = await getVramReport();
+      setVramReport(report);
+    } catch {}
+  }, []);
+
+  useEffect(() => {
+    if (isModelMenuOpen) {
+      updateVramReport();
+    }
+  }, [isModelMenuOpen, updateVramReport]);
+
+  // check if model fits in vram given the other tab model
+  const checkModelFitsVram = useCallback((candidate: LLMModel, otherModel: LLMModel | null, report: VramReport | null): boolean => {
+    if (!report || !report.totalBytes) return true;
+    const isCloud = (p: string) => ['openai', 'gemini', 'openrouter', 'groq', 'together', 'anthropic'].includes(p);
+    if (isCloud(candidate.provider)) return true;
+
+    const candidateVram = estimateModelVram(candidate.id, report) ?? 0;
+    if (candidateVram > report.totalBytes) return false;
+
+    let otherVram = 0;
+    if (otherModel && !isCloud(otherModel.provider)) {
+      if (otherModel.id.toLowerCase() === candidate.id.toLowerCase() && otherModel.provider === candidate.provider) {
+        otherVram = 0;
+      } else {
+        otherVram = estimateModelVram(otherModel.id, report) ?? 0;
+      }
+    }
+
+    return (candidateVram + otherVram) <= report.totalBytes;
+  }, []);
+
+  const currentOtherModel = activeTab === 'orchestrator' ? subAgentModel : orchestratorModel;
+
+  const displayModels = useMemo(() => {
+    return [...allModels].sort((a, b) => {
+      const aFits = checkModelFitsVram(a, currentOtherModel, vramReport);
+      const bFits = checkModelFitsVram(b, currentOtherModel, vramReport);
+      if (aFits === bFits) return 0;
+      return aFits ? -1 : 1;
+    });
+  }, [allModels, currentOtherModel, vramReport, checkModelFitsVram]);
+
+  const handleModelClick = (model: LLMModel) => {
+    const isOrch = activeTab === 'orchestrator';
+    const otherModel = isOrch ? subAgentModel : orchestratorModel;
+
+    if (isOrch) {
+      const prev = orchestratorModel;
+      const isSwitching = !!prev && (prev.id !== model.id || prev.provider !== model.provider);
+      setOrchestratorModelState(model);
+      setOrchestratorModel(model);
+      setSelectedModel(model);
+      if (!disabled) {
+        if (isSwitching && prev) flushModel(prev);
+        primeModel(model);
+      }
+    } else {
+      setSubAgentModelState(model);
+      setSubAgentModel(model);
+      if (!disabled) primeModel(model);
+    }
+
+    // reset other tab if combined vram capacity is exceeded
+    const fits = checkModelFitsVram(model, otherModel, vramReport);
+    if (!fits) {
+      if (isOrch) {
+        setSubAgentModelState(model);
+        setSubAgentModel(model);
+      } else {
+        setOrchestratorModelState(model);
+        setOrchestratorModel(model);
+        setSelectedModel(model);
+      }
+    }
+
+    // move user to next tab
+    setActiveTab(isOrch ? 'subagents' : 'orchestrator');
+  };
+
   const loadModels = async () => {
     setIsLoadingModels(true);
     try {
-      const models = await fetchModels();
+      const [models] = await Promise.all([fetchModels(), updateVramReport()]);
       setAllModels(models);
       if (models.length > 0) {
         const pick = (prev: LLMModel | null) => prev && models.some(m => m.id === prev.id && m.provider === prev.provider) ? prev : models[0];
@@ -993,9 +1079,9 @@ const ChatInput: React.FC<ChatInputProps> = ({ onSend, onStop, disabled, editing
           {/* Model Selector Drop-up — Orchestrator + Subagent */}
           <div className="relative">
             {isModelMenuOpen && (
-              <div className="absolute bottom-full left-0 mb-3 w-[340px] menu-panel rounded-[24px] p-2 z-50 flex flex-col max-h-[420px] overflow-hidden">
+              <div className="absolute bottom-full left-0 mb-3 w-[340px] menu-panel rounded-[24px] z-50 flex flex-col max-h-[420px] overflow-hidden">
                 <div className="flex items-center justify-between px-3 pt-3 pb-2 shrink-0">
-                  <span className="menu-header">Models</span>
+                  <span className="menu-header pl-[44px]">Models</span>
                   <button
                     onClick={loadModels}
                     disabled={isLoadingModels}
@@ -1006,64 +1092,51 @@ const ChatInput: React.FC<ChatInputProps> = ({ onSend, onStop, disabled, editing
                   </button>
                 </div>
                 {isLoadingModels ? (
-                  <div className="px-3 py-2 text-sm text-textSecondary">Loading...</div>
+                  <div className="px-3 py-2 text-sm text-textSecondary flex-1">Loading...</div>
                 ) : allModels.length > 0 ? (
-                  <div className="flex flex-col gap-3 overflow-y-auto px-1 pb-1" style={{ scrollbarWidth: 'thin' }}>
-                    {/* Orchestrator */}
-                    <div>
-                      <div className="px-3 py-1 text-[10px] font-semibold tracking-widest uppercase text-textSecondary">Orchestrator — main chat</div>
-                      <div className="flex flex-col">
-                        {allModels.map((model) => {
-                          const sel = orchestratorModel?.id === model.id && orchestratorModel?.provider === model.provider;
-                          return (
-                            <ModelItem
-                              key={`orch-${model.provider}-${model.id}`}
-                              model={model}
-                              isSelected={!!sel}
-                              subLabel={model.provider}
-                              onClick={() => {
-                                const prev = orchestratorModel;
-                                const isSwitching = !!prev && (prev.id !== model.id || prev.provider !== model.provider);
-                                setOrchestratorModelState(model);
-                                setOrchestratorModel(model);
-                                setSelectedModel(model);
-                                // keep selection highlighted without closing menu immediately for compare
-                                if (!disabled) {
-                                  if (isSwitching && prev) flushModel(prev);
-                                  primeModel(model);
-                                }
-                              }}
-                            />
-                          );
-                        })}
-                      </div>
-                    </div>
-                    {/* Subagent */}
-                    <div className="border-t border-white/5 pt-3">
-                      <div className="px-3 py-1 text-[10px] font-semibold tracking-widest uppercase text-textSecondary">Subagents — parallel workers</div>
-                      <div className="flex flex-col">
-                        {allModels.map((model) => {
-                          const sel = subAgentModel?.id === model.id && subAgentModel?.provider === model.provider;
-                          return (
-                            <ModelItem
-                              key={`sub-${model.provider}-${model.id}`}
-                              model={model}
-                              isSelected={!!sel}
-                              subLabel={model.provider}
-                              onClick={() => {
-                                setSubAgentModelState(model);
-                                setSubAgentModel(model);
-                                if (!disabled) primeModel(model);
-                              }}
-                            />
-                          );
-                        })}
-                      </div>
-                    </div>
+                  <div className="flex flex-col gap-1 flex-1 overflow-y-auto px-1 pb-1" style={{ scrollbarWidth: 'thin' }}>
+                    {displayModels.map((model) => {
+                      const activeModel = activeTab === 'orchestrator' ? orchestratorModel : subAgentModel;
+                      const isSel = activeModel?.id === model.id && activeModel?.provider === model.provider;
+                      const fits = checkModelFitsVram(model, currentOtherModel, vramReport);
+                      return (
+                        <ModelItem
+                          key={`${activeTab}-${model.provider}-${model.id}`}
+                          model={model}
+                          isSelected={!!isSel}
+                          fitsVram={fits}
+                          subLabel={model.provider}
+                          onClick={() => handleModelClick(model)}
+                        />
+                      );
+                    })}
                   </div>
                 ) : (
-                  <div className="px-3 py-2 text-sm text-textSecondary">No models found</div>
+                  <div className="px-3 py-2 text-sm text-textSecondary flex-1">No models found</div>
                 )}
+                {/* Bottom tab buttons */}
+                <div className="flex items-center gap-1 border-t border-white/5 p-1.5 shrink-0 bg-black/20">
+                  <button
+                    onClick={() => setActiveTab('orchestrator')}
+                    className={`flex-1 py-1.5 rounded-xl transition-all menu-header text-center ${
+                      activeTab === 'orchestrator'
+                        ? 'bg-white/10 text-white font-semibold shadow-sm'
+                        : 'text-textSecondary hover:bg-white/5 hover:text-white'
+                    }`}
+                  >
+                    ORCHESTRATOR
+                  </button>
+                  <button
+                    onClick={() => setActiveTab('subagents')}
+                    className={`flex-1 py-1.5 rounded-xl transition-all menu-header text-center ${
+                      activeTab === 'subagents'
+                        ? 'bg-white/10 text-white font-semibold shadow-sm'
+                        : 'text-textSecondary hover:bg-white/5 hover:text-white'
+                    }`}
+                  >
+                    SUBAGENTS
+                  </button>
+                </div>
               </div>
             )}
 

@@ -151,6 +151,7 @@ export class Browser {
     view = new WebContentsView({
       webPreferences: { session: this.shared.getSession(), contextIsolation: true, nodeIntegration: false }
     });
+    try { (view.webContents as any).setBackgroundThrottling?.(false); } catch {}
 
     view.webContents.on('before-input-event', (_e: any, input: any) => {
       if (input.type === 'keyDown' && input.key === 'F12') { try { view!.webContents.toggleDevTools(); } catch {} }
@@ -424,6 +425,19 @@ export class Browser {
           try { this.shared.mainWindow.contentView.addChildView(view, 0); } catch {}
         }
       }
+    }
+  }
+
+  openDevTools(tabId?: string) {
+    const tid = tabId || this.activeTabId;
+    if (!tid) return false;
+    const view = this.tabs.get(tid);
+    if (!view || view.webContents.isDestroyed()) return false;
+    try {
+      view.webContents.openDevTools({ mode: 'detach' });
+      return true;
+    } catch {
+      return false;
     }
   }
 

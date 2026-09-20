@@ -217,6 +217,36 @@ const ToolCallBlock: React.FC<ToolCallBlockProps> = ({ toolName, args, status, r
         </div>
 
         <div className="flex items-center gap-2 shrink-0 ml-2">
+          {toolName.includes('browser') && (
+            <div className="flex items-center gap-1.5 mr-1" onClick={(e) => e.stopPropagation()}>
+              <button
+                onClick={async () => {
+                  try {
+                    await (window as any).electronAPI.takeControl(args?.agentId || 'default');
+                  } catch (e) {
+                    console.error('Take control failed:', e);
+                  }
+                }}
+                className="px-2 py-0.5 text-[10px] font-medium bg-indigo-600/80 hover:bg-indigo-500 text-white rounded transition-colors shadow-sm flex items-center gap-1"
+                title="Dock browser window into UI for live interaction"
+              >
+                <Globe size={11} /> Take Control
+              </button>
+              <button
+                onClick={async () => {
+                  try {
+                    await (window as any).electronAPI.browserOpenDevTools(args?.agentId || 'default');
+                  } catch (e) {
+                    console.error('Open DevTools failed:', e);
+                  }
+                }}
+                className="px-2 py-0.5 text-[10px] font-medium bg-white/10 hover:bg-white/20 text-gray-200 rounded transition-colors"
+                title="Open Chrome DevTools window for this browser session"
+              >
+                DevTools
+              </button>
+            </div>
+          )}
           {status === 'executing' && <Loader2 size={13} className="animate-spin text-accentBright" />}
           {status === 'completed' && <Check size={14} className="text-green-400" />}
           {status === 'error' && <X size={14} className="text-red-400" />}

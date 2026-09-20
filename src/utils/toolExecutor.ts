@@ -268,6 +268,36 @@ const HANDLERS: Record<string, Handler> = {
     }
     return ok(await getSemanticDOM());
   },
+  browser_snapshot: async (args, ctx) => {
+    if (await isCdpMode()) {
+      try {
+        const boxes = !!p(args, 'boxes');
+        const visual_grounding = !!p(args, 'visual_grounding');
+        const snap = await cdpTools.cdpSnapshot((ctx.agentId ?? null), { boxes, visual_grounding });
+        return {
+          result: j({
+            success: true,
+            spatial: snap.spatial,
+            elements: snap.elements,
+            dom: snap.dom,
+            note: 'Accessibility snapshot with target element references.'
+          }),
+          ...(snap.image ? { imageDataUrl: await downscaleDataUrl(snap.image, 1280, 0.92) } : {})
+        };
+      } catch (e: any) {}
+    }
+    const obs = await browserObservePage();
+    return {
+      result: j({
+        success: true,
+        image: 'Annotated browser screenshot attached to this tool response.',
+        elements: obs.markers.length > 0 ? obs.markers : undefined,
+        dom: obs.dom.length > 0 ? obs.dom : undefined,
+        meta: obs.meta && Object.keys(obs.meta).length > 0 ? obs.meta : undefined
+      }),
+      imageDataUrl: await downscaleDataUrl(obs.image, 1280, 0.92)
+    };
+  },
   browser_observe: async (_a, ctx) => {
     if (await isCdpMode()) {
       try {

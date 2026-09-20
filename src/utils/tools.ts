@@ -148,6 +148,11 @@ export const SYSTEM_TOOLS = [
     }, ['accept']),
 
   // ── Embedded browser: observation & internals (instant) ───────────────────
+  fn('browser_snapshot', 'Capture accessibility snapshot of the current page with target element references and spatial scroll HUD. Better than a raw screenshot for LLMs.',
+    {
+      boxes: bool("Include each element's bounding box as [box=x,y,width,height] in the snapshot."),
+      visual_grounding: bool('Set true to generate visual Set-of-Mark markers on a screenshot for image-based element identification.')
+    }),
   fn('browser_observe', 'One-call page observation: screenshot with red numbered Set-of-Mark badges + element list + trimmed DOM text + **viewport/scroll metadata** (`meta` object with scroll position, max scroll, viewport size, atTop/atBottom/atLeft/atRight booleans, scrollPercent). Your default way to look at a page.',
     {}),
   fn('browser_screenshot', 'Screenshot of ONLY the embedded browser viewport, annotated with Set-of-Mark IDs. Use browser_observe instead unless you specifically want pixels only.',

@@ -1,3 +1,5 @@
+fix selection vram summation
+make the browser look better.
 hotmodel swapping with tab (parked)
 auto load model when swapped with estimated TTFT label (parked)
 mcp servers
